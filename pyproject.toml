@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talk2agent"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0", "agent-client-protocol>=0.8.1,<0.9", "python-telegram-bot>=22.7,<23"]
+
+[project.scripts]
+talk2agent = "talk2agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["talk2agent", "talk2agent.*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
