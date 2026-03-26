@@ -3,6 +3,8 @@ import base64
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from acp.helpers import update_agent_message_text
 
 from talk2agent.config import McpServerConfig, NameValueConfig, WorkspaceConfig
@@ -57,6 +59,14 @@ class FakeIncomingMessage:
         voice=None,
         audio=None,
         video=None,
+        sticker=None,
+        location=None,
+        contact=None,
+        venue=None,
+        poll=None,
+        animation=None,
+        video_note=None,
+        dice=None,
         media_group_id=None,
     ):
         self.text = text
@@ -66,6 +76,14 @@ class FakeIncomingMessage:
         self.voice = voice
         self.audio = audio
         self.video = video
+        self.sticker = sticker
+        self.location = location
+        self.contact = contact
+        self.venue = venue
+        self.poll = poll
+        self.animation = animation
+        self.video_note = video_note
+        self.dice = dice
         self.media_group_id = media_group_id
         self.reply_calls = []
         self.reply_markups = []
@@ -559,6 +577,41 @@ def find_inline_button(markup, text):
     raise AssertionError(f"button not found: {text}")
 
 
+def command_names(set_my_commands_call):
+    commands, _scope = set_my_commands_call
+    return [command.command for command in commands]
+
+
+def expected_command_menu(*agent_commands):
+    reserved = {"start", "status", "help", "cancel", "debug_status"}
+    aliased_commands = []
+    for command in agent_commands:
+        aliased_commands.append(f"agent_{command}" if command in reserved else command)
+    return ["start", "status", "help", "cancel", *aliased_commands]
+
+
+def assert_switch_agent_success_notice(text, *, provider, workspace="Default Workspace"):
+    assert (
+        f"Switched agent to {provider} in {workspace}. "
+        "Old bot buttons and pending inputs were cleared."
+    ) in text
+    assert (
+        "Context bundle does not follow an agent switch. "
+        "Last Turn and Last Request stay reusable in this workspace when available."
+    ) in text
+
+
+def assert_switch_workspace_success_notice(text, *, workspace, provider):
+    assert (
+        f"Switched workspace to {workspace} on {provider}. "
+        "Old bot buttons and pending inputs were cleared."
+    ) in text
+    assert (
+        "Workspace-specific context does not follow the switch. "
+        "Rebuild context in the new workspace before you ask."
+    ) in text
+
+
 def make_services(
     session=None,
     *,
@@ -587,6 +640,7 @@ def make_services(
     delete_history_error=None,
     provider_session_pages=None,
     list_provider_sessions_error=None,
+    discover_agent_commands_error=None,
     provider_capabilities=None,
     workspaces=None,
     retired_once_on_peek=False,
@@ -721,6 +775,8 @@ def make_services(
 
     async def discover_agent_commands(timeout_seconds=2.0):
         services.discover_agent_commands_calls.append(timeout_seconds)
+        if discover_agent_commands_error is not None:
+            raise discover_agent_commands_error
         return tuple(session.available_commands)
 
     async def list_provider_sessions(cursor=None):
@@ -815,9 +871,735 @@ def test_handle_text_rejects_unauthorized_user():
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls == ["Unauthorized user."]
+    assert update.message.reply_calls == [
+        "Access denied. Ask the operator to allow your Telegram user ID."
+    ]
     assert store.close_idle_calls == []
     assert store.get_or_create_calls == []
+
+
+def test_handle_start_replies_with_welcome_and_main_menu_without_starting_session():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        BUTTON_CANCEL_OR_STOP,
+        BUTTON_FORK_LAST_TURN,
+        BUTTON_HELP,
+        BUTTON_NEW_SESSION,
+        BUTTON_RETRY_LAST_TURN,
+        TelegramUiState,
+        handle_start,
+    )
+
+    update = FakeUpdate(user_id=123, text="/start")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_start(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert text.startswith("Welcome to Talk2Agent for Codex in Default Workspace.")
+    assert "Workspace ID: default" in text
+    assert "Status: ready. Your first text or attachment will start a session." in text
+    assert "Recommended next step: send text or an attachment, or open workspace tools before you ask." in text
+    assert (
+        "Primary controls right now: send text or an attachment, or open Workspace "
+        "Files/Search/Changes first."
+        in text
+    )
+    assert text.count("Primary controls right now:") == 1
+    assert "Session: none yet. Your first text or attachment will start one." in text
+    assert "Turn: idle" in text
+    assert "Pending input: none" in text
+    assert "Context bundle: empty" in text
+    assert "Start here:" in text
+    assert "Send plain text or an attachment to talk to the current agent." in text
+    assert "Main keyboard priority: New Session and Bot Status first, then Retry / Fork Last Turn." in text
+    assert (
+        "Context prep row: Workspace Search and Context Bundle are the fastest path to a grounded request."
+        in text
+    )
+    assert (
+        "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
+        "/help, and /cancel still work if Telegram hides it."
+        in text
+    )
+    assert "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime." in text
+    keyboard = [[button.text for button in row] for row in update.message.reply_markups[0].keyboard]
+    assert keyboard[0] == [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS]
+    assert keyboard[1] == [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN]
+    assert keyboard[-2] == [BUTTON_HELP, BUTTON_CANCEL_OR_STOP]
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_start_summarizes_existing_session_and_pending_work_without_clearing_state():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        handle_start,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_pending_text_action(123, "workspace_search")
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    assert ui_state.enable_context_bundle_chat(123, "codex", "default") is True
+
+    session = FakeSession(session_id="session-abc", session_title="Ship onboarding")
+    update = FakeUpdate(user_id=123, text="/start")
+    services, store = make_services(provider="codex", session=session)
+
+    run(handle_start(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert "Status: waiting for plain text for Workspace search." in text
+    assert (
+        "Recommended next step: send the plain text for Workspace search, or use /cancel to back out."
+        in text
+    )
+    assert "Session: session-abc" in text
+    assert "Session title: Ship onboarding" in text
+    assert "Model: GPT-5.4 (2 choices)" in text
+    assert "Mode: xhigh (2 choices)" in text
+    assert "Pending input: Workspace search" in text
+    assert "Context bundle: 1 item (bundle chat on)" in text
+    assert ui_state.get_pending_text_action(123) is not None
+    assert ui_state.context_bundle_chat_active(123, "codex", "default") is True
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_start_surfaces_pending_media_group_state_without_starting_session():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_start
+
+    ui_state = TelegramUiState()
+    ui_state.add_media_group_message(
+        123,
+        "group-start",
+        FakeIncomingMessage(photo=[FakePhotoSize(file_unique_id="photo-start-1", payload=b"one")]),
+    )
+    ui_state.add_media_group_message(
+        123,
+        "group-start",
+        FakeIncomingMessage(photo=[FakePhotoSize(file_unique_id="photo-start-2", payload=b"two")]),
+    )
+
+    update = FakeUpdate(user_id=123, text="/start")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_start(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert "Status: collecting 2 attachments from a pending Telegram album." in text
+    assert (
+        "Recommended next step: wait for the attachments to finish collecting, or use /cancel "
+        "or Cancel / Stop to discard them before anything reaches the agent."
+        in text
+    )
+    assert "Pending uploads: 1 attachment group (2 items)" in text
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_start_rejects_unauthorized_user():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_start
+
+    update = FakeUpdate(user_id=999, text="/start")
+    services, store = make_services(allowed_user_ids={123})
+
+    run(handle_start(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls == [
+        "Access denied. Ask the operator to allow your Telegram user ID."
+    ]
+    assert store.peek_calls == []
+    assert store.get_or_create_calls == []
+
+
+def test_handle_help_replies_with_quick_guide_without_starting_session():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_help
+
+    update = FakeUpdate(user_id=123, text="/help")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_help(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert text.startswith("Talk2Agent help for Codex in Default Workspace.")
+    assert "Workspace ID: default" in text
+    assert "Status: ready. Your first text or attachment will start a session." in text
+    assert "Recommended next step: send text or an attachment, or open workspace tools before you ask." in text
+    assert (
+        "Primary controls right now: send text or an attachment, or open Workspace "
+        "Files/Search/Changes first."
+        in text
+    )
+    assert "Session: none yet. Send text or an attachment to start one." in text
+    assert "Turn: idle" in text
+    assert "Pending input: none" in text
+    assert "Context bundle: 0 items" in text
+    assert "Quick guide:" in text
+    assert "1. Send text or an attachment to chat with the current agent." in text
+    assert (
+        "2. Use Workspace Search, Workspace Files/Changes, and Context Bundle when you want to "
+        "prepare context before you ask."
+        in text
+    )
+    assert "3. Use Bot Status or /status to inspect runtime state, stop turns, and recover." in text
+    assert (
+        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent to branch "
+        "or reset your work."
+        in text
+    )
+    assert "Keyboard:" in text
+    assert "Main keyboard priority: New Session and Bot Status first, then Retry / Fork Last Turn." in text
+    assert "/start restores the welcome screen and the full keyboard." in text
+    assert "/status opens Bot Status even when the keyboard is hidden." in text
+    assert "Help or /help reopens this guide without changing the current session." in text
+    assert "Cancel / Stop or /cancel backs out of pending input, stops a running turn, or leaves bundle chat." in text
+    assert (
+        "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
+        "/help, and /cancel still work if Telegram hides it."
+        in text
+    )
+    assert "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime." in text
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_status_opens_runtime_status_without_starting_session():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_status
+
+    update = FakeUpdate(user_id=123, text="/status")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_status(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert text.startswith("Bot status for Codex in Default Workspace")
+    assert "Session: none (will start on first request)" in text
+    assert (
+        "Primary controls right now: send text or an attachment, or open Workspace "
+        "Files/Search/Changes first."
+        in text
+    )
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_text_help_button_opens_guide_without_clearing_pending_input():
+    from talk2agent.bots.telegram_bot import BUTTON_HELP, TelegramUiState, handle_text
+
+    ui_state = TelegramUiState()
+    ui_state.set_pending_text_action(123, "workspace_search")
+    update = FakeUpdate(user_id=123, text=BUTTON_HELP)
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    assert "Talk2Agent help for Codex in Default Workspace." in update.message.reply_calls[0]
+    assert "Pending input: Workspace search" in update.message.reply_calls[0]
+    assert ui_state.get_pending_text_action(123) is not None
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_text_cancel_button_routes_to_cancel_flow():
+    from talk2agent.bots.telegram_bot import BUTTON_CANCEL_OR_STOP, TelegramUiState, handle_text
+
+    ui_state = TelegramUiState()
+    ui_state.set_pending_text_action(123, "workspace_search")
+    update = FakeUpdate(user_id=123, text=BUTTON_CANCEL_OR_STOP)
+    services, store = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    assert update.message.reply_calls == [
+        "Cancelled pending input: Workspace search. Nothing was sent to the agent."
+    ]
+    assert ui_state.get_pending_text_action(123) is None
+    assert store.get_or_create_calls == []
+
+
+def test_handle_text_replies_with_recovery_notice_when_runtime_snapshot_fails_before_turn():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_text
+
+    update = FakeUpdate(user_id=123, text="ship it")
+    services, store = make_services()
+
+    async def broken_snapshot_runtime_state():
+        raise RuntimeError("boom")
+
+    services.snapshot_runtime_state = broken_snapshot_runtime_state
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls == [
+        "Request failed. Try again, use /start, or open Bot Status."
+    ]
+    assert update.message.reply_markups[0] is not None
+    assert store.get_or_create_calls == []
+
+
+def test_handle_text_replies_with_recovery_notice_when_background_turn_snapshot_fails():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_text
+
+    update = FakeUpdate(user_id=123, text="ship it")
+    services, store = make_services()
+    application = FakeAsyncApplication()
+    original_snapshot_runtime_state = services.snapshot_runtime_state
+    snapshot_calls = 0
+
+    async def flaky_snapshot_runtime_state():
+        nonlocal snapshot_calls
+        snapshot_calls += 1
+        if snapshot_calls == 1:
+            return await original_snapshot_runtime_state()
+        raise RuntimeError("boom")
+
+    services.snapshot_runtime_state = flaky_snapshot_runtime_state
+
+    run(handle_text(update, make_context(application=application), services, TelegramUiState()))
+    run(application.wait_for_tasks())
+
+    assert update.message.reply_calls == [
+        "Request failed. Try again, use /start, or open Bot Status."
+    ]
+    assert update.message.reply_markups[0] is not None
+    assert update.message.draft_calls == []
+    assert store.get_or_create_calls == []
+
+
+def test_handle_help_rejects_unauthorized_user():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_help
+
+    update = FakeUpdate(user_id=999, text="/help")
+    services, store = make_services(allowed_user_ids={123})
+
+    run(handle_help(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls == [
+        "Access denied. Ask the operator to allow your Telegram user ID."
+    ]
+    assert store.peek_calls == []
+    assert store.get_or_create_calls == []
+
+
+def test_handle_cancel_clears_pending_input_without_starting_session():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel
+
+    ui_state = TelegramUiState()
+    ui_state.set_pending_text_action(123, "workspace_search")
+    update = FakeUpdate(user_id=123, text="/cancel")
+    services, store = make_services()
+
+    run(handle_cancel(update, None, services, ui_state))
+
+    assert update.message.reply_calls == [
+        "Cancelled pending input: Workspace search. Nothing was sent to the agent."
+    ]
+    assert ui_state.get_pending_text_action(123) is None
+    assert store.get_or_create_calls == []
+
+
+def test_handle_cancel_stops_running_turn():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel, handle_text
+
+    async def scenario():
+        session = BlockingCancelableSession(session_id="session-abc")
+        ui_state = TelegramUiState()
+        services, _ = make_services(provider="codex", session=session)
+        application = FakeAsyncApplication()
+
+        start_update = FakeUpdate(user_id=123, text="Long task")
+        await handle_text(start_update, make_context(application=application), services, ui_state)
+        await session.wait_until_started()
+
+        cancel_update = FakeUpdate(user_id=123, text="/cancel")
+        await handle_cancel(cancel_update, make_context(application=application), services, ui_state)
+
+        assert cancel_update.message.reply_calls == [
+            "Stop requested for the current turn. Open Bot Status to track progress."
+        ]
+        assert session.cancel_turn_calls == 1
+
+        await application.wait_for_tasks()
+
+        assert start_update.message.reply_calls == ["Turn cancelled. Send a new request when ready."]
+        assert ui_state.get_active_turn(123) is None
+
+    run(scenario())
+
+
+def test_handle_cancel_disables_bundle_chat_before_falling_back_to_agent():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _ContextBundleItem, handle_cancel
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    assert ui_state.enable_context_bundle_chat(123, "codex", "default") is True
+
+    update = FakeUpdate(user_id=123, text="/cancel")
+    services, store = make_services(provider="codex")
+
+    run(handle_cancel(update, None, services, ui_state))
+
+    assert update.message.reply_calls == [
+        "Bundle chat disabled. New plain text messages will use the normal session again."
+    ]
+    assert ui_state.context_bundle_chat_active(123, "codex", "default") is False
+    assert store.get_or_create_calls == []
+
+
+def test_handle_cancel_falls_back_to_agent_command_when_nothing_local_to_cancel():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel
+
+    ui_state = TelegramUiState()
+    ui_state.set_agent_command_aliases(123, {"cancel": "model"})
+    update = FakeUpdate(user_id=123, text="/cancel low")
+    services, _ = make_services(provider="codex")
+
+    run(handle_cancel(update, None, services, ui_state))
+
+    assert services.final_session.prompts == ["/model low"]
+    assert update.message.reply_calls == ["hello world"]
+
+
+def test_handle_cancel_reports_when_nothing_is_cancelable():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel
+
+    update = FakeUpdate(user_id=123, text="/cancel")
+    services, store = make_services()
+
+    run(handle_cancel(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls == [
+        "Nothing to cancel. Send text, use /start to restore the main keyboard, or open Bot Status."
+    ]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_cancel_discards_pending_media_group_before_it_reaches_agent():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment, handle_cancel
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.05)
+        services, _ = make_services()
+        first_message = FakeIncomingMessage(
+            caption="Compare these screenshots",
+            photo=[FakePhotoSize(file_unique_id="photo-cancel-1", payload=b"one")],
+            media_group_id="group-cancel",
+        )
+        second_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(file_unique_id="photo-cancel-2", payload=b"two")],
+            media_group_id="group-cancel",
+        )
+
+        await handle_attachment(FakeUpdate(user_id=123, message=first_message), None, services, ui_state)
+        await handle_attachment(FakeUpdate(user_id=123, message=second_message), None, services, ui_state)
+
+        cancel_update = FakeUpdate(user_id=123, text="/cancel")
+        await handle_cancel(cancel_update, None, services, ui_state)
+        await asyncio.sleep(0.07)
+        return services, ui_state, cancel_update, first_message, second_message
+
+    services, ui_state, cancel_update, first_message, second_message = asyncio.run(scenario())
+
+    assert cancel_update.message.reply_calls == [
+        "Discarded pending attachment group (2 items). Nothing was sent to the agent."
+    ]
+    assert services.final_session.prompt_items == []
+    assert ui_state.pending_media_group_stats(123) is None
+    assert first_message.reply_calls == []
+    assert second_message.reply_calls == []
+
+
+def test_handle_cancel_clears_pending_input_and_pending_media_group_together():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment, handle_cancel
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.05)
+        ui_state.set_pending_text_action(123, "rename_history", session_id="session-1", page=0)
+        services, _ = make_services()
+        first_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(file_unique_id="photo-cancel-both-1", payload=b"one")],
+            media_group_id="group-cancel-both",
+        )
+        second_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(file_unique_id="photo-cancel-both-2", payload=b"two")],
+            media_group_id="group-cancel-both",
+        )
+
+        await handle_attachment(FakeUpdate(user_id=123, message=first_message), None, services, ui_state)
+        await handle_attachment(FakeUpdate(user_id=123, message=second_message), None, services, ui_state)
+
+        cancel_update = FakeUpdate(user_id=123, text="/cancel")
+        await handle_cancel(cancel_update, None, services, ui_state)
+        await asyncio.sleep(0.07)
+        return services, ui_state, cancel_update
+
+    services, ui_state, cancel_update = asyncio.run(scenario())
+
+    assert cancel_update.message.reply_calls == [
+        "Cancelled pending input: Rename session title (session-1). "
+        "Discarded pending attachment group (2 items). Nothing was sent to the agent."
+    ]
+    assert ui_state.get_pending_text_action(123) is None
+    assert ui_state.pending_media_group_stats(123) is None
+    assert services.final_session.prompt_items == []
+
+
+def test_handle_unsupported_message_replies_with_supported_inputs_and_recovery_guidance():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_unsupported_message
+
+    message = FakeIncomingMessage(sticker=SimpleNamespace(file_unique_id="sticker-1"))
+    update = FakeUpdate(user_id=123, message=message)
+    services, store = make_services()
+
+    run(handle_unsupported_message(update, None, services, TelegramUiState()))
+
+    assert message.reply_calls == [
+        "Stickers aren't supported in this chat yet. Send plain text, photo, document, audio, "
+        "or video instead, use /help for supported flows, or use /start to reopen the main "
+        "keyboard."
+    ]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_unsupported_message_mentions_bundle_chat_when_active():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        handle_unsupported_message,
+    )
+
+    message = FakeIncomingMessage(sticker=SimpleNamespace(file_unique_id="sticker-1"))
+    update = FakeUpdate(user_id=123, message=message)
+    services, _ = make_services(provider="codex")
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(123, "codex", "default", _ContextBundleItem("file", "notes.md"))
+    assert ui_state.enable_context_bundle_chat(123, "codex", "default") is True
+
+    run(handle_unsupported_message(update, None, services, ui_state))
+
+    assert message.reply_calls == [
+        "Stickers aren't supported in this chat yet. Send plain text next to keep using the "
+        "current context bundle, or send a photo, document, audio, or video instead. Use /help "
+        "for supported flows, or use /start to reopen the main keyboard."
+    ]
+
+
+def test_handle_unsupported_message_preserves_pending_plain_text_notice():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_unsupported_message
+
+    message = FakeIncomingMessage(sticker=SimpleNamespace(file_unique_id="sticker-1"))
+    update = FakeUpdate(user_id=123, message=message)
+    services, _ = make_services()
+    ui_state = TelegramUiState()
+    ui_state.set_pending_text_action(123, "workspace_search")
+
+    run(handle_unsupported_message(update, None, services, ui_state))
+
+    assert message.reply_calls == [
+        "Workspace search is waiting for plain text. Send the search text next, or send /cancel to back out. "
+        "Nothing was sent to the agent."
+    ]
+
+
+def test_build_telegram_application_registers_start_handler_before_generic_commands(monkeypatch):
+    from talk2agent.bots import telegram_bot
+
+    built_application = None
+
+    class FakeBuiltApplication:
+        def __init__(self):
+            self.handlers = []
+
+        def add_handler(self, handler):
+            self.handlers.append(handler)
+
+    class FakeBuilder:
+        def __init__(self):
+            nonlocal built_application
+            self._application = FakeBuiltApplication()
+            built_application = self._application
+
+        def token(self, value):
+            assert value == "token-123"
+            return self
+
+        def post_init(self, callback):
+            self._post_init = callback
+            return self
+
+        def build(self):
+            return self._application
+
+    monkeypatch.setattr(telegram_bot, "ApplicationBuilder", FakeBuilder)
+
+    config = SimpleNamespace(telegram=SimpleNamespace(bot_token="token-123"))
+    services, _ = make_services()
+
+    application = telegram_bot.build_telegram_application(config, services)
+
+    assert application is built_application
+    assert application.handlers[0].commands == frozenset({"start"})
+    assert application.handlers[1].commands == frozenset({"status"})
+    assert application.handlers[2].commands == frozenset({"help"})
+    assert application.handlers[3].commands == frozenset({"cancel"})
+    assert application.handlers[-1].filters == telegram_bot.filters.COMMAND
+
+
+def test_handle_cancel_rejects_unauthorized_user():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel
+
+    update = FakeUpdate(user_id=999, text="/cancel")
+    services, store = make_services(allowed_user_ids={123})
+
+    run(handle_cancel(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls == [
+        "Access denied. Ask the operator to allow your Telegram user ID."
+    ]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_callback_query_rejects_unauthorized_user_with_access_guidance():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_callback_query
+
+    update = FakeCallbackUpdate(999, "invalid-action", message=FakeIncomingMessage("callback"))
+    services, _ = make_services(allowed_user_ids={123})
+
+    run(handle_callback_query(update, None, services, TelegramUiState()))
+
+    assert update.callback_query.answers == [
+        ("Access denied. Ask the operator to allow your Telegram user ID.", True)
+    ]
+
+
+def test_handle_callback_query_rejects_unknown_action_with_recovery_guidance():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_callback_query
+
+    update = FakeCallbackUpdate(123, "invalid-action", message=FakeIncomingMessage("callback"))
+    services, _ = make_services()
+
+    run(handle_callback_query(update, None, services, TelegramUiState()))
+
+    assert update.callback_query.answers == [
+        (
+            "This action is no longer available because that menu is out of date. "
+            "Reopen the latest menu or use /start.",
+            True,
+        )
+    ]
+
+
+def test_handle_callback_query_rejects_button_for_other_user_with_guidance():
+    from talk2agent.bots.telegram_bot import CALLBACK_PREFIX, TelegramUiState, handle_callback_query
+
+    ui_state = TelegramUiState()
+    token = ui_state.create(123, "workspace_page", relative_path="", page=0)
+    update = FakeCallbackUpdate(999, f"{CALLBACK_PREFIX}{token}", message=FakeIncomingMessage("callback"))
+    services, _ = make_services(allowed_user_ids={123, 999})
+
+    run(handle_callback_query(update, None, services, ui_state))
+
+    assert update.callback_query.answers == [
+        (
+            "This button belongs to another user. Reopen the menu from your own chat or use /start there.",
+            True,
+        )
+    ]
+    assert ui_state.get(token) is not None
+
+
+def test_sync_agent_commands_avoids_reserved_local_command_aliases():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _sync_agent_commands_for_session
+
+    async def scenario():
+        application = FakeApplication()
+        session = FakeSession(
+            available_commands=[
+                FakeCommand("start", "Start something"),
+                FakeCommand("help", "Help something"),
+                FakeCommand("cancel", "Cancel something"),
+                FakeCommand("status", "Show status"),
+            ]
+        )
+        ui_state = TelegramUiState()
+
+        await _sync_agent_commands_for_session(application, ui_state, 123, session)
+        return application, ui_state
+
+    application, ui_state = asyncio.run(scenario())
+
+    commands, scope = application.bot.set_my_commands_calls[0]
+    assert [command.command for command in commands] == expected_command_menu(
+        "agent_start",
+        "agent_help",
+        "agent_cancel",
+        "status",
+    )
+    assert ui_state.resolve_agent_command(123, "agent_start") == "start"
+    assert ui_state.resolve_agent_command(123, "agent_status") == "status"
+    assert ui_state.resolve_agent_command(123, "agent_help") == "help"
+    assert ui_state.resolve_agent_command(123, "agent_cancel") == "cancel"
+    assert ui_state.resolve_agent_command(123, "start") is None
+    assert ui_state.resolve_agent_command(123, "status") is None
+    assert ui_state.resolve_agent_command(123, "help") is None
+    assert ui_state.resolve_agent_command(123, "cancel") is None
+    assert scope.chat_id == 123
+
+
+def test_sync_discovered_agent_commands_for_user_falls_back_to_local_commands_on_discovery_error():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _sync_discovered_agent_commands_for_user
+
+    async def scenario():
+        application = FakeApplication()
+        ui_state = TelegramUiState()
+        services, _ = make_services(
+            discover_agent_commands_error=RuntimeError("boom"),
+        )
+
+        await _sync_discovered_agent_commands_for_user(application, services, ui_state, 123)
+        return application, ui_state, services
+
+    application, ui_state, services = asyncio.run(scenario())
+
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu()
+    assert ui_state.resolve_agent_command(123, "status") is None
+    assert services.discover_agent_commands_calls == [2.0]
+
+
+def test_sync_agent_commands_for_all_users_falls_back_to_local_commands_on_discovery_error():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _sync_agent_commands_for_all_users
+
+    async def scenario():
+        application = FakeApplication()
+        ui_state = TelegramUiState()
+        services, _ = make_services(
+            allowed_user_ids={123, 456},
+            discover_agent_commands_error=RuntimeError("boom"),
+        )
+
+        await _sync_agent_commands_for_all_users(application, services, ui_state)
+        return application, ui_state, services
+
+    application, ui_state, services = asyncio.run(scenario())
+
+    assert len(application.bot.set_my_commands_calls) == 2
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu()
+    assert command_names(application.bot.set_my_commands_calls[1]) == expected_command_menu()
+    assert ui_state.resolve_agent_command(123, "status") is None
+    assert ui_state.resolve_agent_command(456, "status") is None
+    assert services.discover_agent_commands_calls == [2.0]
 
 
 def test_new_session_button_starts_session_and_reports_session_id():
@@ -832,8 +1614,40 @@ def test_new_session_button_starts_session_and_reports_session_id():
     assert store.record_session_usage_calls == [(123, "session-123", None)]
     assert update.message.reply_calls == [
         "Started new session: session-123\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared."
     ]
+
+
+def test_new_session_discards_pending_media_group_before_resetting_session():
+    from talk2agent.bots.telegram_bot import BUTTON_NEW_SESSION, TelegramUiState, handle_attachment, handle_text
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.05)
+        services, store = make_services()
+        attachment_message = FakeIncomingMessage(
+            caption="Compare this screenshot",
+            photo=[FakePhotoSize(file_unique_id="photo-new-session", payload=b"one")],
+            media_group_id="group-new-session",
+        )
+        await handle_attachment(FakeUpdate(user_id=123, message=attachment_message), None, services, ui_state)
+
+        session_update = FakeUpdate(user_id=123, text=BUTTON_NEW_SESSION)
+        await handle_text(session_update, None, services, ui_state)
+        await asyncio.sleep(0.07)
+        return services, store, ui_state, session_update
+
+    services, store, ui_state, session_update = asyncio.run(scenario())
+
+    assert store.reset_calls == [123]
+    assert session_update.message.reply_calls == [
+        "Discarded pending attachment group (1 item). Nothing was sent to the agent.\n"
+        "Started new session: session-123\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared."
+    ]
+    assert ui_state.pending_media_group_stats(123) is None
+    assert services.final_session.prompt_items == []
 
 
 def test_new_session_clears_session_bound_interactions_preserves_bundle_chat_and_syncs_commands():
@@ -867,11 +1681,13 @@ def test_new_session_clears_session_bound_interactions_preserves_bundle_chat_and
     assert store.reset_calls == [123]
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.context_bundle_chat_active(123, "claude", "default") is True
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
     stale_update = FakeCallbackUpdate(123, f"{CALLBACK_PREFIX}{stale_token}", message=FakeIncomingMessage("stale"))
     run(handle_callback_query(stale_update, None, services, ui_state))
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
 
 
 def test_restart_agent_clears_session_bound_interactions_and_syncs_commands():
@@ -891,9 +1707,10 @@ def test_restart_agent_clears_session_bound_interactions_and_syncs_commands():
     assert ui_state.get_pending_text_action(123) is None
     assert update.message.reply_calls == [
         "Restarted agent: session-123\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared."
     ]
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
 def test_handle_text_runs_turn_uses_draft_stream_and_records_history_usage():
@@ -908,9 +1725,37 @@ def test_handle_text_runs_turn_uses_draft_stream_and_records_history_usage():
     assert store.close_idle_calls
     assert store.get_or_create_calls == [123]
     assert session.prompts == ["hello"]
-    assert [text for _, text in update.message.draft_calls] == ["Thinking...", "hello ", "hello world"]
+    assert [text for _, text in update.message.draft_calls] == [
+        "Working on your request...\nI'll stream progress here. Use /cancel or Cancel / Stop to interrupt.",
+        "hello ",
+        "hello world",
+    ]
     assert update.message.reply_calls == ["hello world"]
+    completion_markup = update.message.reply_markups[0]
+    assert completion_markup is not None
+    assert find_inline_button(completion_markup, "Retry Last Turn")
+    assert find_inline_button(completion_markup, "Fork Last Turn")
+    assert find_inline_button(completion_markup, "Open Bot Status")
+    assert find_inline_button(completion_markup, "New Session")
     assert store.record_session_usage_calls == [(123, "session-abc", "hello")]
+
+
+def test_successful_turn_result_open_bot_status_replies_without_overwriting_answer():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text="hello")
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, make_context(application=FakeApplication()), services, ui_state))
+
+    status_button = find_inline_button(update.message.reply_markups[0], "Open Bot Status")
+    callback_update = FakeCallbackUpdate(123, status_button.callback_data, message=update.message)
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    assert update.message.edit_calls == []
+    assert update.message.reply_calls[0] == "hello world"
+    assert update.message.reply_calls[1].startswith("Bot status for Codex in Default Workspace")
 
 
 def test_retry_last_turn_button_replays_previous_text_turn():
@@ -944,7 +1789,7 @@ def test_retry_last_turn_button_without_previous_turn_shows_notice():
     run(handle_text(update, None, services, TelegramUiState()))
 
     assert update.message.reply_calls == [
-        "No previous turn is available to retry for the current provider and workspace."
+        "No previous turn is available yet. Send a new request first, then try again."
     ]
 
 
@@ -977,9 +1822,10 @@ def test_fork_last_turn_button_replays_previous_text_turn_in_new_session():
     assert session.prompt_items[0][0].text == "hello"
     assert fork_update.message.reply_calls == ["hello world"]
     assert ui_state.resolve_agent_command(123, "old_status") is None
-    assert ui_state.resolve_agent_command(123, "status") == "status"
+    assert ui_state.resolve_agent_command(123, "status") is None
+    assert ui_state.resolve_agent_command(123, "agent_status") == "status"
     assert ui_state.get(stale_token) is None
-    assert [command.command for command in application.bot.set_my_commands_calls[-1][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[-1]) == expected_command_menu("status")
 
     stale_update = FakeCallbackUpdate(
         123,
@@ -987,7 +1833,9 @@ def test_fork_last_turn_button_replays_previous_text_turn_in_new_session():
         message=FakeIncomingMessage("stale"),
     )
     run(handle_callback_query(stale_update, None, services, ui_state))
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
     assert store.record_session_usage_calls == [
         (123, "session-abc", "hello"),
         (123, "session-abc", "hello"),
@@ -1003,7 +1851,7 @@ def test_fork_last_turn_button_without_previous_turn_shows_notice():
     run(handle_text(update, None, services, TelegramUiState()))
 
     assert update.message.reply_calls == [
-        "No previous turn is available to fork for the current provider and workspace."
+        "No previous turn is available yet. Send a new request first, then try again."
     ]
 
 
@@ -1044,8 +1892,8 @@ def test_handle_agent_command_restores_alias_before_running_turn():
     from talk2agent.bots.telegram_bot import TelegramUiState, handle_agent_command
 
     ui_state = TelegramUiState()
-    ui_state.set_agent_command_aliases(123, {"status": "model"})
-    update = FakeUpdate(user_id=123, text="/status low")
+    ui_state.set_agent_command_aliases(123, {"agent_status": "model"})
+    update = FakeUpdate(user_id=123, text="/agent_status low")
     services, _ = make_services()
 
     run(handle_agent_command(update, None, services, ui_state))
@@ -1082,6 +1930,7 @@ def test_handle_text_replies_with_workspace_changes_follow_up_when_git_status_up
     run(handle_text(update, None, services, TelegramUiState()))
 
     assert update.message.reply_calls[0] == "hello world"
+    assert update.message.reply_markups[0] is None
     assert update.message.reply_calls[1].startswith(
         "Workspace changes updated for Claude Code in Default Workspace\nBranch: main\nCurrent changes: 1"
     )
@@ -1442,7 +2291,7 @@ def test_workspace_changes_follow_up_open_context_bundle_can_go_back(monkeypatch
     bundle_text, bundle_markup = follow_up_message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty."
+        "Context bundle is empty. Add files or changes first."
     )
     back_button = find_inline_button(bundle_markup, "Back to Change Update")
 
@@ -1591,6 +2440,11 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert "Workspace ID: default" in text
     assert "Path: F:/workspace" in text
     assert "Session: none (will start on first request)" in text
+    assert (
+        "Primary controls right now: send the expected text next, or use Cancel Pending Input "
+        "in Bot Status."
+        in text
+    )
     assert "Pending input: Workspace search" in text
     assert "Local sessions: 2" in text
     assert "Last turn replay: available (hello)" in text
@@ -1701,10 +2555,65 @@ def test_bot_status_shows_stop_turn_and_can_cancel_running_turn():
 
         await application.wait_for_tasks()
 
-        assert start_update.message.reply_calls == ["Turn cancelled."]
+        assert start_update.message.reply_calls == ["Turn cancelled. Send a new request when ready."]
         assert ui_state.get_active_turn(123) is None
 
     run(scenario())
+
+
+def test_bot_status_stop_turn_refresh_failure_keeps_stop_notice():
+    from talk2agent.bots.telegram_bot import BUTTON_BOT_STATUS, TelegramUiState, handle_callback_query, handle_text
+
+    async def scenario():
+        session = BlockingCancelableSession(session_id="session-abc")
+        ui_state = TelegramUiState()
+        services, _ = make_services(provider="codex", session=session)
+        application = FakeAsyncApplication()
+
+        start_update = FakeUpdate(user_id=123, text="Long task")
+        await handle_text(start_update, make_context(application=application), services, ui_state)
+        await session.wait_until_started()
+
+        status_update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+        await handle_text(status_update, make_context(application=application), services, ui_state)
+
+        original_snapshot_runtime_state = services.snapshot_runtime_state
+        snapshot_calls = 0
+
+        async def flaky_snapshot_runtime_state():
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            if snapshot_calls == 1:
+                return await original_snapshot_runtime_state()
+            raise RuntimeError("boom")
+
+        services.snapshot_runtime_state = flaky_snapshot_runtime_state
+
+        stop_button = find_inline_button(status_update.message.reply_markups[0], "Stop Turn")
+        stop_update = FakeCallbackUpdate(
+            123,
+            stop_button.callback_data,
+            message=status_update.message,
+        )
+        await handle_callback_query(
+            stop_update,
+            make_context(application=application),
+            services,
+            ui_state,
+        )
+
+        await application.wait_for_tasks()
+        return session, start_update, status_update, ui_state
+
+    session, start_update, status_update, ui_state = run(scenario())
+
+    assert session.cancel_turn_calls == 1
+    assert status_update.message.edit_calls[-1] == (
+        "Stop requested for the current turn. Reopen Bot Status to confirm the latest state.",
+        None,
+    )
+    assert start_update.message.reply_calls == ["Turn cancelled. Send a new request when ready."]
+    assert ui_state.get_active_turn(123) is None
 
 
 def test_handle_text_rejects_new_turn_while_background_turn_running():
@@ -1726,7 +2635,8 @@ def test_handle_text_rejects_new_turn_while_background_turn_running():
         assert second_update.message.reply_calls == [
             (
                 "Another request is already running (Long task). "
-                "Open Bot Status to stop it or wait for it to finish."
+                "Send /cancel to stop it, open Bot Status to inspect progress, or wait for it to finish. "
+                "This new message was not sent to the agent."
             )
         ]
 
@@ -1734,6 +2644,48 @@ def test_handle_text_rejects_new_turn_while_background_turn_running():
         await application.wait_for_tasks()
 
     run(scenario())
+
+
+def test_handle_text_waits_for_pending_media_group_before_starting_new_turn():
+    from talk2agent.acp.agent_session import PromptImage, PromptText
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment, handle_text
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.01)
+        services, _ = make_services()
+        first_message = FakeIncomingMessage(
+            caption="Compare these screenshots",
+            photo=[FakePhotoSize(payload=b"one")],
+            media_group_id="group-text-block",
+        )
+        second_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(payload=b"two")],
+            media_group_id="group-text-block",
+        )
+        text_update = FakeUpdate(user_id=123, text="Please review quickly")
+
+        await handle_attachment(FakeUpdate(user_id=123, message=first_message), None, services, ui_state)
+        await handle_text(text_update, None, services, ui_state)
+        await handle_attachment(FakeUpdate(user_id=123, message=second_message), None, services, ui_state)
+        await asyncio.sleep(0.03)
+        return services, text_update, ui_state
+
+    services, text_update, ui_state = asyncio.run(scenario())
+
+    assert text_update.message.reply_calls == [
+        (
+            "Still collecting 1 attachment group (1 item) from a pending Telegram album. "
+            "Wait for it to finish, or use /cancel or Cancel / Stop to discard the pending uploads first. "
+            "This new message was not sent to the agent."
+        )
+    ]
+    assert ui_state.get_last_request_text(123, "default") is None
+    assert len(services.final_session.prompt_items) == 1
+    prompt_items = services.final_session.prompt_items[0]
+    assert isinstance(prompt_items[0], PromptText)
+    assert prompt_items[0].text == "Compare these screenshots"
+    assert isinstance(prompt_items[1], PromptImage)
+    assert isinstance(prompt_items[2], PromptImage)
 
 
 def test_bot_status_shows_workspace_change_quick_actions_when_available(monkeypatch):
@@ -3643,6 +4595,7 @@ def test_bot_status_agent_command_quick_args_cancel_returns_to_status():
 
     prompt_text, prompt_markup = callback_message.edit_calls[-1]
     assert prompt_text.startswith("Send arguments for /model as your next plain text message.")
+    assert prompt_text.endswith("Send /cancel to back out.")
 
     cancel_button = find_inline_button(prompt_markup, "Cancel Command")
     cancel_update = FakeCallbackUpdate(123, cancel_button.callback_data, message=callback_message)
@@ -3687,6 +4640,37 @@ def test_bot_status_agent_command_quick_args_run_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith("Ran /model.\nBot status for Codex in Default Workspace")
     assert find_inline_button(final_markup, "Args /model")
+
+
+def test_bot_status_agent_command_quick_args_empty_value_mentions_cancel():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(
+        session_id="session-abc",
+        available_commands=[FakeCommand("model", "Switch model", hint="model id")],
+    )
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, _ = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    args_button = find_inline_button(update.message.reply_markups[0], "Args /model")
+    args_update = FakeCallbackUpdate(123, args_button.callback_data, message=callback_message)
+    run(handle_callback_query(args_update, None, services, ui_state))
+
+    request_update = FakeUpdate(user_id=123, text="   ")
+    run(handle_text(request_update, None, services, ui_state))
+
+    assert request_update.message.reply_calls == [
+        "Command arguments cannot be empty. Send another value. Send /cancel to back out."
+    ]
 
 
 def test_bot_status_model_quick_selection_returns_to_status():
@@ -3774,7 +4758,7 @@ def test_bot_status_recent_session_quick_switch_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: session-1" in final_text
@@ -3825,8 +4809,61 @@ def test_bot_status_recent_session_quick_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert "Session: session-1" in final_text
+    assert find_inline_button(final_markup, "Session History")
+
+
+def test_bot_status_recent_session_quick_retry_without_previous_turn_restores_status():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    session = FakeSession(session_id="session-live")
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(
+        provider="codex",
+        session=session,
+        history_entries=[
+            build_history_entry("session-live", "Active Thread"),
+            build_history_entry("session-1", "First"),
+        ],
+    )
+
+    run(handle_text(update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Switch+Retry 1")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert store.activate_history_calls == [(123, "session-1")]
+    assert session.prompt_items == []
+    assert callback_message.reply_calls == []
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Switched to session session-1 on Codex in Default Workspace. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "No previous turn is available yet. Send a new request first, then try again.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: session-1" in final_text
@@ -3862,7 +4899,10 @@ def test_bot_status_recent_session_quick_switch_failure_restores_status():
     run(handle_callback_query(switch_update, None, services, ui_state))
 
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Failed to switch session.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Couldn't switch to that session. Try again, reopen Session History, or start a new session.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Switch 1")
 
 
@@ -3942,6 +4982,107 @@ def test_bot_status_model_quick_retry_returns_to_status():
     assert find_inline_button(final_markup, "Model+Retry: GPT-5.4")
 
 
+def test_bot_status_model_quick_selection_without_live_session_restores_actionable_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_session = None
+
+    select_button = find_inline_button(update.message.reply_markups[0], "Model: GPT-5.4 Mini")
+    select_update = FakeCallbackUpdate(123, select_button.callback_data, message=callback_message)
+    run(handle_callback_query(select_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "No active session. Send text or an attachment to start one.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_quick_selection_update_failure_restores_actionable_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, _ = make_services(provider="codex")
+
+    async def fail_set_selection(kind, value):
+        raise RuntimeError("boom")
+
+    services.final_session.set_selection = fail_set_selection
+
+    run(handle_text(update, None, services, ui_state))
+
+    select_button = find_inline_button(update.message.reply_markups[0], "Model: GPT-5.4 Mini")
+    select_update = FakeCallbackUpdate(123, select_button.callback_data, message=callback_message)
+    run(handle_callback_query(select_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Couldn't update model or mode. Try again or reopen Model / Mode.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_quick_retry_without_live_session_restores_actionable_status():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_session = None
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Model+Retry: GPT-5.4 Mini")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "No active session. Send text or an attachment to start one.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
 def test_bot_status_can_open_session_history_from_callback():
     from talk2agent.bots.telegram_bot import (
         BUTTON_BOT_STATUS,
@@ -3973,6 +5114,33 @@ def test_bot_status_can_open_session_history_from_callback():
     assert edited_text.startswith("Session history for Codex in Default Workspace")
     assert find_inline_button(edited_markup, "Run 1")
     assert find_inline_button(edited_markup, "Back to Bot Status")
+
+
+def test_bot_status_open_view_failure_keeps_retry_and_back_to_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex", history_entries=[build_history_entry("session-1", "First")])
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.list_history_error = RuntimeError("boom")
+
+    history_button = find_inline_button(update.message.reply_markups[0], "Session History")
+    history_update = FakeCallbackUpdate(123, history_button.callback_data, message=callback_message)
+    run(handle_callback_query(history_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_message.edit_calls[-1]
+    assert failure_text == "Couldn't open that view. Try again or go back to Bot Status."
+    assert find_inline_button(failure_markup, "Try Again")
+    assert find_inline_button(failure_markup, "Back to Bot Status")
 
 
 def test_bot_status_session_history_back_to_status():
@@ -4172,7 +5340,7 @@ def test_bot_status_provider_session_run_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: desktop-session" in final_text
@@ -4232,7 +5400,7 @@ def test_bot_status_provider_session_run_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -4278,7 +5446,7 @@ def test_bot_status_provider_session_fork_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: fork-desktop-session" in final_text
@@ -4342,7 +5510,7 @@ def test_bot_status_provider_session_fork_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -4384,7 +5552,8 @@ def test_bot_status_provider_session_run_failure_restores_provider_sessions_with
 
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
-        "Failed to switch provider session.\nProvider sessions for Codex in Default Workspace"
+        "Couldn't switch to that provider session. Try again or reopen Provider Sessions.\n"
+        "Provider sessions for Codex in Default Workspace"
     )
     assert find_inline_button(final_markup, "Back to Bot Status")
 
@@ -4431,7 +5600,7 @@ def test_bot_status_history_provider_session_run_keeps_back_chain_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared."
     )
     back_to_history_button = find_inline_button(final_markup, "Back to History")
 
@@ -4570,7 +5739,7 @@ def test_bot_status_session_history_run_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: session-1" in final_text
@@ -4625,7 +5794,7 @@ def test_bot_status_session_history_run_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -4669,7 +5838,7 @@ def test_bot_status_session_history_fork_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: fork-session-1" in final_text
@@ -4728,7 +5897,7 @@ def test_bot_status_session_history_fork_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -4765,9 +5934,34 @@ def test_bot_status_session_history_run_failure_restores_history_with_back_to_st
 
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
-        "Failed to switch session.\nSession history for Codex in Default Workspace"
+        "Couldn't switch to that session. Try again, reopen Session History, or start a new session.\n"
+        "Session history for Codex in Default Workspace"
     )
     assert find_inline_button(final_markup, "Back to Bot Status")
+
+
+def test_session_history_entry_failure_keeps_retry_and_back_to_history():
+    from talk2agent.bots.telegram_bot import BUTTON_SESSION_HISTORY, TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, store = make_services(
+        provider="codex",
+        history_entries=[build_history_entry("session-1", "First")],
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.list_history_error = RuntimeError("boom")
+
+    open_button = find_inline_button(update.message.reply_markups[0], "Open 1")
+    callback_update = FakeCallbackUpdate(123, open_button.callback_data, message=FakeIncomingMessage("history"))
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert failure_text == "Couldn't load that session history entry. Try again or go back."
+    assert find_inline_button(failure_markup, "Try Again")
+    assert find_inline_button(failure_markup, "Back to History")
 
 
 def test_bot_status_can_cancel_pending_input():
@@ -4796,6 +5990,81 @@ def test_bot_status_can_cancel_pending_input():
     assert "Pending input: none" in edited_text
     labels = [button.text for row in edited_markup.inline_keyboard for button in row]
     assert "Cancel Pending Input" not in labels
+
+
+def test_bot_status_cancel_pending_refresh_failure_keeps_success_notice():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_pending_text_action(123, "workspace_search")
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    async def broken_snapshot_runtime_state():
+        raise RuntimeError("boom")
+
+    services.snapshot_runtime_state = broken_snapshot_runtime_state
+
+    cancel_button = find_inline_button(update.message.reply_markups[0], "Cancel Pending Input")
+    callback_message = FakeIncomingMessage("status")
+    cancel_update = FakeCallbackUpdate(123, cancel_button.callback_data, message=callback_message)
+    run(handle_callback_query(cancel_update, None, services, ui_state))
+
+    assert ui_state.get_pending_text_action(123) is None
+    assert callback_message.edit_calls[-1] == (
+        "Pending input cancelled. Reopen Bot Status to confirm the latest state.",
+        None,
+    )
+
+
+def test_bot_status_shows_pending_uploads_and_can_discard_them():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.add_media_group_message(
+        123,
+        "group-status",
+        FakeIncomingMessage(photo=[FakePhotoSize(file_unique_id="photo-status-1", payload=b"one")]),
+    )
+    ui_state.add_media_group_message(
+        123,
+        "group-status",
+        FakeIncomingMessage(photo=[FakePhotoSize(file_unique_id="photo-status-2", payload=b"two")]),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    status_text = update.message.reply_calls[0]
+    assert "Status: collecting 2 attachments from a pending Telegram album." in status_text
+    assert "Pending uploads: 1 attachment group (2 items)" in status_text
+
+    discard_button = find_inline_button(update.message.reply_markups[0], "Discard Pending Uploads")
+    callback_message = FakeIncomingMessage("status")
+    discard_update = FakeCallbackUpdate(123, discard_button.callback_data, message=callback_message)
+    run(handle_callback_query(discard_update, None, services, ui_state))
+
+    assert ui_state.pending_media_group_stats(123) is None
+    edited_text, edited_markup = callback_message.edit_calls[-1]
+    assert edited_text.startswith(
+        "Discarded pending attachment group (2 items). Nothing was sent to the agent.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert "Pending uploads:" not in edited_text
+    assert find_inline_button(edited_markup, "Refresh")
 
 
 def test_bot_status_can_start_and_stop_bundle_chat():
@@ -4868,12 +6137,13 @@ def test_bot_status_new_session_control_refreshes_status_inline():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Started new session: session-123\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: session-123" in final_text
     assert find_inline_button(final_markup, "New Session")
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
 def test_bot_status_restart_agent_control_refreshes_status_inline():
@@ -4904,12 +6174,13 @@ def test_bot_status_restart_agent_control_refreshes_status_inline():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Restarted agent: session-123\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: session-123" in final_text
     assert find_inline_button(final_markup, "Restart Agent")
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
 def test_bot_status_fork_session_control_refreshes_status_inline():
@@ -4943,12 +6214,12 @@ def test_bot_status_fork_session_control_refreshes_status_inline():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session: fork-session-123\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: fork-session-123" in final_text
     assert find_inline_button(final_markup, "Fork Session")
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
 def test_bot_status_hides_fork_session_control_when_provider_cannot_fork():
@@ -4990,7 +6261,10 @@ def test_bot_status_fork_session_failure_restores_status():
 
     assert store.fork_live_calls == [123]
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Failed to fork session.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Couldn't fork that session. Try again or start a new session.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Fork Session")
 
 
@@ -5023,7 +6297,7 @@ def test_bot_status_model_mode_control_clears_pending_and_starts_session():
         "Started session for model / mode controls.\nSession: session-123"
     )
     assert find_inline_button(edited_markup, "Back to Bot Status")
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
 def test_bot_status_model_mode_control_creation_failure_restores_status():
@@ -5051,8 +6325,38 @@ def test_bot_status_model_mode_control_creation_failure_restores_status():
 
     assert store.get_or_create_calls == [123]
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("session creation failed\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Couldn't start a session. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_mode_control_load_failure_restores_actionable_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_error = RuntimeError("boom")
+
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    callback_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text == "Couldn't load Model / Mode. Try again or go back to Bot Status."
+    assert find_inline_button(final_markup, "Try Again")
+    assert find_inline_button(final_markup, "Back to Bot Status")
 
 
 def test_bot_status_model_mode_selection_keeps_back_to_status():
@@ -5094,6 +6398,75 @@ def test_bot_status_model_mode_selection_keeps_back_to_status():
     status_text, status_markup = callback_message.edit_calls[-1]
     assert status_text.startswith("Bot status for Codex in Default Workspace")
     assert find_inline_button(status_markup, "Model / Mode")
+
+
+def test_bot_status_model_mode_selection_without_live_session_restores_actionable_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    model_mode_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(model_mode_update, None, services, ui_state))
+
+    store.peek_session = None
+
+    select_button = find_inline_button(callback_message.edit_calls[-1][1], "Model: GPT-5.4 Mini")
+    select_update = FakeCallbackUpdate(123, select_button.callback_data, message=callback_message)
+    run(handle_callback_query(select_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "No active session. Send text or an attachment to start one.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_mode_selection_update_failure_restores_actionable_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, _ = make_services(provider="codex")
+
+    async def fail_set_selection(kind, value):
+        raise RuntimeError("boom")
+
+    services.final_session.set_selection = fail_set_selection
+
+    run(handle_text(update, None, services, ui_state))
+
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    model_mode_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(model_mode_update, None, services, ui_state))
+
+    select_button = find_inline_button(callback_message.edit_calls[-1][1], "Model: GPT-5.4 Mini")
+    select_update = FakeCallbackUpdate(123, select_button.callback_data, message=callback_message)
+    run(handle_callback_query(select_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Couldn't update model or mode. Try again or reopen Model / Mode.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Model / Mode")
 
 
 def test_bot_status_model_mode_choice_detail_keeps_back_to_status():
@@ -5179,8 +6552,42 @@ def test_bot_status_model_mode_choice_detail_creation_failure_restores_status():
     run(handle_callback_query(open_update, None, services, ui_state))
 
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("session creation failed\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Couldn't start a session. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_mode_choice_detail_load_failure_restores_actionable_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, store = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    callback_message = FakeIncomingMessage("status")
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    model_mode_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(model_mode_update, None, services, ui_state))
+
+    store.peek_error = RuntimeError("boom")
+
+    open_button = find_inline_button(callback_message.edit_calls[-1][1], "Open Model 2")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=callback_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text == "Couldn't load selection details. Try again or go back."
+    assert find_inline_button(final_markup, "Try Again")
+    assert find_inline_button(final_markup, "Back to Model / Mode")
 
 
 def test_bot_status_model_mode_retry_returns_to_status():
@@ -5234,6 +6641,141 @@ def test_bot_status_model_mode_retry_returns_to_status():
     assert find_inline_button(final_markup, "Model / Mode")
 
 
+def test_bot_status_model_mode_retry_without_live_session_restores_actionable_status():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    model_mode_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(model_mode_update, make_context(application=FakeApplication()), services, ui_state))
+
+    store.peek_session = None
+
+    retry_button = find_inline_button(callback_message.edit_calls[-1][1], "Model+Retry: GPT-5.4 Mini")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "No active session. Send text or an attachment to start one.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_mode_retry_prepare_failure_restores_request_failure_status():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex", get_or_create_error=RuntimeError("boom"))
+
+    run(handle_text(update, None, services, ui_state))
+
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    model_mode_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(model_mode_update, make_context(application=FakeApplication()), services, ui_state))
+
+    retry_button = find_inline_button(callback_message.edit_calls[-1][1], "Model+Retry: GPT-5.4 Mini")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Updated model to GPT-5.4 Mini.\n"
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert "Retried last turn with the updated setting." not in final_text
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
+def test_bot_status_model_mode_retry_turn_failure_restores_request_failure_status():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, _ = make_services(
+        provider="codex",
+        session=FakeSession(error=RuntimeError("boom"), raise_before_stream=True),
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    model_mode_button = find_inline_button(update.message.reply_markups[0], "Model / Mode")
+    model_mode_update = FakeCallbackUpdate(123, model_mode_button.callback_data, message=callback_message)
+    run(handle_callback_query(model_mode_update, make_context(application=FakeApplication()), services, ui_state))
+
+    retry_button = find_inline_button(callback_message.edit_calls[-1][1], "Model+Retry: GPT-5.4 Mini")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Updated model to GPT-5.4 Mini.\n"
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert "Retried last turn with the updated setting." not in final_text
+    assert find_inline_button(final_markup, "Model / Mode")
+
+
 def test_bot_status_retry_last_turn_control_returns_to_status():
     from talk2agent.acp.agent_session import PromptText
     from talk2agent.bots.telegram_bot import (
@@ -5277,6 +6819,46 @@ def test_bot_status_retry_last_turn_control_returns_to_status():
     assert find_inline_button(final_markup, "Retry Last Turn")
 
 
+def test_bot_status_retry_last_turn_without_previous_turn_restores_status():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Retry Last Turn")
+    callback_message = FakeIncomingMessage("status")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    labels = [button.text for row in final_markup.inline_keyboard for button in row]
+    assert "Retry Last Turn" not in labels
+
+
 def test_bot_status_retry_last_turn_failure_restores_status():
     from talk2agent.acp.agent_session import PromptText
     from talk2agent.bots.telegram_bot import (
@@ -5310,7 +6892,10 @@ def test_bot_status_retry_last_turn_failure_restores_status():
     assert store.get_or_create_calls == [123]
     assert callback_message.reply_calls == []
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Retry Last Turn")
 
 
@@ -5351,7 +6936,10 @@ def test_bot_status_retry_last_turn_runtime_failure_restores_status():
         "Request failed. The current live session for Codex in Default Workspace was closed."
     )
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Retry Last Turn")
 
 
@@ -5404,7 +6992,10 @@ def test_bot_status_fork_last_turn_control_returns_to_status():
     )
     assert "Session: session-123" in final_text
     assert find_inline_button(final_markup, "Fork Last Turn")
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status", "model"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu(
+        "status",
+        "model",
+    )
 
 
 def test_bot_status_fork_last_turn_creation_failure_restores_status():
@@ -5440,7 +7031,10 @@ def test_bot_status_fork_last_turn_creation_failure_restores_status():
     assert store.reset_calls == [123]
     assert callback_message.reply_calls == []
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("session creation failed\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Couldn't start a session. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Fork Last Turn")
 
 
@@ -5482,7 +7076,10 @@ def test_bot_status_fork_last_turn_runtime_failure_restores_status():
         "Request failed. The current live session for Codex in Default Workspace was closed."
     )
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Fork Last Turn")
 
 
@@ -5525,12 +7122,9 @@ def test_bot_status_switch_agent_retry_returns_to_status():
     assert callback_message.reply_calls == ["hello world"]
     assert store.record_session_usage_calls == [(123, "session-123", "hello")]
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith(
-        "Switched agent to Gemini CLI in Default Workspace. "
-        "Old bot buttons and pending inputs were cleared.\n"
-        "Retried last turn on the new agent.\n"
-        "Bot status for Gemini CLI in Default Workspace"
-    )
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Retried last turn on the new agent." in final_text
+    assert "Bot status for Gemini CLI in Default Workspace" in final_text
     assert find_inline_button(final_markup, "Switch Agent")
 
 
@@ -5574,12 +7168,9 @@ def test_bot_status_switch_agent_fork_returns_to_status():
     assert callback_message.reply_calls == ["hello world"]
     assert store.record_session_usage_calls == [(123, "session-123", "hello")]
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith(
-        "Switched agent to Gemini CLI in Default Workspace. "
-        "Old bot buttons and pending inputs were cleared.\n"
-        "Forked last turn on the new agent.\n"
-        "Bot status for Gemini CLI in Default Workspace"
-    )
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Forked last turn on the new agent." in final_text
+    assert "Bot status for Gemini CLI in Default Workspace" in final_text
     assert find_inline_button(final_markup, "Switch Agent")
 
 
@@ -5625,12 +7216,9 @@ def test_bot_status_switch_agent_retry_failure_restores_status():
     assert store.get_or_create_calls == [123]
     assert callback_message.reply_calls == []
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith(
-        "Switched agent to Gemini CLI in Default Workspace. "
-        "Old bot buttons and pending inputs were cleared.\n"
-        "Request failed.\n"
-        "Bot status for Gemini CLI in Default Workspace"
-    )
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Request failed. Try again, use /start, or open Bot Status." in final_text
+    assert "Bot status for Gemini CLI in Default Workspace" in final_text
     assert find_inline_button(final_markup, "Switch Agent")
 
 
@@ -5676,12 +7264,9 @@ def test_bot_status_switch_agent_fork_creation_failure_restores_status():
     assert store.reset_calls == [123]
     assert callback_message.reply_calls == []
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith(
-        "Switched agent to Gemini CLI in Default Workspace. "
-        "Old bot buttons and pending inputs were cleared.\n"
-        "session creation failed\n"
-        "Bot status for Gemini CLI in Default Workspace"
-    )
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Couldn't start a session. Try again, use /start, or open Bot Status." in final_text
+    assert "Bot status for Gemini CLI in Default Workspace" in final_text
     assert find_inline_button(final_markup, "Switch Agent")
 
 
@@ -5710,6 +7295,7 @@ def test_bot_status_can_start_workspace_search_and_cancel_back_to_status():
 
     prompt_text, prompt_markup = callback_message.edit_calls[-1]
     assert prompt_text.startswith("Send your workspace search query as the next plain text message.")
+    assert prompt_text.endswith("Send /cancel to back out.")
 
     cancel_button = find_inline_button(prompt_markup, "Cancel Search")
     cancel_update = FakeCallbackUpdate(123, cancel_button.callback_data, message=callback_message)
@@ -5819,7 +7405,7 @@ def test_bot_status_workspace_files_open_context_bundle_restores_folder_then_sta
     bundle_text, bundle_markup = callback_message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Codex in Default Workspace\n"
-        "Context bundle is empty."
+        "Context bundle is empty. Add files or changes first."
     )
     back_to_folder_button = find_inline_button(bundle_markup, "Back to Folder")
 
@@ -6027,7 +7613,10 @@ def test_bot_status_workspace_file_preview_ask_agent_runtime_failure_restores_st
         "Request failed. The current live session for Codex in Default Workspace was closed."
     )
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Workspace Files")
 
 
@@ -6583,6 +8172,7 @@ def test_bot_status_context_bundle_direct_ask_cancel_returns_to_status(tmp_path)
     assert prompt_text.startswith(
         "Send your request for the current context bundle as the next plain text message."
     )
+    assert prompt_text.endswith("Send /cancel to back out.")
 
     cancel_button = find_inline_button(prompt_markup, "Cancel Ask")
     cancel_update = FakeCallbackUpdate(123, cancel_button.callback_data, message=callback_message)
@@ -6636,6 +8226,42 @@ def test_bot_status_context_bundle_direct_ask_with_last_request_returns_to_statu
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Asked agent with the last request using the current context bundle.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Context Bundle")
+
+
+def test_bot_status_context_bundle_direct_ask_with_missing_last_request_restores_notice():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ContextBundleItem,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    ui_state.set_last_request_text(123, "default", "Use the saved context.")
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, None, services, ui_state))
+    ui_state.set_last_request_text(123, "default", " ")
+
+    callback_message = FakeIncomingMessage("status")
+    ask_button = find_inline_button(update.message.reply_markups[0], "Bundle + Last Request")
+    ask_update = FakeCallbackUpdate(123, ask_button.callback_data, message=callback_message)
+    run(handle_callback_query(ask_update, None, services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "No previous request is available in this workspace yet. Send a new request first.\n"
         "Bot status for Codex in Default Workspace"
     )
     assert find_inline_button(final_markup, "Context Bundle")
@@ -6704,7 +8330,7 @@ def test_bot_status_context_bundle_empty_can_back_to_status():
     bundle_text, bundle_markup = callback_message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Codex in Default Workspace\n"
-        "Context bundle is empty."
+        "Context bundle is empty. Add files or changes first."
     )
     back_button = find_inline_button(bundle_markup, "Back to Bot Status")
 
@@ -6922,7 +8548,13 @@ def test_bot_status_switch_agent_can_open_and_back_to_status():
     run(handle_callback_query(switch_update, None, services, ui_state))
 
     switch_text, switch_markup = callback_message.edit_calls[-1]
-    assert switch_text.startswith("Current provider: Codex\nWorkspace: Default Workspace\nProvider capabilities:")
+    assert switch_text.startswith(
+        "Current provider: Codex\n"
+        "Workspace: Default Workspace\n"
+        "Switch impact:"
+    )
+    assert "- Context bundle does not follow an agent switch." in switch_text
+    assert "Provider capabilities:" in switch_text
     assert find_inline_button(switch_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(
@@ -6961,11 +8593,8 @@ def test_bot_status_switch_agent_success_returns_to_status():
     run(handle_callback_query(provider_update, None, services, ui_state))
 
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith(
-        "Switched agent to Gemini CLI in Default Workspace. "
-        "Old bot buttons and pending inputs were cleared.\n"
-        "Bot status for Gemini CLI in Default Workspace"
-    )
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Bot status for Gemini CLI in Default Workspace" in final_text
     assert find_inline_button(final_markup, "Switch Agent")
 
 
@@ -6989,7 +8618,15 @@ def test_bot_status_switch_workspace_can_open_and_back_to_status():
     run(handle_callback_query(switch_update, None, services, ui_state))
 
     switch_text, switch_markup = callback_message.edit_calls[-1]
-    assert switch_text == "Current workspace: Default Workspace"
+    assert switch_text.startswith(
+        "Current provider: Codex\n"
+        "Current workspace: Default Workspace\n"
+        "Switch impact:"
+    )
+    assert (
+        "- Any Context Bundle, Last Request, or Last Turn from this workspace will stay behind."
+        in switch_text
+    )
     assert find_inline_button(switch_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(
@@ -7028,11 +8665,8 @@ def test_bot_status_switch_workspace_success_returns_to_status():
     run(handle_callback_query(workspace_update, None, services, ui_state))
 
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith(
-        "Switched workspace to Alt Workspace on Codex. "
-        "Old bot buttons and pending inputs were cleared.\n"
-        "Bot status for Codex in Alt Workspace"
-    )
+    assert_switch_workspace_success_notice(final_text, workspace="Alt Workspace", provider="Codex")
+    assert "Bot status for Codex in Alt Workspace" in final_text
     assert find_inline_button(final_markup, "Switch Workspace")
 
 
@@ -7044,16 +8678,19 @@ def test_switch_agent_button_shows_provider_choices():
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls == [
-        (
-            "Current provider: Codex\n"
-            "Workspace: Default Workspace\n"
-            "Provider capabilities:\n"
-            "- Claude Code: img=yes audio=no docs=yes sessions=list/resume/fork\n"
-            "* Codex [current]: img=yes audio=yes docs=yes sessions=list/resume/fork\n"
-            "- Gemini CLI: img=yes audio=yes docs=no sessions=none"
-        )
-    ]
+    switch_text = update.message.reply_calls[0]
+    assert switch_text.startswith(
+        "Current provider: Codex\n"
+        "Workspace: Default Workspace\n"
+        "Switch impact:\n"
+        "- Old bot buttons and pending inputs will be cleared.\n"
+        "- Context bundle does not follow an agent switch.\n"
+        "- After switching, send a fresh request or open Bot Status to keep going.\n"
+        "Provider capabilities:"
+    )
+    assert "- Claude Code: img=yes audio=no docs=yes sessions=list/resume/fork" in switch_text
+    assert "* Codex [current]: img=yes audio=yes docs=yes sessions=list/resume/fork" in switch_text
+    assert "- Gemini CLI: img=yes audio=yes docs=no sessions=none" in switch_text
     assert services.discover_provider_capabilities_calls == [
         ("claude", "default"),
         ("codex", "default"),
@@ -7066,9 +8703,21 @@ def test_switch_agent_button_shows_provider_choices():
 
 def test_switch_agent_button_shows_replay_shortcuts_when_last_turn_exists():
     from talk2agent.acp.agent_session import PromptText
-    from talk2agent.bots.telegram_bot import BUTTON_SWITCH_AGENT, TelegramUiState, _ReplayTurn, handle_text
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SWITCH_AGENT,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_text,
+    )
 
     ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
     ui_state.set_last_turn(
         123,
         _ReplayTurn(
@@ -7083,6 +8732,10 @@ def test_switch_agent_button_shows_replay_shortcuts_when_last_turn_exists():
 
     run(handle_text(update, None, services, ui_state))
 
+    switch_text = update.message.reply_calls[0]
+    assert "Switch impact:" in switch_text
+    assert "- Context bundle (1 item) stays with the current agent runtime and won't follow the switch." in switch_text
+    assert "- Last Turn stays available in this workspace: hello" in switch_text
     markup = update.message.reply_markups[0]
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert labels == [
@@ -7154,16 +8807,19 @@ def test_switch_agent_button_shows_unavailable_provider_capability_summary():
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls == [
-        (
-            "Current provider: Codex\n"
-            "Workspace: Default Workspace\n"
-            "Provider capabilities:\n"
-            "- Claude Code: unavailable (command missing)\n"
-            "* Codex [current]: img=yes audio=yes docs=yes sessions=list/resume/fork\n"
-            "- Gemini CLI: unavailable (session creation failed)"
-        )
-    ]
+    switch_text = update.message.reply_calls[0]
+    assert switch_text.startswith(
+        "Current provider: Codex\n"
+        "Workspace: Default Workspace\n"
+        "Switch impact:\n"
+        "- Old bot buttons and pending inputs will be cleared.\n"
+        "- Context bundle does not follow an agent switch.\n"
+        "- After switching, send a fresh request or open Bot Status to keep going.\n"
+        "Provider capabilities:"
+    )
+    assert "- Claude Code: unavailable (command missing)" in switch_text
+    assert "* Codex [current]: img=yes audio=yes docs=yes sessions=list/resume/fork" in switch_text
+    assert "- Gemini CLI: unavailable (session creation failed)" in switch_text
 
 
 def test_callback_switch_provider_current_provider_is_noop():
@@ -7186,7 +8842,7 @@ def test_callback_switch_provider_current_provider_is_noop():
     assert callback_update.callback_query.message.edit_calls == []
 
 
-def test_callback_switch_provider_failure_edits_message_text():
+def test_callback_switch_provider_failure_restores_switch_menu():
     from talk2agent.bots.telegram_bot import CALLBACK_PREFIX, TelegramUiState, handle_callback_query
 
     ui_state = TelegramUiState()
@@ -7199,18 +8855,73 @@ def test_callback_switch_provider_failure_edits_message_text():
 
     assert services.switch_provider_calls == ["gemini"]
     assert update.callback_query.answers == [(None, False)]
-    assert [text for text, _ in message.edit_calls] == [
-        "Switching to Gemini CLI...",
-        "session creation failed",
-    ]
+    final_text, final_markup = message.edit_calls[-1]
+    assert final_text.startswith(
+        "Couldn't switch agent. Try again or choose another agent.\n"
+        "Current provider: Claude Code"
+    )
+    assert find_inline_button(final_markup, "Gemini CLI")
 
 
 def test_switch_workspace_button_shows_choices_and_switches():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SWITCH_WORKSPACE,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    ui_state.set_last_request_text(123, "default", "Reuse this request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SWITCH_WORKSPACE)
+    services, _ = make_services(provider="codex", admin_user_id=123)
+
+    run(handle_text(update, None, services, ui_state))
+
+    switch_text = update.message.reply_calls[0]
+    assert switch_text.startswith(
+        "Current provider: Codex\n"
+        "Current workspace: Default Workspace\n"
+        "Switch impact:"
+    )
+    assert "Current workspace state that will stay behind: Context Bundle (1 item), Last Request, Last Turn." in switch_text
+    markup = update.message.reply_markups[0]
+    alt_button = markup.inline_keyboard[1][0]
+    callback_update = FakeCallbackUpdate(123, alt_button.callback_data, message=FakeIncomingMessage("workspace"))
+
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    assert services.switch_workspace_calls == ["alt"]
+    final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert_switch_workspace_success_notice(final_text, workspace="Alt Workspace", provider="Codex")
+    assert "Current workspace: Alt Workspace" in final_text
+    assert find_inline_button(final_markup, "Current: Alt Workspace")
+
+
+def test_switch_workspace_failure_shows_actionable_recovery_copy():
     from talk2agent.bots.telegram_bot import BUTTON_SWITCH_WORKSPACE, TelegramUiState, handle_callback_query, handle_text
 
     ui_state = TelegramUiState()
     update = FakeUpdate(user_id=123, text=BUTTON_SWITCH_WORKSPACE)
-    services, _ = make_services(provider="codex", admin_user_id=123)
+    services, _ = make_services(switch_workspace_error=RuntimeError("boom"))
 
     run(handle_text(update, None, services, ui_state))
 
@@ -7221,10 +8932,52 @@ def test_switch_workspace_button_shows_choices_and_switches():
     run(handle_callback_query(callback_update, None, services, ui_state))
 
     assert services.switch_workspace_calls == ["alt"]
-    assert [text for text, _ in callback_update.callback_query.message.edit_calls] == [
-        "Switching workspace to Alt Workspace...",
-        "Switched workspace to Alt Workspace on Codex. Old bot buttons and pending inputs were cleared.",
-    ]
+    final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert final_text.startswith(
+        "Couldn't switch workspace. Try again or choose another workspace.\n"
+        "Current provider: Claude Code\n"
+        "Current workspace: Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Alt Workspace")
+
+
+def test_switch_workspace_failure_discards_pending_media_group_before_attempting_switch():
+    from talk2agent.bots.telegram_bot import CALLBACK_PREFIX, TelegramUiState, handle_attachment, handle_callback_query
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.05)
+        services, _ = make_services(switch_workspace_error=RuntimeError("boom"))
+        attachment_message = FakeIncomingMessage(
+            caption="Compare this screenshot",
+            photo=[FakePhotoSize(file_unique_id="photo-switch-workspace", payload=b"one")],
+            media_group_id="group-switch-workspace",
+        )
+        await handle_attachment(FakeUpdate(user_id=123, message=attachment_message), None, services, ui_state)
+
+        token = ui_state.create(123, "switch_workspace", workspace_id="alt", back_target="none")
+        callback_message = FakeIncomingMessage("workspace")
+        callback_update = FakeCallbackUpdate(
+            123,
+            f"{CALLBACK_PREFIX}{token}",
+            message=callback_message,
+        )
+        await handle_callback_query(callback_update, None, services, ui_state)
+        await asyncio.sleep(0.07)
+        return services, ui_state, callback_message
+
+    services, ui_state, callback_message = asyncio.run(scenario())
+
+    assert services.switch_workspace_calls == ["alt"]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Discarded pending attachment group (1 item). Nothing was sent to the agent.\n"
+        "Couldn't switch workspace. Try again or choose another workspace.\n"
+        "Current provider: Claude Code\n"
+        "Current workspace: Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Alt Workspace")
+    assert ui_state.pending_media_group_stats(123) is None
+    assert services.final_session.prompt_items == []
 
 
 def test_switch_provider_invalidates_stale_buttons_and_pending_inputs():
@@ -7241,15 +8994,17 @@ def test_switch_provider_invalidates_stale_buttons_and_pending_inputs():
     run(handle_callback_query(update, None, services, ui_state))
 
     assert ui_state.get_pending_text_action(123) is None
-    assert [text for text, _ in message.edit_calls] == [
-        "Switching to Gemini CLI...",
-        "Switched agent to Gemini CLI in Default Workspace. Old bot buttons and pending inputs were cleared.",
-    ]
+    final_text, final_markup = message.edit_calls[-1]
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Current provider: Gemini CLI" in final_text
+    assert find_inline_button(final_markup, "Current: Gemini CLI")
 
     stale_update = FakeCallbackUpdate(123, f"{CALLBACK_PREFIX}{stale_token}", message=FakeIncomingMessage("stale"))
     run(handle_callback_query(stale_update, None, services, ui_state))
 
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
 
 
 def test_callback_switch_provider_fork_last_turn_switches_then_replays_in_new_session():
@@ -7295,23 +9050,62 @@ def test_callback_switch_provider_fork_last_turn_switches_then_replays_in_new_se
 
     assert services.switch_provider_calls == ["gemini"]
     assert store.reset_calls == [123]
-    assert [text for text, _ in message.edit_calls] == [
-        "Switching to Gemini CLI...",
-        (
-            "Switched agent to Gemini CLI in Default Workspace. "
-            "Old bot buttons and pending inputs were cleared.\n"
-            "Forking last turn on the new agent..."
-        ),
-    ]
+    assert message.edit_calls[0][0] == "Switching to Gemini CLI..."
+    assert_switch_agent_success_notice(message.edit_calls[1][0], provider="Gemini CLI")
+    assert message.edit_calls[1][0].endswith("Forking last turn on the new agent...")
     assert len(services.final_session.prompt_items) == 1
     assert services.final_session.prompt_items[0] == (PromptText("hello"),)
     assert message.reply_calls == ["hello world"]
     assert store.record_session_usage_calls == [
         (123, "session-123", "hello"),
     ]
+    final_text, final_markup = message.edit_calls[-1]
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "Forked last turn on the new agent." in final_text
+    assert "Current provider: Gemini CLI" in final_text
+    assert find_inline_button(final_markup, "Current: Gemini CLI")
     replay_turn = ui_state.get_last_turn(123, "gemini", "default")
     assert replay_turn is not None
     assert replay_turn.provider == "gemini"
+
+
+def test_callback_switch_provider_retry_last_turn_without_previous_turn_restores_switch_menu():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SWITCH_AGENT,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    menu_update = FakeUpdate(user_id=123, text=BUTTON_SWITCH_AGENT)
+    message = FakeIncomingMessage("switch")
+    services, _ = make_services(provider="codex", admin_user_id=123)
+
+    run(handle_text(menu_update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(menu_update.message.reply_markups[0], "Retry on Gemini CLI")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=message)
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert services.switch_provider_calls == ["gemini"]
+    final_text, final_markup = message.edit_calls[-1]
+    assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
+    assert "No previous turn is available yet. Send a new request first, then try again." in final_text
+    assert "Current provider: Gemini CLI" in final_text
+    assert find_inline_button(final_markup, "Current: Gemini CLI")
 
 
 def test_invalidate_runtime_bound_interactions_clears_aliases_bundle_chat_and_media_groups():
@@ -7378,6 +9172,43 @@ def test_session_history_delete_refreshes_with_notice():
     assert edited_texts[0] == "Deleting session..."
     assert edited_texts[-1].startswith("Deleted session.\nSession history for Codex in Default Workspace")
     assert ui_state.get(stale_token) is not None
+
+
+def test_session_history_delete_failure_shows_actionable_notice():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    history_entries = [
+        build_history_entry("session-1", "First"),
+        build_history_entry("session-2", "Second"),
+    ]
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, store = make_services(
+        provider="codex",
+        history_entries=history_entries,
+        delete_history_result=False,
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    first_markup = update.message.reply_markups[0]
+    delete_button = first_markup.inline_keyboard[0][2]
+    callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=FakeIncomingMessage("history"))
+
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    assert store.delete_history_calls == [(123, "session-1")]
+    edited_texts = [text for text, _ in callback_update.callback_query.message.edit_calls]
+    assert edited_texts[0] == "Deleting session..."
+    assert edited_texts[-1].startswith(
+        "Couldn't delete that session. Try again or reopen Session History.\n"
+        "Session history for Codex in Default Workspace"
+    )
 
 
 def test_session_history_delete_current_session_clears_session_bound_interactions_and_syncs_commands():
@@ -7472,14 +9303,13 @@ def test_session_history_delete_current_session_clears_session_bound_interaction
     assert session.closed is True
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.resolve_agent_command(123, "old_status") is None
-    assert ui_state.resolve_agent_command(123, "status") == "status"
+    assert ui_state.resolve_agent_command(123, "status") is None
+    assert ui_state.resolve_agent_command(123, "agent_status") == "status"
     assert ui_state.get(stale_token) is None
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is True
     assert ui_state.pop_media_group_messages(123, "group-1") == ()
     assert task.cancelled()
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == [
-        "status",
-    ]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
     edited_texts = [text for text, _ in callback_update.callback_query.message.edit_calls]
     assert edited_texts[0] == "Deleting session..."
@@ -7487,10 +9317,12 @@ def test_session_history_delete_current_session_clears_session_bound_interaction
         "Deleted session. Old bot buttons and pending inputs tied to that session were cleared.\n"
         "Session history for Codex in Default Workspace"
     )
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
 
 
-def test_session_history_run_failure_shows_failure_text():
+def test_session_history_run_failure_restores_history():
     from talk2agent.bots.telegram_bot import (
         BUTTON_SESSION_HISTORY,
         TelegramUiState,
@@ -7513,10 +9345,54 @@ def test_session_history_run_failure_shows_failure_text():
 
     run(handle_callback_query(callback_update, None, services, ui_state))
 
-    assert [text for text, _ in callback_update.callback_query.message.edit_calls] == [
-        "Switching to session...",
-        "Failed to switch session.",
-    ]
+    final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert final_text.startswith(
+        "Couldn't switch to that session. Try again, reopen Session History, or start a new session.\n"
+        "Session history for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Run 1")
+
+
+def test_session_history_run_retry_failure_restores_history():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(
+        provider="codex",
+        history_entries=[build_history_entry("session-1", "First")],
+        activate_history_error=RuntimeError("boom"),
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Run+Retry 1")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=FakeIncomingMessage("history"))
+
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert final_text.startswith(
+        "Couldn't switch to that session. Try again, reopen Session History, or start a new session.\n"
+        "Session history for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Run+Retry 1")
 
 
 def test_session_history_run_clears_session_bound_interactions_and_syncs_commands():
@@ -7561,15 +9437,21 @@ def test_session_history_run_clears_session_bound_interactions_and_syncs_command
     assert store.activate_history_calls == [(123, "session-1")]
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is True
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["model"]
-    assert callback_update.callback_query.message.edit_calls[-1][0] == (
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("model")
+    final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "Session history for Codex in Default Workspace"
     )
+    assert "[current]" in final_text
+    assert find_inline_button(final_markup, "Current 1")
 
     stale_update = FakeCallbackUpdate(123, f"{CALLBACK_PREFIX}{stale_token}", message=FakeIncomingMessage("stale"))
     run(handle_callback_query(stale_update, None, services, ui_state))
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
 
 
 def test_session_history_detail_from_reply_keyboard_can_open_and_back():
@@ -7729,17 +9611,71 @@ def test_session_history_run_retry_switches_session_and_replays_last_turn():
     run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
 
     assert store.activate_history_calls == [(123, "session-1")]
-    assert [text for text, _ in callback_message.edit_calls] == [
+    assert [text for text, _ in callback_message.edit_calls[:2]] == [
         "Switching to session...",
         (
             "Switched to session session-1 on Codex in Default Workspace. "
-            "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
             "Retrying last turn in this session..."
         ),
     ]
     assert session.prompt_items == [(PromptText("hello"),)]
     assert callback_message.reply_calls == ["hello world"]
     assert store.record_session_usage_calls == [(123, "session-1", "hello")]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Switched to session session-1 on Codex in Default Workspace. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "Retried last turn in this session.\n"
+        "Session history for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Current 1")
+
+
+def test_session_history_run_retry_without_previous_turn_restores_history():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    callback_message = FakeIncomingMessage("history")
+    services, store = make_services(
+        provider="codex",
+        session=FakeSession(session_id="session-live"),
+        history_entries=[build_history_entry("session-1", "First")],
+    )
+
+    run(handle_text(update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Run+Retry 1")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert store.activate_history_calls == [(123, "session-1")]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Switched to session session-1 on Codex in Default Workspace. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Session history for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Current 1")
 
 
 def test_session_history_shows_fork_buttons_when_provider_supports_fork():
@@ -7787,11 +9723,11 @@ def test_session_history_fork_refreshes_history_view_and_syncs_commands():
     assert store.fork_history_calls == [(123, "session-1")]
     assert store.record_session_usage_calls == [(123, "fork-session-1", None)]
     assert ui_state.get_pending_text_action(123) is None
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["model"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("model")
     final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Session history for Codex in Default Workspace"
     )
     assert "[current]" in final_text
@@ -7841,7 +9777,7 @@ def test_session_history_fork_retry_switches_session_and_replays_last_turn():
         "Forking session...",
         (
             "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-            "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
             "Retrying last turn in this session..."
         ),
     ]
@@ -7854,8 +9790,54 @@ def test_session_history_fork_retry_switches_session_and_replays_last_turn():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
+        "Session history for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Current 1")
+
+
+def test_session_history_fork_retry_without_previous_turn_restores_history():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    callback_message = FakeIncomingMessage("history")
+    services, store = make_services(
+        provider="codex",
+        session=FakeSession(session_id="session-live"),
+        history_entries=[build_history_entry("session-1", "First")],
+    )
+
+    run(handle_text(update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Fork+Retry 1")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert store.fork_history_calls == [(123, "session-1")]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "No previous turn is available yet. Send a new request first, then try again.\n"
         "Session history for Codex in Default Workspace"
     )
     assert find_inline_button(final_markup, "Current 1")
@@ -7878,6 +9860,7 @@ def test_session_history_rename_uses_next_text_message():
     assert callback_update.callback_query.message.edit_calls[-1][0].startswith(
         "Send the new session title as your next plain text message."
     )
+    assert callback_update.callback_query.message.edit_calls[-1][0].endswith("Send /cancel to back out.")
 
     rename_update = FakeUpdate(user_id=123, text="Renamed Session")
     run(handle_text(rename_update, None, services, ui_state))
@@ -7973,17 +9956,19 @@ def test_provider_sessions_can_be_browsed_and_attached_from_history():
     assert store.activate_provider_calls == [(123, "desktop-session", "Desktop Flow")]
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is True
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
     final_text = run_update.callback_query.message.edit_calls[-1][0]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared."
     )
     assert "Desktop Flow [current]" in final_text
 
     stale_update = FakeCallbackUpdate(123, f"{CALLBACK_PREFIX}{stale_token}", message=FakeIncomingMessage("stale"))
     run(handle_callback_query(stale_update, None, services, ui_state))
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
 
 
 def test_provider_session_detail_from_history_keeps_back_chain_to_status():
@@ -8058,6 +10043,48 @@ def test_provider_session_detail_from_history_keeps_back_chain_to_status():
     status_text, status_markup = callback_message.edit_calls[-1]
     assert status_text.startswith("Bot status for Codex in Default Workspace")
     assert find_inline_button(status_markup, "Provider Sessions")
+
+
+def test_provider_session_detail_failure_keeps_retry_and_back_to_provider_sessions():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    provider_page = SimpleNamespace(
+        entries=(build_provider_session("desktop-session", "Desktop Flow", cwd_label="src"),),
+        next_cursor=None,
+        supported=True,
+    )
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(
+        provider="codex",
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={None: provider_page},
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
+    run(handle_callback_query(provider_update, None, services, ui_state))
+
+    async def fail_list_provider_sessions(cursor=None):
+        raise RuntimeError("boom")
+
+    services.list_provider_sessions = fail_list_provider_sessions
+
+    open_button = find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Open 1")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=provider_update.callback_query.message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    failure_text, failure_markup = open_update.callback_query.message.edit_calls[-1]
+    assert failure_text == "Couldn't load that provider session. Try again or go back."
+    assert find_inline_button(failure_markup, "Try Again")
+    assert find_inline_button(failure_markup, "Back to Provider Sessions")
 
 
 def test_provider_sessions_show_run_retry_button_when_last_turn_exists():
@@ -8150,17 +10177,81 @@ def test_provider_session_run_retry_switches_session_and_replays_last_turn():
     run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
 
     assert store.activate_provider_calls == [(123, "desktop-session", "Desktop Flow")]
-    assert [text for text, _ in callback_message.edit_calls[-2:]] == [
+    assert [text for text, _ in callback_message.edit_calls[-3:-1]] == [
         "Switching to provider session...",
         (
             "Switched to provider session desktop-session. "
-            "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
             "Retrying last turn in this session..."
         ),
     ]
     assert session.prompt_items == [(PromptText("hello"),)]
     assert callback_message.reply_calls == ["hello world"]
     assert store.record_session_usage_calls == [(123, "desktop-session", "hello")]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Switched to provider session desktop-session. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "Retried last turn in this session.\n"
+        "Provider sessions for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Current 1")
+
+
+def test_provider_session_run_retry_without_previous_turn_restores_provider_view():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    provider_page = SimpleNamespace(
+        entries=(build_provider_session("desktop-session", "Desktop Flow", cwd_label="src"),),
+        next_cursor=None,
+        supported=True,
+    )
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    callback_message = FakeIncomingMessage("history")
+    services, store = make_services(
+        provider="codex",
+        session=FakeSession(session_id="session-live"),
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={None: provider_page},
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=callback_message)
+    run(handle_callback_query(provider_update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Run+Retry 1")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert store.activate_provider_calls == [(123, "desktop-session", "Desktop Flow")]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Switched to provider session desktop-session. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Provider sessions for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Current 1")
 
 
 def test_provider_sessions_show_fork_buttons_when_provider_supports_fork():
@@ -8231,11 +10322,11 @@ def test_provider_session_fork_refreshes_provider_view():
     assert store.fork_provider_calls == [(123, "desktop-session", "Desktop Flow")]
     assert store.record_session_usage_calls == [(123, "fork-desktop-session", "Desktop Flow")]
     assert ui_state.get_pending_text_action(123) is None
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Provider sessions for Codex in Default Workspace"
     )
     assert find_inline_button(final_markup, "Fork 1")
@@ -8294,7 +10385,7 @@ def test_provider_session_fork_retry_switches_session_and_replays_last_turn():
         "Forking provider session...",
         (
             "Forked provider session desktop-session into fork-desktop-session. "
-            "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
             "Retrying last turn in this session..."
         ),
     ]
@@ -8307,11 +10398,67 @@ def test_provider_session_fork_retry_switches_session_and_replays_last_turn():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
         "Retried last turn in this session.\n"
         "Provider sessions for Codex in Default Workspace"
     )
     assert find_inline_button(final_markup, "Fork+Retry 1")
+
+
+def test_provider_session_fork_retry_without_previous_turn_restores_provider_view():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    provider_page = SimpleNamespace(
+        entries=(build_provider_session("desktop-session", "Desktop Flow", cwd_label="src"),),
+        next_cursor=None,
+        supported=True,
+    )
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    callback_message = FakeIncomingMessage("history")
+    services, store = make_services(
+        provider="codex",
+        session=FakeSession(session_id="session-live"),
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={None: provider_page},
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=callback_message)
+    run(handle_callback_query(provider_update, None, services, ui_state))
+    ui_state._last_turns.pop(123, None)
+
+    retry_button = find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Fork+Retry 1")
+    retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert store.fork_provider_calls == [(123, "desktop-session", "Desktop Flow")]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Forked provider session desktop-session into fork-desktop-session. "
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Provider sessions for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_markup, "Fork 1")
 
 
 def test_provider_sessions_show_unsupported_message():
@@ -8571,7 +10718,10 @@ def test_bot_status_agent_commands_run_failure_restores_status():
     assert store.get_or_create_calls == [123]
     assert callback_message.reply_calls == []
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Agent Commands")
 
 
@@ -8610,7 +10760,10 @@ def test_bot_status_agent_commands_run_runtime_failure_restores_status():
         "Request failed. The current live session for Codex in Default Workspace was closed."
     )
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Agent Commands")
 
 
@@ -8689,7 +10842,10 @@ def test_bot_status_agent_commands_run_with_args_failure_restores_status():
     assert store.get_or_create_calls == [123]
     assert request_update.message.reply_calls == []
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Request failed.\nBot status for Codex in Default Workspace")
+    assert final_text.startswith(
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Bot status for Codex in Default Workspace"
+    )
     assert find_inline_button(final_markup, "Agent Commands")
 
 
@@ -8714,7 +10870,11 @@ def test_agent_commands_run_button_executes_command_turn():
 
     assert [text for text, _ in callback_message.edit_calls] == ["Running /status..."]
     assert session.prompts == ["/status"]
-    assert [text for _, text in callback_message.draft_calls] == ["Thinking...", "hello ", "hello world"]
+    assert [text for _, text in callback_message.draft_calls] == [
+        "Working on your request...\nI'll stream progress here. Use /cancel or Cancel / Stop to interrupt.",
+        "hello ",
+        "hello world",
+    ]
     assert callback_message.reply_calls == ["hello world"]
     assert store.record_session_usage_calls == [(123, "session-abc", "/status")]
 
@@ -9143,7 +11303,7 @@ def test_workspace_search_uses_next_text_message_and_shows_matches(tmp_path):
     run(handle_text(start_update, None, services, ui_state))
 
     assert start_update.message.reply_calls == [
-        "Send your workspace search query as the next plain text message."
+        "Send your workspace search query as the next plain text message. Send /cancel to back out."
     ]
 
     query_update = FakeUpdate(user_id=123, text="agent")
@@ -9252,7 +11412,7 @@ def test_workspace_search_open_context_bundle_can_go_back_to_search(tmp_path):
     bundle_text, bundle_markup = bundle_update.callback_query.message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty."
+        "Context bundle is empty. Add files or changes first."
     )
     back_button = find_inline_button(bundle_markup, "Back to Search")
 
@@ -9574,7 +11734,7 @@ def test_workspace_file_preview_open_context_bundle_can_go_back_to_file(tmp_path
     bundle_text, bundle_markup = bundle_update.callback_query.message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty."
+        "Context bundle is empty. Add files or changes first."
     )
     back_button = find_inline_button(bundle_markup, "Back to File")
 
@@ -9644,7 +11804,8 @@ def test_context_bundle_button_shows_empty_bundle():
     run(handle_text(update, None, services, TelegramUiState()))
 
     assert update.message.reply_calls == [
-        "Context bundle for Claude Code in Default Workspace\nContext bundle is empty."
+        "Context bundle for Claude Code in Default Workspace\n"
+        "Context bundle is empty. Add files or changes first."
     ]
 
 
@@ -9954,7 +12115,7 @@ def test_workspace_search_file_ask_cancel_restores_preview(tmp_path):
     )
 
 
-def test_workspace_search_cancel_clears_pending_input():
+def test_workspace_search_cancel_keeps_recovery_actions():
     from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_SEARCH, TelegramUiState, handle_callback_query, handle_text
 
     ui_state = TelegramUiState()
@@ -9966,7 +12127,27 @@ def test_workspace_search_cancel_clears_pending_input():
     cancel_update = FakeCallbackUpdate(123, cancel_button.callback_data, message=FakeIncomingMessage("search"))
     run(handle_callback_query(cancel_update, None, services, ui_state))
 
-    assert cancel_update.callback_query.message.edit_calls == [("Search cancelled.", None)]
+    assert ui_state.get_pending_text_action(123) is None
+    cancelled_text, cancelled_markup = cancel_update.callback_query.message.edit_calls[-1]
+    assert cancelled_text == (
+        "Search cancelled. Use Workspace Search to search again or open Bot Status when ready."
+    )
+    assert find_inline_button(cancelled_markup, "Search Again")
+    assert find_inline_button(cancelled_markup, "Open Bot Status")
+
+    search_again_button = find_inline_button(cancelled_markup, "Search Again")
+    search_again_update = FakeCallbackUpdate(
+        123,
+        search_again_button.callback_data,
+        message=cancel_update.callback_query.message,
+    )
+    run(handle_callback_query(search_again_update, None, services, ui_state))
+
+    assert ui_state.get_pending_text_action(123) is not None
+    assert search_again_update.callback_query.message.edit_calls[-1][0] == (
+        "Send your workspace search query as the next plain text message. Send /cancel to back out."
+    )
+    assert find_inline_button(search_again_update.callback_query.message.edit_calls[-1][1], "Cancel Search")
 
 
 def test_workspace_changes_button_shows_git_status(monkeypatch):
@@ -10623,7 +12804,8 @@ def test_context_bundle_can_remove_and_clear_items():
     run(handle_callback_query(clear_update, None, services, ui_state))
 
     assert clear_update.callback_query.message.edit_calls[-1] == (
-        "Cleared context bundle.\nContext bundle for Claude Code in Default Workspace\nContext bundle is empty.",
+        "Cleared context bundle.\nContext bundle for Claude Code in Default Workspace\n"
+        "Context bundle is empty. Add files or changes first.",
         None,
     )
 
@@ -10867,7 +13049,9 @@ def test_context_bundle_clear_turns_off_bundle_chat():
     run(handle_callback_query(clear_update, None, services, ui_state))
 
     assert clear_update.callback_query.message.edit_calls[-1] == (
-        "Cleared context bundle. Bundle chat was turned off.\nContext bundle for Claude Code in Default Workspace\nContext bundle is empty.",
+        "Cleared context bundle. Bundle chat was turned off.\n"
+        "Context bundle for Claude Code in Default Workspace\n"
+        "Context bundle is empty. Add files or changes first.",
         None,
     )
 
@@ -10917,7 +13101,7 @@ def test_model_mode_button_starts_session_when_none_exists():
     assert update.message.reply_calls[0].startswith(
         "Started session for model / mode controls.\nSession: session-123"
     )
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == ["status"]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
 def test_model_mode_selection_updates_choice_and_edits_menu():
@@ -10939,6 +13123,91 @@ def test_model_mode_selection_updates_choice_and_edits_menu():
     assert callback_update.callback_query.message.edit_calls[-1][0].startswith(
         "Updated model to GPT-5.4 Mini.\nSession: session-123"
     )
+
+
+def test_model_mode_selection_update_failure_shows_actionable_recovery_copy():
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, _ = make_services()
+
+    async def fail_set_selection(kind, value):
+        raise RuntimeError("boom")
+
+    services.final_session.set_selection = fail_set_selection
+
+    run(handle_text(update, None, services, ui_state))
+
+    markup = update.message.reply_markups[0]
+    mini_button = find_inline_button(markup, "Model: GPT-5.4 Mini")
+    callback_update = FakeCallbackUpdate(123, mini_button.callback_data, message=FakeIncomingMessage("model"))
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert failure_text == "Couldn't update model or mode. Try again or reopen Model / Mode."
+    assert find_inline_button(failure_markup, "Reopen Model / Mode")
+    assert find_inline_button(failure_markup, "Open Bot Status")
+
+
+def test_model_mode_selection_without_live_session_shows_actionable_recovery_copy():
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, store = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_session = None
+
+    markup = update.message.reply_markups[0]
+    mini_button = find_inline_button(markup, "Model: GPT-5.4 Mini")
+    callback_update = FakeCallbackUpdate(123, mini_button.callback_data, message=FakeIncomingMessage("model"))
+    run(handle_callback_query(callback_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert failure_text == "No active session. Send text or an attachment to start one."
+    assert find_inline_button(failure_markup, "Reopen Model / Mode")
+    assert find_inline_button(failure_markup, "Open Bot Status")
+
+
+def test_model_mode_selection_retry_without_live_session_shows_actionable_recovery_copy():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_MODEL_MODE,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, store = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_session = None
+
+    markup = update.message.reply_markups[0]
+    retry_button = find_inline_button(markup, "Model+Retry: GPT-5.4 Mini")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=FakeIncomingMessage("model"))
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    failure_text, failure_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert failure_text == "No active session. Send text or an attachment to start one."
+    assert find_inline_button(failure_markup, "Reopen Model / Mode")
+    assert find_inline_button(failure_markup, "Open Bot Status")
 
 
 def test_model_mode_view_shows_retry_shortcuts_when_last_turn_exists():
@@ -10996,7 +13265,7 @@ def test_model_mode_selection_retry_replays_last_turn():
     run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
 
     assert services.final_session.set_selection_calls == [("model", "gpt-5.4-mini")]
-    assert [text for text, _ in callback_message.edit_calls] == [
+    assert [text for text, _ in callback_message.edit_calls[:1]] == [
         "Updated model to GPT-5.4 Mini.\nRetrying last turn with the updated setting..."
     ]
     assert services.final_session.prompt_items == [(PromptText("hello"),)]
@@ -11005,6 +13274,102 @@ def test_model_mode_selection_retry_replays_last_turn():
         (123, "session-123", None),
         (123, "session-123", "hello"),
     ]
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Updated model to GPT-5.4 Mini.\n"
+        "Retried last turn with the updated setting.\n"
+        "Session: session-123"
+    )
+    assert find_inline_button(final_markup, "Current Model: GPT-5.4 Mini")
+
+
+def test_model_mode_selection_retry_prepare_failure_restores_menu_with_failure_notice():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_MODEL_MODE,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    callback_message = FakeIncomingMessage("model")
+    services, _ = make_services(get_or_create_error=RuntimeError("boom"))
+
+    run(handle_text(update, None, services, ui_state))
+
+    retry_button = find_inline_button(update.message.reply_markups[0], "Model+Retry: GPT-5.4 Mini")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith(
+        "Updated model to GPT-5.4 Mini.\n"
+        "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Session: session-123"
+    )
+    assert "Retried last turn with the updated setting." not in final_text
+    assert find_inline_button(final_markup, "Current Model: GPT-5.4 Mini")
+
+
+def test_model_mode_selection_retry_turn_failure_restores_menu_with_failure_notice():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_MODEL_MODE,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("hello"),),
+            title_hint="hello",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    callback_message = FakeIncomingMessage("model")
+    session = FakeSession()
+    services, _ = make_services(session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    session.error = RuntimeError("boom")
+    session.raise_before_stream = True
+    retry_button = find_inline_button(update.message.reply_markups[0], "Model+Retry: GPT-5.4 Mini")
+    callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
+    run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
+
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text == (
+        "Updated model to GPT-5.4 Mini.\n"
+        "Request failed. Try again, use /start, or open Bot Status."
+    )
+    assert "Retried last turn with the updated setting." not in final_text
+    assert session.prompt_items == [(PromptText("hello"),)]
+    assert callback_message.reply_calls == [
+        "Request failed. The current live session for Claude Code in Default Workspace was closed.\n"
+        "Recommended first step: Retry Last Turn to rerun the previous request, or open Bot "
+        "Status if you want to inspect runtime and history first."
+    ]
+    assert find_inline_button(final_markup, "Reopen Model / Mode")
+    assert find_inline_button(final_markup, "Open Bot Status")
 
 
 def test_model_mode_selection_refreshes_command_menu_for_current_session():
@@ -11035,10 +13400,10 @@ def test_model_mode_selection_refreshes_command_menu_for_current_session():
     callback_update = FakeCallbackUpdate(123, mini_button.callback_data, message=FakeIncomingMessage("model"))
     run(handle_callback_query(callback_update, make_context(application=application), services, ui_state))
 
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == [
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu(
         "status",
         "plan",
-    ]
+    )
 
 
 def test_model_mode_choice_detail_can_open_and_back():
@@ -11075,6 +13440,78 @@ def test_model_mode_choice_detail_can_open_and_back():
     restored_text, restored_markup = callback_message.edit_calls[-1]
     assert restored_text.startswith("Session: session-123")
     assert find_inline_button(restored_markup, "Open Model 2")
+
+
+def test_model_mode_choice_detail_failure_keeps_retry_and_back_to_model_mode():
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, store = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_error = RuntimeError("boom")
+
+    callback_message = FakeIncomingMessage("model")
+    open_button = find_inline_button(update.message.reply_markups[0], "Open Model 2")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=callback_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_message.edit_calls[-1]
+    assert failure_text == "Couldn't load selection details. Try again or go back."
+    assert find_inline_button(failure_markup, "Try Again")
+    assert find_inline_button(failure_markup, "Back to Model / Mode")
+
+
+def test_model_mode_choice_detail_session_creation_failure_shows_recovery_actions():
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, store = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_session = None
+    store.get_or_create_error = RuntimeError("boom")
+
+    callback_message = FakeIncomingMessage("model")
+    open_button = find_inline_button(update.message.reply_markups[0], "Open Model 2")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=callback_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_message.edit_calls[-1]
+    assert failure_text == "Couldn't start a session. Try again, use /start, or open Bot Status."
+    assert find_inline_button(failure_markup, "Reopen Model / Mode")
+    assert find_inline_button(failure_markup, "Open Bot Status")
+
+
+def test_model_mode_back_to_menu_session_creation_failure_shows_recovery_actions():
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_callback_query, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, store = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    callback_message = FakeIncomingMessage("model")
+    open_button = find_inline_button(update.message.reply_markups[0], "Open Model 2")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=callback_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    store.peek_session = None
+    store.get_or_create_error = RuntimeError("boom")
+
+    back_button = find_inline_button(callback_message.edit_calls[-1][1], "Back to Model / Mode")
+    back_update = FakeCallbackUpdate(123, back_button.callback_data, message=callback_message)
+    run(handle_callback_query(back_update, None, services, ui_state))
+
+    failure_text, failure_markup = callback_message.edit_calls[-1]
+    assert failure_text == "Couldn't start a session. Try again, use /start, or open Bot Status."
+    assert find_inline_button(failure_markup, "Reopen Model / Mode")
+    assert find_inline_button(failure_markup, "Open Bot Status")
 
 
 def test_failed_text_turn_clears_session_bound_interactions_and_syncs_commands():
@@ -11135,7 +13572,9 @@ def test_failed_text_turn_clears_session_bound_interactions_and_syncs_commands()
     assert store.invalidate_calls == [(123, session)]
     assert store.peek_session is None
     assert store.record_session_usage_calls == []
-    assert [text for _, text in message.draft_calls] == ["Thinking..."]
+    assert [text for _, text in message.draft_calls] == [
+        "Working on your request...\nI'll stream progress here. Use /cancel or Cancel / Stop to interrupt."
+    ]
     assert message.reply_calls[0].startswith(
         "Request failed. The current live session for Codex in Default Workspace was closed."
     )
@@ -11143,20 +13582,20 @@ def test_failed_text_turn_clears_session_bound_interactions_and_syncs_commands()
     find_inline_button(recovery_markup, "Retry Last Turn")
     find_inline_button(recovery_markup, "Fork Last Turn")
     find_inline_button(recovery_markup, "New Session")
+    find_inline_button(recovery_markup, "Open Bot Status")
     history_button = find_inline_button(recovery_markup, "Session History")
     find_inline_button(recovery_markup, "Model / Mode")
     find_inline_button(recovery_markup, "Switch Agent")
     find_inline_button(recovery_markup, "Switch Workspace")
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.resolve_agent_command(123, "old_status") is None
-    assert ui_state.resolve_agent_command(123, "status") == "status"
+    assert ui_state.resolve_agent_command(123, "status") is None
+    assert ui_state.resolve_agent_command(123, "agent_status") == "status"
     assert ui_state.get(stale_token) is None
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is True
     assert ui_state.pop_media_group_messages(123, "group-1") == ()
     assert task.cancel_calls == 1
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == [
-        "status",
-    ]
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
     history_update = FakeCallbackUpdate(123, history_button.callback_data, message=message)
     run(handle_callback_query(history_update, None, services, ui_state))
@@ -11168,7 +13607,9 @@ def test_failed_text_turn_clears_session_bound_interactions_and_syncs_commands()
         message=FakeIncomingMessage("stale"),
     )
     run(handle_callback_query(stale_update, None, services, ui_state))
-    assert stale_update.callback_query.answers == [("This button has expired.", True)]
+    assert stale_update.callback_query.answers == [
+        ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
 
 
 def test_failed_text_turn_recovery_retry_replays_last_turn():
@@ -11270,10 +13711,10 @@ def test_sync_agent_commands_for_user_sets_aliases_and_bot_commands():
 
     run(_sync_agent_commands_for_user(application, ui_state, 123, commands))
 
-    assert [command.command for command in application.bot.set_my_commands_calls[0][0]] == [
+    assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu(
         "status",
         "agent_debug_status",
-    ]
+    )
     assert isinstance(application.bot.set_my_commands_calls[0][1], BotCommandScopeChat)
     assert application.bot.set_my_commands_calls[0][1].chat_id == 123
     assert _restore_agent_command_text("/agent_debug_status now", 123, ui_state) == "/debug_status now"
@@ -11461,14 +13902,9 @@ def test_callback_switch_provider_retry_last_turn_recoerces_attachment_for_new_p
     run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
 
     assert services.switch_provider_calls == ["claude"]
-    assert [text for text, _ in switch_message.edit_calls] == [
-        "Switching to Claude Code...",
-        (
-            "Switched agent to Claude Code in Default Workspace. "
-            "Old bot buttons and pending inputs were cleared.\n"
-            "Retrying last turn on the new agent..."
-        ),
-    ]
+    assert switch_message.edit_calls[0][0] == "Switching to Claude Code..."
+    assert_switch_agent_success_notice(switch_message.edit_calls[1][0], provider="Claude Code")
+    assert switch_message.edit_calls[1][0].endswith("Retrying last turn on the new agent...")
     assert len(session.prompt_items) == 2
     first_prompt_items = session.prompt_items[0]
     second_prompt_items = session.prompt_items[1]
@@ -11485,6 +13921,11 @@ def test_callback_switch_provider_retry_last_turn_recoerces_attachment_for_new_p
         (123, "session-123", "Describe this screenshot"),
         (123, "session-123", "Describe this screenshot"),
     ]
+    final_text, final_markup = switch_message.edit_calls[-1]
+    assert_switch_agent_success_notice(final_text, provider="Claude Code")
+    assert "Retried last turn on the new agent." in final_text
+    assert "Current provider: Claude Code" in final_text
+    assert find_inline_button(final_markup, "Current: Claude Code")
 
 
 def test_handle_attachment_photo_uses_context_bundle_when_bundle_chat_active():
@@ -11585,7 +14026,7 @@ def test_handle_attachment_inlines_text_document_when_provider_lacks_embedded_co
     assert isinstance(prompt_items[0], PromptText)
     assert prompt_items[0].text == "Please inspect the attached Telegram document notes.md."
     assert isinstance(prompt_items[1], PromptText)
-    assert "inlined because the current provider does not support ACP embedded context" in prompt_items[1].text
+    assert "pasted into this turn because the current provider can't read attached documents directly" in prompt_items[1].text
     assert "URI: telegram://document/doc-inline/notes.md" in prompt_items[1].text
     assert "# Notes\n- item\n" in prompt_items[1].text
     assert store.record_session_usage_calls == [
@@ -11857,9 +14298,53 @@ def test_handle_attachment_media_group_respects_pending_plain_text_action():
 
     assert services.final_session.prompt_items == []
     assert first_message.reply_calls == [
-        "The current action is waiting for plain text. Send text or cancel the pending action first."
+        "Rename session title (session-1) is waiting for plain text. Send the new session title next, or send /cancel to back out. "
+        "Nothing was sent to the agent."
     ]
     assert second_message.reply_calls == []
+
+
+def test_handle_attachment_waits_for_pending_media_group_before_starting_new_turn():
+    from talk2agent.acp.agent_session import PromptImage, PromptText
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.01)
+        services, _ = make_services()
+        first_message = FakeIncomingMessage(
+            caption="Compare these screenshots",
+            photo=[FakePhotoSize(payload=b"one")],
+            media_group_id="group-attachment-block",
+        )
+        second_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(payload=b"two")],
+            media_group_id="group-attachment-block",
+        )
+        blocked_message = FakeIncomingMessage(
+            document=FakeDocument(file_name="notes.md", payload=b"# Notes\n"),
+        )
+
+        await handle_attachment(FakeUpdate(user_id=123, message=first_message), None, services, ui_state)
+        await handle_attachment(FakeUpdate(user_id=123, message=blocked_message), None, services, ui_state)
+        await handle_attachment(FakeUpdate(user_id=123, message=second_message), None, services, ui_state)
+        await asyncio.sleep(0.03)
+        return services, blocked_message
+
+    services, blocked_message = asyncio.run(scenario())
+
+    assert blocked_message.reply_calls == [
+        (
+            "Still collecting 1 attachment group (1 item) from a pending Telegram album. "
+            "Wait for it to finish, or use /cancel or Cancel / Stop to discard the pending uploads first. "
+            "This new message was not sent to the agent."
+        )
+    ]
+    assert len(services.final_session.prompt_items) == 1
+    prompt_items = services.final_session.prompt_items[0]
+    assert isinstance(prompt_items[0], PromptText)
+    assert prompt_items[0].text == "Compare these screenshots"
+    assert isinstance(prompt_items[1], PromptImage)
+    assert isinstance(prompt_items[2], PromptImage)
 
 
 def test_handle_attachment_saves_unsupported_image_into_workspace_inbox(tmp_path):
@@ -11884,7 +14369,7 @@ def test_handle_attachment_saves_unsupported_image_into_workspace_inbox(tmp_path
     assert prompt_items[0].text == "Please inspect the attached Telegram image."
     assert isinstance(prompt_items[1], PromptText)
     assert "saved to `.talk2agent/telegram-inbox/" in prompt_items[1].text
-    assert "does not support image attachments via ACP prompts" in prompt_items[1].text
+    assert "can't read image attachments directly in this turn" in prompt_items[1].text
     saved_files = list((tmp_path / ".talk2agent" / "telegram-inbox").iterdir())
     assert len(saved_files) == 1
     assert saved_files[0].read_bytes() == b"img"
@@ -11898,6 +14383,77 @@ def test_handle_attachment_saves_unsupported_image_into_workspace_inbox(tmp_path
     ]
     assert store.invalidate_calls == []
     assert session.close_calls == 0
+    assert message.reply_calls[0] == "hello world"
+    assert message.reply_calls[1].startswith(
+        "This attachment couldn't be sent directly to the current agent"
+    )
+    assert "You can reuse it in follow-up turns." in message.reply_calls[1]
+    assert saved_files[0].relative_to(tmp_path).as_posix() in message.reply_calls[1]
+    notice_markup = message.reply_markups[1]
+    assert find_inline_button(notice_markup, "Open Context Bundle")
+    assert find_inline_button(notice_markup, "Open Bot Status")
+
+
+def test_handle_attachment_workspace_inbox_save_failure_shows_actionable_text(monkeypatch, tmp_path):
+    from talk2agent.bots import telegram_bot
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment
+
+    def fail_save_workspace_inbox_file(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(telegram_bot, "save_workspace_inbox_file", fail_save_workspace_inbox_file)
+
+    session = FakeSession()
+    session.capabilities.supports_image_prompt = False
+    ui_state = TelegramUiState()
+    message = FakeIncomingMessage(photo=[FakePhotoSize(file_unique_id="photo-unsupported", payload=b"img")])
+    update = FakeUpdate(user_id=123, message=message)
+    services, _ = make_services(session=session, provider="codex", workspace_path=str(tmp_path))
+
+    run(handle_attachment(update, None, services, ui_state))
+
+    assert services.final_session.prompt_items == []
+    assert message.reply_calls == [
+        "Couldn't save the attachment into the current workspace for fallback handling. "
+        "Try again or send a different file if possible. Nothing was sent to the agent."
+    ]
+
+
+def test_handle_attachment_rejects_oversized_file_with_recovery_guidance():
+    from talk2agent.bots.telegram_bot import ATTACHMENT_MAX_BYTES, TelegramUiState, handle_attachment
+
+    ui_state = TelegramUiState()
+    message = FakeIncomingMessage(
+        document=FakeDocument(
+            file_name="large.pdf",
+            mime_type="application/pdf",
+            payload=b"x",
+            file_size=ATTACHMENT_MAX_BYTES + 1,
+        )
+    )
+    update = FakeUpdate(user_id=123, message=message)
+    services, _ = make_services()
+
+    run(handle_attachment(update, None, services, ui_state))
+
+    assert services.final_session.prompt_items == []
+    assert message.reply_calls == [
+        "This attachment is larger than the 8 MiB bot limit. "
+        "Send a smaller file or compress it before retrying. Nothing was sent to the agent."
+    ]
+
+
+def test_build_media_group_prompt_empty_group_uses_actionable_copy():
+    from talk2agent.bots.telegram_bot import AttachmentPromptError, _build_media_group_prompt
+
+    with pytest.raises(
+        AttachmentPromptError,
+        match=(
+            "Telegram didn't deliver any usable attachments from that album\\. "
+            "Send the album again\\. Nothing was sent to the agent\\."
+        ),
+    ):
+        run(_build_media_group_prompt(()))
 
 
 def test_handle_attachment_saves_unsupported_binary_document_into_workspace_inbox(tmp_path):
@@ -11928,7 +14484,7 @@ def test_handle_attachment_saves_unsupported_binary_document_into_workspace_inbo
     assert prompt_items[0].text == "Please inspect the attached Telegram document report.pdf."
     assert isinstance(prompt_items[1], PromptText)
     assert "saved to `.talk2agent/telegram-inbox/" in prompt_items[1].text
-    assert "does not support document attachments via ACP prompts" in prompt_items[1].text
+    assert "can't read document attachments directly in this turn" in prompt_items[1].text
     saved_files = list((tmp_path / ".talk2agent" / "telegram-inbox").iterdir())
     assert len(saved_files) == 1
     assert saved_files[0].suffix == ".pdf"
@@ -11974,7 +14530,7 @@ def test_handle_attachment_saves_unsupported_video_into_workspace_inbox(tmp_path
     assert prompt_items[0].text == "Please inspect the attached Telegram video walkthrough.mp4."
     assert isinstance(prompt_items[1], PromptText)
     assert "saved to `.talk2agent/telegram-inbox/" in prompt_items[1].text
-    assert "does not support video attachments via ACP prompts" in prompt_items[1].text
+    assert "can't read video attachments directly in this turn" in prompt_items[1].text
     saved_files = list((tmp_path / ".talk2agent" / "telegram-inbox").iterdir())
     assert len(saved_files) == 1
     assert saved_files[0].suffix == ".mp4"
@@ -12027,8 +14583,12 @@ def test_handle_attachment_media_group_adds_saved_fallback_files_to_context_bund
     }
 
 
-def test_handle_attachment_failed_fallback_turn_does_not_add_context_bundle_item(tmp_path):
-    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment
+def test_handle_attachment_failed_fallback_turn_preserves_context_bundle_item_and_recovery_notice(tmp_path):
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        handle_attachment,
+    )
 
     session = FakeSession(error=RuntimeError("boom"), raise_before_stream=True)
     session.capabilities.supports_image_prompt = False
@@ -12041,8 +14601,26 @@ def test_handle_attachment_failed_fallback_turn_does_not_add_context_bundle_item
 
     saved_files = list((tmp_path / ".talk2agent" / "telegram-inbox").iterdir())
     assert len(saved_files) == 1
-    assert ui_state.get_context_bundle(123, "codex", "default") is None
+    bundle = ui_state.get_context_bundle(123, "codex", "default")
+    assert bundle is not None
+    assert bundle.items == [
+        _ContextBundleItem(
+            kind="file",
+            relative_path=saved_files[0].relative_to(tmp_path).as_posix(),
+        )
+    ]
     assert store.invalidate_calls == [(123, session)]
+    assert message.reply_calls[0].startswith(
+        "Request failed. The current live session for Codex in Default Workspace was closed."
+    )
+    assert message.reply_calls[1].startswith(
+        "The request did not finish, but this attachment was saved in the workspace"
+    )
+    assert "You can retry without uploading it again." in message.reply_calls[1]
+    assert saved_files[0].relative_to(tmp_path).as_posix() in message.reply_calls[1]
+    notice_markup = message.reply_markups[1]
+    assert find_inline_button(notice_markup, "Open Context Bundle")
+    assert find_inline_button(notice_markup, "Open Bot Status")
 
 
 def test_handle_attachment_respects_pending_plain_text_action():
@@ -12058,5 +14636,7 @@ def test_handle_attachment_respects_pending_plain_text_action():
 
     assert services.final_session.prompt_items == []
     assert message.reply_calls == [
-        "The current action is waiting for plain text. Send text or cancel the pending action first."
+        "Rename session title (session-1) is waiting for plain text. Send the new session title next, or send /cancel to back out. "
+        "Nothing was sent to the agent."
     ]
+

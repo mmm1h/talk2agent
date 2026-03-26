@@ -8,6 +8,18 @@ from talk2agent.acp.tool_activity import render_tool_update_text
 
 
 PLAN_PREVIEW_LIMIT = 5
+TRUNCATED_PREVIEW_PREFIX = "..."
+TRUNCATED_PREVIEW_MIN_LIMIT = 32
+TRUNCATED_PREVIEW_SEPARATOR_SCAN_LIMIT = 80
+INITIAL_DRAFT_TEXT = (
+    "Working on your request...\n"
+    "I'll stream progress here. Use /cancel or Cancel / Stop to interrupt."
+)
+FALLBACK_PROGRESS_TEXT = (
+    "Working on your request...\n"
+    "Streaming preview is unavailable right now, so I'll send the final reply when it's ready. "
+    "Use /cancel or Cancel / Stop to interrupt."
+)
 
 
 def _normalize_inline_text(text):
@@ -66,6 +78,14 @@ def render_update_text(update):
     return None
 
 
+def _preferred_split_index(text, limit):
+    for separator in ("\n\n", "\n", " "):
+        separator_index = text.rfind(separator, 0, limit + 1)
+        if separator_index > 0:
+            return separator_index, separator_index + len(separator)
+    return limit, limit
+
+
 def split_telegram_text(text, limit=4000):
     if limit <= 0:
         raise ValueError("limit must be positive")
@@ -73,7 +93,18 @@ def split_telegram_text(text, limit=4000):
     if text == "":
         return [""]
 
-    return [text[index : index + limit] for index in range(0, len(text), limit)]
+    chunks = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at, next_start = _preferred_split_index(remaining, limit)
+        chunk = remaining[:split_at]
+        if chunk == "":
+            chunk = remaining[:limit]
+            next_start = limit
+        chunks.append(chunk)
+        remaining = remaining[next_start:]
+    chunks.append(remaining)
+    return chunks
 
 
 class TelegramTurnStream:
@@ -96,10 +127,13 @@ class TelegramTurnStream:
         self._last_draft_text = None
         self._draft_started = False
         self._draft_enabled = True
+        self._progress_notice_sent = False
         self._usage_footer = None
 
     async def start(self):
-        await self._send_draft("Thinking...")
+        await self._send_draft(INITIAL_DRAFT_TEXT)
+        if not self._draft_started:
+            await self._send_progress_notice(FALLBACK_PROGRESS_TEXT)
 
     async def on_update(self, update):
         usage_footer = render_usage_text(update)
@@ -117,7 +151,7 @@ class TelegramTurnStream:
 
         await self._send_draft(self._preview_text())
 
-    async def finish(self, stop_reason):
+    async def finish(self, stop_reason, *, reply_markup=None):
         text = self._full_text()
         if self._usage_footer:
             if text:
@@ -127,13 +161,22 @@ class TelegramTurnStream:
                 text = self._usage_footer
         if text == "":
             if stop_reason == "cancelled":
-                text = "Turn cancelled."
+                text = "Turn cancelled. Send a new request when ready."
+            elif stop_reason == "completed":
+                text = "The agent finished without a visible reply. Open Bot Status for details or try again."
             else:
-                text = f"[empty response] stop_reason={stop_reason}"
+                text = (
+                    "The agent finished without a visible reply. "
+                    f"Open Bot Status for details or try again. (stop_reason={stop_reason})"
+                )
 
         chunks = split_telegram_text(text, limit=self._text_limit)
-        for chunk in chunks:
-            await self._message.reply_text(chunk)
+        last_chunk_index = len(chunks) - 1
+        for index, chunk in enumerate(chunks):
+            await self._message.reply_text(
+                chunk,
+                reply_markup=reply_markup if index == last_chunk_index else None,
+            )
 
     async def fail(self, text, reply_markup=None):
         await self._message.reply_text(text, reply_markup=reply_markup)
@@ -145,7 +188,17 @@ class TelegramTurnStream:
         text = self._full_text()
         if len(text) <= self._text_limit:
             return text
-        return text[-self._text_limit :]
+        if self._text_limit < TRUNCATED_PREVIEW_MIN_LIMIT:
+            return text[-self._text_limit :]
+
+        tail = text[-(self._text_limit - len(TRUNCATED_PREVIEW_PREFIX)) :]
+        scan_limit = min(len(tail), TRUNCATED_PREVIEW_SEPARATOR_SCAN_LIMIT)
+        for separator in ("\n\n", "\n", " "):
+            separator_index = tail.find(separator)
+            if 0 < separator_index < scan_limit:
+                tail = tail[separator_index + len(separator) :]
+                break
+        return f"{TRUNCATED_PREVIEW_PREFIX}{tail}"
 
     async def _send_draft(self, text):
         if not self._draft_enabled or text == self._last_draft_text:
@@ -160,3 +213,9 @@ class TelegramTurnStream:
         self._draft_started = True
         self._last_draft_text = text
         self._last_edit_at = self._clock()
+
+    async def _send_progress_notice(self, text):
+        if self._progress_notice_sent:
+            return
+        await self._message.reply_text(text)
+        self._progress_notice_sent = True

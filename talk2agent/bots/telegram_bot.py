@@ -53,6 +53,8 @@ from talk2agent.workspace_files import (
 
 BUTTON_NEW_SESSION = "New Session"
 BUTTON_BOT_STATUS = "Bot Status"
+BUTTON_HELP = "Help"
+BUTTON_CANCEL_OR_STOP = "Cancel / Stop"
 BUTTON_RETRY_LAST_TURN = "Retry Last Turn"
 BUTTON_FORK_LAST_TURN = "Fork Last Turn"
 BUTTON_SESSION_HISTORY = "Session History"
@@ -75,11 +77,41 @@ WORKSPACE_CHANGES_PAGE_SIZE = 6
 CONTEXT_BUNDLE_PAGE_SIZE = 6
 COMMAND_DISCOVERY_TIMEOUT_SECONDS = 2.0
 CALLBACK_OPERATION_TIMEOUT_SECONDS = 15.0
+START_COMMAND = "start"
+STATUS_COMMAND = "status"
+HELP_COMMAND = "help"
+CANCEL_COMMAND = "cancel"
 DEBUG_STATUS_COMMAND = "debug_status"
-_RESERVED_COMMAND_ALIASES = {DEBUG_STATUS_COMMAND}
+_RESERVED_COMMAND_ALIASES = {
+    START_COMMAND,
+    STATUS_COMMAND,
+    HELP_COMMAND,
+    CANCEL_COMMAND,
+    DEBUG_STATUS_COMMAND,
+}
+_LOCAL_MENU_COMMAND_SPECS = (
+    (START_COMMAND, "Open the welcome screen and restore bot controls"),
+    (STATUS_COMMAND, "Open Bot Status with runtime state, recovery, and shortcuts"),
+    (HELP_COMMAND, "Show a quick guide to commands, recovery, and workspace tools"),
+    (CANCEL_COMMAND, "Cancel pending input, stop a turn, or leave bundle chat"),
+)
+MAX_PUBLIC_COMMANDS = 100
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
 MEDIA_GROUP_SETTLE_SECONDS = 0.4
 INLINE_TEXT_DOCUMENT_CHAR_LIMIT = 12000
+_SUPPORTED_ATTACHMENT_FILTER = (
+    filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO | filters.VIDEO
+)
+_UNSUPPORTED_RICH_MESSAGE_FILTER = (
+    filters.Sticker.ALL
+    | filters.CONTACT
+    | filters.LOCATION
+    | filters.VENUE
+    | filters.POLL
+    | filters.ANIMATION
+    | filters.VIDEO_NOTE
+    | filters.Dice.ALL
+)
 STATUS_TEXT_SNIPPET_LIMIT = 80
 STATUS_BUNDLE_PREVIEW_LIMIT = 3
 STATUS_COMMAND_PREVIEW_LIMIT = 3
@@ -243,6 +275,13 @@ class _LastRequestText:
 class _MediaGroupBuffer:
     messages: list[Any]
     task: asyncio.Task | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingMediaGroupStats:
+    group_count: int
+    item_count: int
+
 
 @dataclass(slots=True)
 class _ActiveTurn:
@@ -649,6 +688,34 @@ class TelegramUiState:
             return ()
         return tuple(buffer.messages)
 
+    def pending_media_group_stats(self, user_id: int) -> _PendingMediaGroupStats | None:
+        group_count = 0
+        item_count = 0
+        for (buffer_user_id, _media_group_id), buffer in self._media_groups.items():
+            if buffer_user_id != user_id:
+                continue
+            group_count += 1
+            item_count += len(buffer.messages)
+        if group_count == 0:
+            return None
+        return _PendingMediaGroupStats(group_count=group_count, item_count=item_count)
+
+    def cancel_pending_media_groups(self, user_id: int) -> _PendingMediaGroupStats | None:
+        group_count = 0
+        item_count = 0
+        keys_to_remove = [key for key in self._media_groups if key[0] == user_id]
+        for key in keys_to_remove:
+            buffer = self._media_groups.pop(key, None)
+            if buffer is None:
+                continue
+            group_count += 1
+            item_count += len(buffer.messages)
+            if buffer.task is not None:
+                buffer.task.cancel()
+        if group_count == 0:
+            return None
+        return _PendingMediaGroupStats(group_count=group_count, item_count=item_count)
+
     def _prune(self) -> None:
         now = self._clock()
         expired = [token for token, action in self._actions.items() if action.expires_at <= now]
@@ -672,13 +739,13 @@ class TelegramUiState:
 
 def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
     rows = [
-        [BUTTON_BOT_STATUS],
-        [BUTTON_NEW_SESSION, BUTTON_RETRY_LAST_TURN],
-        [BUTTON_FORK_LAST_TURN, BUTTON_SESSION_HISTORY],
-        [BUTTON_AGENT_COMMANDS, BUTTON_MODEL_MODE],
-        [BUTTON_WORKSPACE_FILES, BUTTON_WORKSPACE_SEARCH],
-        [BUTTON_WORKSPACE_CHANGES, BUTTON_CONTEXT_BUNDLE],
-        [BUTTON_RESTART_AGENT],
+        [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
+        [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
+        [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
+        [BUTTON_SESSION_HISTORY, BUTTON_MODEL_MODE],
+        [BUTTON_WORKSPACE_FILES, BUTTON_WORKSPACE_CHANGES],
+        [BUTTON_AGENT_COMMANDS, BUTTON_RESTART_AGENT],
+        [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
     ]
     if user_id == services.admin_user_id:
         rows.append([BUTTON_SWITCH_AGENT, BUTTON_SWITCH_WORKSPACE])
@@ -695,7 +762,7 @@ def _is_admin(update: Update, services) -> bool:
     return user is not None and user.id == services.admin_user_id
 
 
-def _is_main_menu_button(text: str) -> bool:
+def _clears_pending_text_action_button(text: str) -> bool:
     return text in {
         BUTTON_NEW_SESSION,
         BUTTON_RETRY_LAST_TURN,
@@ -747,11 +814,19 @@ def _allocate_command_alias(command_name: str, used_aliases: set[str]) -> str:
     return alias
 
 
-def _build_agent_command_menu(commands) -> tuple[list[BotCommand], dict[str, str]]:
+def _build_local_menu_commands() -> list[BotCommand]:
+    return [
+        BotCommand(command, _trim_command_description(description))
+        for command, description in _LOCAL_MENU_COMMAND_SPECS
+    ]
+
+
+def _build_public_command_menu(commands) -> tuple[list[BotCommand], dict[str, str]]:
     used_aliases: set[str] = set()
-    bot_commands: list[BotCommand] = []
+    bot_commands = _build_local_menu_commands()
     aliases: dict[str, str] = {}
-    for command in commands[:100]:
+    available_agent_slots = max(0, MAX_PUBLIC_COMMANDS - len(bot_commands))
+    for command in commands[:available_agent_slots]:
         alias = _allocate_command_alias(command.name, used_aliases)
         aliases[alias] = command.name
         bot_commands.append(BotCommand(alias, _trim_command_description(command.description)))
@@ -759,7 +834,7 @@ def _build_agent_command_menu(commands) -> tuple[list[BotCommand], dict[str, str
 
 
 async def _sync_agent_commands_for_user(application, ui_state: TelegramUiState, user_id: int, commands) -> None:
-    menu_commands, aliases = _build_agent_command_menu(list(commands))
+    menu_commands, aliases = _build_public_command_menu(list(commands))
     ui_state.set_agent_command_aliases(user_id, aliases)
     scope = BotCommandScopeChat(chat_id=user_id)
     await application.bot.set_my_commands(menu_commands, scope=scope)
@@ -802,7 +877,7 @@ async def _sync_discovered_agent_commands_for_user(
             timeout_seconds=COMMAND_DISCOVERY_TIMEOUT_SECONDS
         )
     except Exception:
-        return
+        commands = ()
     try:
         await _sync_agent_commands_for_user(application, ui_state, user_id, commands)
     except Exception:
@@ -833,9 +908,12 @@ def _message_update_from_callback(query):
 
 
 async def _sync_agent_commands_for_all_users(application, services, ui_state: TelegramUiState) -> None:
-    commands = await services.discover_agent_commands(
-        timeout_seconds=COMMAND_DISCOVERY_TIMEOUT_SECONDS
-    )
+    try:
+        commands = await services.discover_agent_commands(
+            timeout_seconds=COMMAND_DISCOVERY_TIMEOUT_SECONDS
+        )
+    except Exception:
+        commands = ()
     for user_id in services.allowed_user_ids:
         await _sync_agent_commands_for_user(application, ui_state, user_id, commands)
 
@@ -845,23 +923,318 @@ async def _reply_with_menu(message, services, user_id: int, text: str, *, reply_
     await message.reply_text(text, reply_markup=markup)
 
 
+def _unauthorized_text() -> str:
+    return "Access denied. Ask the operator to allow your Telegram user ID."
+
+
+def _unknown_action_text() -> str:
+    return (
+        "This action is no longer available because that menu is out of date. "
+        "Reopen the latest menu or use /start."
+    )
+
+
+def _button_not_for_you_text() -> str:
+    return "This button belongs to another user. Reopen the menu from your own chat or use /start there."
+
+
 async def _reply_unauthorized(update: Update) -> None:
     if update.message is not None:
-        await update.message.reply_text("Unauthorized user.")
+        await update.message.reply_text(_unauthorized_text())
 
 
 async def _reply_request_failed(update: Update, services) -> None:
-    if update.message is not None and update.effective_user is not None:
-        await _reply_with_menu(update.message, services, update.effective_user.id, "Request failed.")
-
-
-async def _reply_session_creation_failed(update: Update, services) -> None:
     if update.message is not None and update.effective_user is not None:
         await _reply_with_menu(
             update.message,
             services,
             update.effective_user.id,
-            "session creation failed",
+            _request_failed_text(),
+        )
+
+
+def _request_failed_text() -> str:
+    return "Request failed. Try again, use /start, or open Bot Status."
+
+
+def _expired_button_text() -> str:
+    return (
+        "This button has expired because that menu is out of date. "
+        "Reopen the latest menu or use /start."
+    )
+
+
+def _context_bundle_empty_text() -> str:
+    return "Context bundle is empty. Add files or changes first."
+
+
+def _no_previous_request_text() -> str:
+    return "No previous request is available in this workspace yet. Send a new request first."
+
+
+def _no_previous_turn_text() -> str:
+    return "No previous turn is available yet. Send a new request first, then try again."
+
+
+def _no_active_session_text() -> str:
+    return "No active session. Send text or an attachment to start one."
+
+
+def _switch_session_failed_text() -> str:
+    return "Couldn't switch to that session. Try again, reopen Session History, or start a new session."
+
+
+def _fork_session_failed_text() -> str:
+    return "Couldn't fork that session. Try again or start a new session."
+
+
+def _switch_provider_session_failed_text() -> str:
+    return "Couldn't switch to that provider session. Try again or reopen Provider Sessions."
+
+
+def _fork_provider_session_failed_text() -> str:
+    return "Couldn't fork that provider session. Try again or reopen Provider Sessions."
+
+
+def _selection_update_failed_text() -> str:
+    return "Couldn't update model or mode. Try again or reopen Model / Mode."
+
+
+def _model_mode_load_failed_text() -> str:
+    return "Couldn't load Model / Mode. Try again or go back to Bot Status."
+
+
+def _session_creation_failed_text() -> str:
+    return "Couldn't start a session. Try again, use /start, or open Bot Status."
+
+
+def _switch_agent_failed_text() -> str:
+    return "Couldn't switch agent. Try again or choose another agent."
+
+
+def _switch_workspace_failed_text() -> str:
+    return "Couldn't switch workspace. Try again or choose another workspace."
+
+
+def _runtime_status_refresh_failed_text() -> str:
+    return "Couldn't refresh Bot Status. Reopen Bot Status to confirm the latest state."
+
+
+def _runtime_status_refresh_degraded_notice(notice: str) -> str:
+    return f"{notice} Reopen Bot Status to confirm the latest state."
+
+
+def _stop_turn_failed_text() -> str:
+    return "Couldn't stop the current turn. Try again or reopen Bot Status."
+
+
+def _bundle_chat_update_failed_text() -> str:
+    return "Couldn't update bundle chat. Reopen Bot Status and try again."
+
+
+def _delete_session_failed_text() -> str:
+    return "Couldn't delete that session. Try again or reopen Session History."
+
+
+def _empty_media_group_text() -> str:
+    return (
+        "Telegram didn't deliver any usable attachments from that album. "
+        "Send the album again. Nothing was sent to the agent."
+    )
+
+
+def _unsupported_attachment_for_turn_text() -> str:
+    return (
+        "This attachment type can't be sent in this chat flow. Send a photo, document, audio, "
+        "voice note, or video instead, use /help for supported flows, or use /start to reopen "
+        "the main keyboard. Nothing was sent to the agent."
+    )
+
+
+def _attachment_too_large_text() -> str:
+    limit_mib = ATTACHMENT_MAX_BYTES // (1024 * 1024)
+    return (
+        f"This attachment is larger than the {limit_mib} MiB bot limit. "
+        "Send a smaller file or compress it before retrying. Nothing was sent to the agent."
+    )
+
+
+def _workspace_fallback_save_failed_text() -> str:
+    return (
+        "Couldn't save the attachment into the current workspace for fallback handling. "
+        "Try again or send a different file if possible. Nothing was sent to the agent."
+    )
+
+
+def _saved_attachment_notice_text(
+    saved_context_items: tuple[_ContextBundleItem, ...],
+    *,
+    recovery: bool,
+) -> str:
+    count = len(saved_context_items)
+    if count <= 0:
+        raise ValueError("saved attachment notice requires at least one context item")
+
+    if count == 1:
+        lines = [
+            (
+                "The request did not finish, but this attachment was saved in the workspace and "
+                "added to Context Bundle."
+            )
+            if recovery
+            else (
+                "This attachment couldn't be sent directly to the current agent, so it was "
+                "saved in the workspace and added to Context Bundle."
+            )
+        ]
+        lines.append(
+            "You can retry without uploading it again."
+            if recovery
+            else "You can reuse it in follow-up turns."
+        )
+    else:
+        lines = [
+            (
+                f"The request did not finish, but these {count} attachments were saved in the "
+                "workspace and added to Context Bundle."
+            )
+            if recovery
+            else (
+                f"These {count} attachments couldn't be sent directly to the current agent, so they "
+                "were saved in the workspace and added to Context Bundle."
+            )
+        ]
+        lines.append(
+            "You can retry without uploading them again."
+            if recovery
+            else "You can reuse them in follow-up turns."
+        )
+
+    preview_items = saved_context_items[:3]
+    for index, item in enumerate(preview_items, start=1):
+        lines.append(f"{index}. {_context_bundle_item_label(item)}")
+    remaining = count - len(preview_items)
+    if remaining > 0:
+        lines.append(f"... {remaining} more {_count_noun(remaining, 'item', 'items')}")
+
+    lines.append("Open Context Bundle to inspect them, or open Bot Status to keep going.")
+    return "\n".join(lines)
+
+
+def _saved_attachment_notice_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Context Bundle",
+                    "context_bundle_page",
+                    page=0,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Bot Status",
+                    "runtime_status_page",
+                ),
+            ]
+        ]
+    )
+
+
+def _preserve_saved_attachment_context(
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    state,
+    saved_context_items: tuple[_ContextBundleItem, ...],
+) -> None:
+    for item in saved_context_items:
+        ui_state.add_context_item(
+            user_id,
+            state.provider,
+            state.workspace_id,
+            item,
+        )
+
+
+async def _reply_saved_attachment_notice(
+    message,
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    saved_context_items: tuple[_ContextBundleItem, ...],
+    recovery: bool,
+) -> None:
+    if not saved_context_items:
+        return
+    try:
+        await message.reply_text(
+            _saved_attachment_notice_text(
+                saved_context_items,
+                recovery=recovery,
+            ),
+            reply_markup=_saved_attachment_notice_markup(ui_state, user_id),
+        )
+    except Exception:
+        pass
+
+
+def _workspace_search_cancelled_text() -> str:
+    return "Search cancelled. Use Workspace Search to search again or open Bot Status when ready."
+
+
+def _unsupported_message_subject(message) -> tuple[str, str]:
+    if getattr(message, "sticker", None) is not None:
+        return "Stickers", "aren't"
+    if getattr(message, "location", None) is not None:
+        return "Locations", "aren't"
+    if getattr(message, "contact", None) is not None:
+        return "Contacts", "aren't"
+    if getattr(message, "venue", None) is not None:
+        return "Venues", "aren't"
+    if getattr(message, "poll", None) is not None:
+        return "Polls", "aren't"
+    if getattr(message, "animation", None) is not None:
+        return "GIFs and animations", "aren't"
+    if getattr(message, "video_note", None) is not None:
+        return "Video notes", "aren't"
+    if getattr(message, "dice", None) is not None:
+        return "Dice messages", "aren't"
+    return "This Telegram message type", "isn't"
+
+
+def _unsupported_message_text(message, *, bundle_chat_active: bool) -> str:
+    subject, verb = _unsupported_message_subject(message)
+    if bundle_chat_active:
+        return (
+            f"{subject} {verb} supported in this chat yet. Send plain text next to keep using "
+            "the current context bundle, or send a photo, document, audio, or video instead. "
+            "Use /help for supported flows, or use /start to reopen the main keyboard."
+        )
+    return (
+        f"{subject} {verb} supported in this chat yet. Send plain text, photo, document, "
+        "audio, or video instead, use /help for supported flows, or use /start to reopen the "
+        "main keyboard."
+    )
+
+
+async def _reply_session_creation_failed(
+    update: Update,
+    services,
+    *,
+    notice: str | None = None,
+) -> None:
+    if update.message is not None and update.effective_user is not None:
+        await _reply_with_menu(
+            update.message,
+            services,
+            update.effective_user.id,
+            _prefixed_notice_text(notice, _session_creation_failed_text()),
         )
 
 
@@ -878,6 +1251,678 @@ async def _with_active_store(services, action):
     raise last_error or RuntimeError("retired store retry exhausted")
 
 
+def _pending_input_cancel_notice(text: str) -> str:
+    separator = "\n" if "\n" in text else " "
+    return f"{text}{separator}Send /cancel to back out."
+
+
+def _pending_text_action_waiting_hint(pending_text_action: _PendingTextAction | None) -> str:
+    if pending_text_action is None:
+        return "Send text next"
+
+    action = pending_text_action.action
+    if action == "rename_history":
+        return "Send the new session title next"
+    if action == "run_agent_command":
+        return "Send the command arguments next"
+    if action == "workspace_search":
+        return "Send the search text next"
+    if action == "workspace_file_agent_prompt":
+        return "Send the request for this file next"
+    if action == "workspace_change_agent_prompt":
+        return "Send the request for this change next"
+    if action == "context_bundle_agent_prompt":
+        return "Send the request for this bundle next"
+    if action == "context_items_agent_prompt":
+        return "Send the request for this context next"
+    return "Send the text next"
+
+
+def _waiting_for_plain_text_notice(
+    pending_text_action: _PendingTextAction | None = None,
+) -> str:
+    if pending_text_action is None:
+        return (
+            "The current action is waiting for plain text. Send text or send /cancel to back "
+            "out. Nothing was sent to the agent."
+        )
+    return (
+        f"{_pending_text_action_label(pending_text_action)} is waiting for plain text. "
+        f"{_pending_text_action_waiting_hint(pending_text_action)}, or send /cancel to back out. "
+        "Nothing was sent to the agent."
+    )
+
+
+def _pending_media_group_summary(stats: _PendingMediaGroupStats) -> str:
+    group_label = "attachment group" if stats.group_count == 1 else "attachment groups"
+    item_label = "item" if stats.item_count == 1 else "items"
+    return f"{stats.group_count} {group_label} ({stats.item_count} {item_label})"
+
+
+def _pending_media_group_status_line(stats: _PendingMediaGroupStats) -> str:
+    item_label = "attachment" if stats.item_count == 1 else "attachments"
+    if stats.group_count == 1:
+        return f"Status: collecting {stats.item_count} {item_label} from a pending Telegram album."
+    return (
+        "Status: collecting "
+        f"{stats.item_count} {item_label} across {_pending_media_group_summary(stats)}."
+    )
+
+
+def _pending_media_group_next_step_line(stats: _PendingMediaGroupStats) -> str:
+    item_label = "it" if stats.item_count == 1 else "them"
+    return (
+        "Recommended next step: wait for the attachments to finish collecting, or use /cancel "
+        f"or Cancel / Stop to discard {item_label} before anything reaches the agent."
+    )
+
+
+def _pending_media_group_blocked_input_text(stats: _PendingMediaGroupStats) -> str:
+    item_label = "it" if stats.item_count == 1 else "them"
+    album_label = (
+        "a pending Telegram album"
+        if stats.group_count == 1
+        else "pending Telegram albums"
+    )
+    return (
+        f"Still collecting {_pending_media_group_summary(stats)} from {album_label}. "
+        f"Wait for {item_label} to finish, or use /cancel or Cancel / Stop to discard the "
+        "pending uploads first. This new message was not sent to the agent."
+    )
+
+
+def _pending_media_group_cancelled_text(stats: _PendingMediaGroupStats) -> str:
+    if stats.group_count == 1:
+        return (
+            "Discarded pending attachment group "
+            f"({stats.item_count} {'item' if stats.item_count == 1 else 'items'}). "
+            "Nothing was sent to the agent."
+        )
+    return f"Discarded pending {_pending_media_group_summary(stats)}. Nothing was sent to the agent."
+
+
+def _discard_pending_uploads_for_transition(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> str | None:
+    cleared = ui_state.cancel_pending_media_groups(user_id)
+    if cleared is None:
+        return None
+    return _pending_media_group_cancelled_text(cleared)
+
+
+def _prefixed_notice_text(notice: str | None, text: str) -> str:
+    if not notice:
+        return text
+    return f"{notice}\n{text}"
+
+
+def _interaction_status_line(
+    *,
+    session,
+    active_turn: _ActiveTurn | None,
+    pending_text_action: _PendingTextAction | None,
+    pending_media_group_stats: _PendingMediaGroupStats | None,
+    bundle_count: int,
+    bundle_chat_active: bool,
+) -> str:
+    if active_turn is not None:
+        title = _status_text_snippet(active_turn.title_hint, limit=120) or "current request"
+        if active_turn.stop_requested:
+            return f"Status: stopping {title}."
+        return f"Status: running {title}."
+    if pending_text_action is not None:
+        return (
+            "Status: waiting for plain text for "
+            f"{_pending_text_action_label(pending_text_action)}."
+        )
+    if pending_media_group_stats is not None:
+        return _pending_media_group_status_line(pending_media_group_stats)
+    if bundle_chat_active and bundle_count > 0:
+        item_summary = _status_item_count_summary(bundle_count) or "current bundle"
+        return (
+            "Status: bundle chat is on. "
+            f"Your next plain text message will use the current context bundle ({item_summary})."
+        )
+    if session is None:
+        return "Status: ready. Your first text or attachment will start a session."
+    return "Status: ready. The current live session is idle."
+
+
+def _recommended_next_step_line(
+    *,
+    session,
+    active_turn: _ActiveTurn | None,
+    pending_text_action: _PendingTextAction | None,
+    pending_media_group_stats: _PendingMediaGroupStats | None,
+    bundle_count: int,
+    bundle_chat_active: bool,
+    last_request_available: bool,
+    last_turn_available: bool,
+) -> str:
+    if active_turn is not None:
+        return (
+            "Recommended next step: wait for the reply, or use /cancel or Cancel / Stop to "
+            "interrupt."
+        )
+    if pending_text_action is not None:
+        return (
+            "Recommended next step: send the plain text for "
+            f"{_pending_text_action_label(pending_text_action)}, or use /cancel to back out."
+        )
+    if pending_media_group_stats is not None:
+        return _pending_media_group_next_step_line(pending_media_group_stats)
+    if bundle_chat_active and bundle_count > 0:
+        if last_request_available:
+            return (
+                "Recommended next step: send plain text to continue with this bundle, or tap "
+                "Bundle + Last Request to replay the previous request with the same context."
+            )
+        return (
+            "Recommended next step: send plain text to continue with this bundle, or stop "
+            "bundle chat if you want a normal turn."
+        )
+    if bundle_count > 0:
+        if last_request_available:
+            return (
+                "Recommended next step: tap Ask Agent With Context or Bundle + Last Request, "
+                "or send a fresh request."
+            )
+        return "Recommended next step: tap Ask Agent With Context, or send a fresh request."
+    if last_turn_available:
+        return (
+            "Recommended next step: send a fresh request, or reuse the previous turn with "
+            "Retry Last Turn / Fork Last Turn."
+        )
+    if session is None:
+        return (
+            "Recommended next step: send text or an attachment, or open workspace tools "
+            "before you ask."
+        )
+    return (
+        "Recommended next step: send text or an attachment, or use the workspace tools below "
+        "if you want more context first."
+    )
+
+
+def _primary_controls_line(
+    *,
+    session,
+    active_turn: _ActiveTurn | None,
+    pending_text_action: _PendingTextAction | None,
+    pending_media_group_stats: _PendingMediaGroupStats | None,
+    bundle_count: int,
+    bundle_chat_active: bool,
+    last_request_available: bool,
+    last_turn_available: bool,
+) -> str:
+    if active_turn is not None:
+        return "Primary controls right now: Stop Turn in Bot Status, or use /cancel from chat."
+    if pending_text_action is not None:
+        return (
+            "Primary controls right now: send the expected text next, or use Cancel Pending Input "
+            "in Bot Status."
+        )
+    if pending_media_group_stats is not None:
+        return (
+            "Primary controls right now: wait for the album to finish, or use Discard Pending "
+            "Uploads in Bot Status."
+        )
+    if bundle_chat_active and bundle_count > 0:
+        if last_request_available:
+            return (
+                "Primary controls right now: send plain text, use Bundle + Last Request, or stop "
+                "bundle chat from Bot Status."
+            )
+        return (
+            "Primary controls right now: send plain text, Ask Agent With Context, or stop bundle "
+            "chat from Bot Status."
+        )
+    if bundle_count > 0:
+        if last_request_available:
+            return (
+                "Primary controls right now: Ask Agent With Context, Bundle + Last Request, or "
+                "Context Bundle."
+            )
+        return "Primary controls right now: Ask Agent With Context or Context Bundle."
+    if last_turn_available:
+        return "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh request."
+    if session is None:
+        return (
+            "Primary controls right now: send text or an attachment, or open Workspace "
+            "Files/Search/Changes first."
+        )
+    return (
+        "Primary controls right now: send text or an attachment, or prepare context with "
+        "Workspace Files/Search/Changes and Context Bundle."
+    )
+
+
+def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
+    lines = [
+        "Main keyboard priority: New Session and Bot Status first, then Retry / Fork Last Turn.",
+        "Context prep row: Workspace Search and Context Bundle are the fastest path to a grounded request.",
+        (
+            "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
+            "/help, and /cancel still work if Telegram hides it."
+        ),
+    ]
+    if is_admin:
+        lines.append(
+            "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime."
+        )
+    return lines
+
+
+def _session_ready_notice_text() -> str:
+    return (
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared."
+    )
+
+
+def _new_session_success_text(session_id: str) -> str:
+    return f"Started new session: {session_id}\n{_session_ready_notice_text()}"
+
+
+def _restart_agent_success_text(session_id: str) -> str:
+    return f"Restarted agent: {session_id}\n{_session_ready_notice_text()}"
+
+
+def _build_start_text(
+    *,
+    provider: str,
+    workspace_id: str,
+    workspace_label: str,
+    session,
+    user_id: int,
+    ui_state: TelegramUiState,
+    is_admin: bool,
+) -> str:
+    active_turn = ui_state.get_active_turn(
+        user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    last_request_available = ui_state.get_last_request_text(user_id, workspace_id) is not None
+    last_turn_available = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+
+    lines = [
+        f"Welcome to Talk2Agent for {resolve_provider_profile(provider).display_name} in {workspace_label}.",
+        f"Workspace ID: {workspace_id}",
+        _interaction_status_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+        ),
+        _recommended_next_step_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_available,
+            last_turn_available=last_turn_available,
+        ),
+        _primary_controls_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_available,
+            last_turn_available=last_turn_available,
+        ),
+        "",
+    ]
+
+    if session is None:
+        lines.append("Session: none yet. Your first text or attachment will start one.")
+    else:
+        lines.append(f"Session: {session.session_id or 'pending'}")
+        session_title = _status_text_snippet(getattr(session, "session_title", None), limit=120)
+        if session_title is not None:
+            lines.append(f"Session title: {session_title}")
+
+    lines.extend(_status_active_turn_lines(active_turn))
+
+    get_selection = None if session is None else getattr(session, "get_selection", None)
+    if callable(get_selection):
+        try:
+            model_selection = get_selection("model")
+        except Exception:
+            model_selection = None
+        try:
+            mode_selection = get_selection("mode")
+        except Exception:
+            mode_selection = None
+        model_summary = _selection_summary_line("Model", model_selection)
+        mode_summary = _selection_summary_line("Mode", mode_selection)
+        if model_summary is not None:
+            lines.append(model_summary)
+        if mode_summary is not None:
+            lines.append(mode_summary)
+
+    lines.append(f"Pending input: {_pending_text_action_label(pending_text_action)}")
+    if pending_media_group_stats is not None:
+        lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
+
+    if bundle_count == 0:
+        lines.append("Context bundle: empty")
+    else:
+        bundle_chat_state = "bundle chat on" if bundle_chat_active else "bundle chat off"
+        lines.append(
+            f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''} ({bundle_chat_state})"
+        )
+
+    lines.append("")
+    lines.append("Start here:")
+    lines.append("Send plain text or an attachment to talk to the current agent.")
+    lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
+
+    return "\n".join(lines)
+
+
+def _build_help_text(
+    *,
+    provider: str,
+    workspace_id: str,
+    workspace_label: str,
+    session,
+    user_id: int,
+    ui_state: TelegramUiState,
+    is_admin: bool,
+) -> str:
+    active_turn = ui_state.get_active_turn(
+        user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    last_request_available = ui_state.get_last_request_text(user_id, workspace_id) is not None
+    last_turn_available = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+
+    lines = [
+        f"Talk2Agent help for {resolve_provider_profile(provider).display_name} in {workspace_label}.",
+        f"Workspace ID: {workspace_id}",
+        _interaction_status_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+        ),
+        _recommended_next_step_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_available,
+            last_turn_available=last_turn_available,
+        ),
+        _primary_controls_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_available,
+            last_turn_available=last_turn_available,
+        ),
+        "",
+    ]
+
+    if session is None:
+        lines.append("Session: none yet. Send text or an attachment to start one.")
+    else:
+        lines.append(f"Session: {session.session_id or 'pending'}")
+
+    lines.extend(_status_active_turn_lines(active_turn))
+    lines.append(f"Pending input: {_pending_text_action_label(pending_text_action)}")
+    if pending_media_group_stats is not None:
+        lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
+    lines.append(f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}")
+
+    lines.append("")
+    lines.append("Quick guide:")
+    lines.append("1. Send text or an attachment to chat with the current agent.")
+    lines.append(
+        "2. Use Workspace Search, Workspace Files/Changes, and Context Bundle when you want to "
+        "prepare context before you ask."
+    )
+    lines.append("3. Use Bot Status or /status to inspect runtime state, stop turns, and recover.")
+    lines.append(
+        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent to branch "
+        "or reset your work."
+    )
+    lines.append("")
+    lines.append("Keyboard:")
+    lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
+    lines.append("")
+    lines.append("Recovery:")
+    lines.append("/start restores the welcome screen and the full keyboard.")
+    lines.append("/status opens Bot Status even when the keyboard is hidden.")
+    lines.append("Help or /help reopens this guide without changing the current session.")
+    lines.append(
+        "Cancel / Stop or /cancel backs out of pending input, stops a running turn, or leaves "
+        "bundle chat."
+    )
+
+    return "\n".join(lines)
+
+
+async def handle_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    services,
+    ui_state: TelegramUiState,
+) -> None:
+    del context
+
+    if update.message is None:
+        return
+    if not _is_authorized(update, services):
+        await _reply_unauthorized(update)
+        return
+
+    user_id = update.effective_user.id
+    try:
+        state, session = await _with_active_store(
+            services,
+            lambda store: store.peek(user_id),
+        )
+    except Exception:
+        await _reply_request_failed(update, services)
+        return
+
+    await _reply_with_menu(
+        update.message,
+        services,
+        user_id,
+        _build_start_text(
+            provider=state.provider,
+            workspace_id=state.workspace_id,
+            workspace_label=_workspace_label(services, state.workspace_id),
+            session=session,
+            user_id=user_id,
+            ui_state=ui_state,
+            is_admin=user_id == services.admin_user_id,
+        ),
+    )
+
+
+async def handle_help(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    services,
+    ui_state: TelegramUiState,
+) -> None:
+    del context
+
+    if update.message is None:
+        return
+    if not _is_authorized(update, services):
+        await _reply_unauthorized(update)
+        return
+
+    user_id = update.effective_user.id
+    try:
+        state, session = await _with_active_store(
+            services,
+            lambda store: store.peek(user_id),
+        )
+    except Exception:
+        await _reply_request_failed(update, services)
+        return
+
+    await _reply_with_menu(
+        update.message,
+        services,
+        user_id,
+        _build_help_text(
+            provider=state.provider,
+            workspace_id=state.workspace_id,
+            workspace_label=_workspace_label(services, state.workspace_id),
+            session=session,
+            user_id=user_id,
+            ui_state=ui_state,
+            is_admin=user_id == services.admin_user_id,
+        ),
+    )
+
+
+async def handle_status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    services,
+    ui_state: TelegramUiState,
+) -> None:
+    del context
+    await _show_runtime_status(update, services, ui_state)
+
+
+async def _request_stop_active_turn(
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    active_turn: _ActiveTurn,
+) -> None:
+    ui_state.mark_active_turn_stop_requested(
+        user_id,
+        task=active_turn.task,
+    )
+    cancel_turn = None if active_turn.session is None else getattr(active_turn.session, "cancel_turn", None)
+    if callable(cancel_turn):
+        cancelled = await cancel_turn()
+        if not cancelled:
+            active_turn.task.cancel()
+        return
+    active_turn.task.cancel()
+
+
+async def handle_cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    services,
+    ui_state: TelegramUiState,
+) -> None:
+    if update.message is None:
+        return
+    if not _is_authorized(update, services):
+        await _reply_unauthorized(update)
+        return
+
+    user_id = update.effective_user.id
+    pending_text_action = ui_state.clear_pending_text_action(user_id)
+    pending_media_group_stats = ui_state.cancel_pending_media_groups(user_id)
+    if pending_text_action is not None or pending_media_group_stats is not None:
+        notice_parts = []
+        if pending_text_action is not None:
+            pending_input_notice = (
+                "Cancelled pending input: "
+                f"{_pending_text_action_label(pending_text_action)}."
+            )
+            if pending_media_group_stats is None:
+                pending_input_notice = f"{pending_input_notice} Nothing was sent to the agent."
+            notice_parts.append(pending_input_notice)
+        if pending_media_group_stats is not None:
+            notice_parts.append(_pending_media_group_cancelled_text(pending_media_group_stats))
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            " ".join(notice_parts),
+        )
+        return
+
+    active_turn = ui_state.get_active_turn(user_id)
+    if active_turn is not None:
+        try:
+            await _request_stop_active_turn(
+                ui_state,
+                user_id=user_id,
+                active_turn=active_turn,
+            )
+        except Exception:
+            await _reply_request_failed(update, services)
+            return
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            "Stop requested for the current turn. Open Bot Status to track progress.",
+        )
+        return
+
+    try:
+        state = await services.snapshot_runtime_state()
+    except Exception:
+        if ui_state.resolve_agent_command(user_id, CANCEL_COMMAND) is not None:
+            await handle_agent_command(update, context, services, ui_state)
+            return
+        await _reply_request_failed(update, services)
+        return
+
+    if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
+        ui_state.disable_context_bundle_chat(user_id)
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            "Bundle chat disabled. New plain text messages will use the normal session again.",
+        )
+        return
+
+    if ui_state.resolve_agent_command(user_id, CANCEL_COMMAND) is not None:
+        await handle_agent_command(update, context, services, ui_state)
+        return
+
+    await _reply_with_menu(
+        update.message,
+        services,
+        user_id,
+        "Nothing to cancel. Send text, use /start to restore the main keyboard, or open Bot Status.",
+    )
+
+
 async def handle_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -892,9 +1937,15 @@ async def handle_text(
 
     user_id = update.effective_user.id
     text = update.message.text or ""
-    if _is_main_menu_button(text):
+    if _clears_pending_text_action_button(text):
         ui_state.clear_pending_text_action(user_id)
 
+    if text == BUTTON_HELP:
+        await handle_help(update, context, services, ui_state)
+        return
+    if text == BUTTON_CANCEL_OR_STOP:
+        await handle_cancel(update, context, services, ui_state)
+        return
     if text == BUTTON_BOT_STATUS:
         await _show_runtime_status(update, services, ui_state)
         return
@@ -965,16 +2016,35 @@ async def handle_text(
 
     pending_text_action = ui_state.get_pending_text_action(user_id)
     if pending_text_action is not None:
-        if await _handle_pending_text_action(
-            update,
-            services,
-            ui_state,
-            pending_text_action,
-            text,
-        ):
+        try:
+            handled_pending_text = await _handle_pending_text_action(
+                update,
+                services,
+                ui_state,
+                pending_text_action,
+                text,
+            )
+        except Exception:
+            await _reply_request_failed(update, services)
+            return
+        if handled_pending_text:
             return
 
-    state = await services.snapshot_runtime_state()
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    if pending_media_group_stats is not None:
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            _pending_media_group_blocked_input_text(pending_media_group_stats),
+        )
+        return
+
+    try:
+        state = await services.snapshot_runtime_state()
+    except Exception:
+        await _reply_request_failed(update, services)
+        return
     if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
         bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
         if bundle is None or not bundle.items:
@@ -1046,12 +2116,23 @@ async def handle_attachment(
         )
         return
 
-    if ui_state.get_pending_text_action(user_id) is not None:
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    if pending_text_action is not None:
         await _reply_with_menu(
             update.message,
             services,
             user_id,
-            "The current action is waiting for plain text. Send text or cancel the pending action first.",
+            _waiting_for_plain_text_notice(pending_text_action),
+        )
+        return
+
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    if pending_media_group_stats is not None:
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            _pending_media_group_blocked_input_text(pending_media_group_stats),
         )
         return
 
@@ -1071,6 +2152,71 @@ async def handle_attachment(
         ui_state,
         prompt,
         application=None if context is None else context.application,
+    )
+
+
+async def handle_unsupported_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    services,
+    ui_state: TelegramUiState,
+) -> None:
+    del context
+
+    if update.message is None:
+        return
+    if not _is_authorized(update, services):
+        await _reply_unauthorized(update)
+        return
+
+    user_id = update.effective_user.id
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    if pending_text_action is not None:
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            _waiting_for_plain_text_notice(pending_text_action),
+        )
+        return
+
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    if pending_media_group_stats is not None:
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            _pending_media_group_blocked_input_text(pending_media_group_stats),
+        )
+        return
+
+    active_turn = ui_state.get_active_turn(user_id)
+    if active_turn is not None:
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            _turn_busy_notice(active_turn),
+        )
+        return
+
+    bundle_chat_active = False
+    try:
+        state = await services.snapshot_runtime_state()
+    except Exception:
+        state = None
+    if state is not None:
+        bundle_chat_active = ui_state.context_bundle_chat_active(
+            user_id,
+            state.provider,
+            state.workspace_id,
+        )
+
+    await _reply_with_menu(
+        update.message,
+        services,
+        user_id,
+        _unsupported_message_text(update.message, bundle_chat_active=bundle_chat_active),
     )
 
 
@@ -1657,11 +2803,16 @@ def _status_text_snippet(text: str | None, *, limit: int = STATUS_TEXT_SNIPPET_L
 
 def _turn_busy_notice(active_turn: _ActiveTurn | None) -> str:
     if active_turn is None:
-        return "Another request is already running. Open Bot Status to stop it or wait for it to finish."
+        return (
+            "Another request is already running. "
+            "Send /cancel to stop it, open Bot Status to inspect progress, or wait for it to "
+            "finish. This new message was not sent to the agent."
+        )
     title = _status_text_snippet(active_turn.title_hint) or "current request"
     return (
         f"Another request is already running ({title}). "
-        "Open Bot Status to stop it or wait for it to finish."
+        "Send /cancel to stop it, open Bot Status to inspect progress, or wait for it to finish. "
+        "This new message was not sent to the agent."
     )
 
 
@@ -2421,26 +3572,26 @@ async def handle_callback_query(
     if query is None:
         return
     if not _is_authorized(update, services):
-        await query.answer("Unauthorized user.", show_alert=True)
+        await query.answer(_unauthorized_text(), show_alert=True)
         return
 
     data = query.data or ""
     if not data.startswith(CALLBACK_PREFIX):
-        await query.answer("Unknown action.", show_alert=True)
+        await query.answer(_unknown_action_text(), show_alert=True)
         return
 
     token = data[len(CALLBACK_PREFIX) :]
     callback_action = ui_state.get(token)
     if callback_action is None:
-        await query.answer("This button has expired.", show_alert=True)
+        await query.answer(_expired_button_text(), show_alert=True)
         return
     if update.effective_user is None or callback_action.user_id != update.effective_user.id:
-        await query.answer("This button is not for you.", show_alert=True)
+        await query.answer(_button_not_for_you_text(), show_alert=True)
         return
 
     callback_action = ui_state.pop(token)
     if callback_action is None:
-        await query.answer("This button has expired.", show_alert=True)
+        await query.answer(_expired_button_text(), show_alert=True)
         return
 
     try:
@@ -2453,7 +3604,7 @@ async def handle_callback_query(
         )
     except Exception:
         try:
-            await query.answer("Request failed.", show_alert=True)
+            await query.answer(_request_failed_text(), show_alert=True)
         except Exception:
             pass
 
@@ -2470,6 +3621,18 @@ def build_telegram_application(config, services) -> Application:
     builder = ApplicationBuilder().token(config.telegram.bot_token).post_init(_post_init)
     application = builder.build()
     application.add_handler(
+        CommandHandler(START_COMMAND, partial(handle_start, services=services, ui_state=ui_state))
+    )
+    application.add_handler(
+        CommandHandler(STATUS_COMMAND, partial(handle_status, services=services, ui_state=ui_state))
+    )
+    application.add_handler(
+        CommandHandler(HELP_COMMAND, partial(handle_help, services=services, ui_state=ui_state))
+    )
+    application.add_handler(
+        CommandHandler(CANCEL_COMMAND, partial(handle_cancel, services=services, ui_state=ui_state))
+    )
+    application.add_handler(
         CommandHandler(DEBUG_STATUS_COMMAND, partial(handle_debug_status, services=services))
     )
     application.add_handler(
@@ -2477,14 +3640,20 @@ def build_telegram_application(config, services) -> Application:
     )
     application.add_handler(
         MessageHandler(
-        filters.PHOTO | filters.Document.ALL | filters.VOICE | filters.AUDIO | filters.VIDEO,
-        partial(handle_attachment, services=services, ui_state=ui_state),
-    )
+            _SUPPORTED_ATTACHMENT_FILTER,
+            partial(handle_attachment, services=services, ui_state=ui_state),
+        )
     )
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             partial(handle_text, services=services, ui_state=ui_state),
+        )
+    )
+    application.add_handler(
+        MessageHandler(
+            _UNSUPPORTED_RICH_MESSAGE_FILTER,
+            partial(handle_unsupported_message, services=services, ui_state=ui_state),
         )
     )
     application.add_handler(
@@ -2526,7 +3695,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Session title cannot be empty. Send another title or press Cancel Rename.",
+                _pending_input_cancel_notice("Session title cannot be empty. Send another title."),
             )
             return True
 
@@ -2576,7 +3745,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Command arguments cannot be empty. Send another value or press Cancel Command.",
+                _pending_input_cancel_notice("Command arguments cannot be empty. Send another value."),
             )
             return True
 
@@ -2610,7 +3779,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Search query cannot be empty. Send another query or press Cancel Search.",
+                _pending_input_cancel_notice("Search query cannot be empty. Send another query."),
             )
             return True
 
@@ -2625,7 +3794,7 @@ async def _handle_pending_text_action(
                     services,
                     ui_state,
                     user_id=update.effective_user.id,
-                    notice="Request failed.",
+                    notice=_request_failed_text(),
                 )
             else:
                 await _reply_request_failed(update, services)
@@ -2658,7 +3827,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "File request cannot be empty. Send another request or press Cancel Ask.",
+                _pending_input_cancel_notice("File request cannot be empty. Send another request."),
             )
             return True
 
@@ -2690,7 +3859,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Change request cannot be empty. Send another request or press Cancel Ask.",
+                _pending_input_cancel_notice("Change request cannot be empty. Send another request."),
             )
             return True
 
@@ -2723,7 +3892,9 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Context bundle request cannot be empty. Send another request or press Cancel Ask.",
+                _pending_input_cancel_notice(
+                    "Context bundle request cannot be empty. Send another request."
+                ),
             )
             return True
 
@@ -2734,7 +3905,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Context bundle is empty. Add files or changes first.",
+                _context_bundle_empty_text(),
             )
             return True
 
@@ -2765,7 +3936,7 @@ async def _handle_pending_text_action(
                 update.message,
                 services,
                 update.effective_user.id,
-                "Request cannot be empty. Send another request or press Cancel Ask.",
+                _pending_input_cancel_notice("Request cannot be empty. Send another request."),
             )
             return True
 
@@ -2957,12 +4128,13 @@ async def _flush_media_group_after_delay(
         return
 
     lead_message = messages[0]
-    if ui_state.get_pending_text_action(user_id) is not None:
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    if pending_text_action is not None:
         await _reply_with_menu(
             lead_message,
             services,
             user_id,
-            "The current action is waiting for plain text. Send text or cancel the pending action first.",
+            _waiting_for_plain_text_notice(pending_text_action),
         )
         return
 
@@ -2972,7 +4144,7 @@ async def _flush_media_group_after_delay(
         await _reply_with_menu(lead_message, services, user_id, str(exc))
         return
     except Exception:
-        await _reply_with_menu(lead_message, services, user_id, "Request failed.")
+        await _reply_with_menu(lead_message, services, user_id, _request_failed_text())
         return
 
     await _run_agent_attachment_turn_on_message(
@@ -2997,7 +4169,7 @@ async def _build_attachment_prompt(message) -> _AttachmentPrompt:
 
 async def _build_media_group_prompt(messages: tuple[Any, ...]) -> _AttachmentPrompt:
     if not messages:
-        raise AttachmentPromptError("Media group is empty.")
+        raise AttachmentPromptError(_empty_media_group_text())
 
     prompt_items: list[PromptImage | PromptAudio | PromptTextResource | PromptBlobResource] = []
     caption: str | None = None
@@ -3049,7 +4221,7 @@ async def _build_attachment_content(message) -> _AttachmentContent:
 
     document = message.document
     if document is None:
-        raise AttachmentPromptError("Only photo, voice, audio, video, and document messages are supported right now.")
+        raise AttachmentPromptError(_unsupported_attachment_for_turn_text())
 
     document_prompt_item = await _build_document_prompt_item(document)
     fallback_text = _document_fallback_prompt_text(getattr(document, "file_name", None))
@@ -3149,13 +4321,13 @@ async def _build_video_prompt_item(video) -> PromptBlobResource:
 async def _download_attachment_bytes(attachment) -> bytes:
     file_size = getattr(attachment, "file_size", None)
     if file_size is not None and file_size > ATTACHMENT_MAX_BYTES:
-        raise AttachmentPromptError("Attachment is too large. Max size is 8 MiB.")
+        raise AttachmentPromptError(_attachment_too_large_text())
 
     telegram_file = await attachment.get_file()
     payload = await telegram_file.download_as_bytearray()
     data = bytes(payload)
     if len(data) > ATTACHMENT_MAX_BYTES:
-        raise AttachmentPromptError("Attachment is too large. Max size is 8 MiB.")
+        raise AttachmentPromptError(_attachment_too_large_text())
     return data
 
 
@@ -3281,7 +4453,7 @@ def _unsupported_prompt_content_message(provider: str, error: UnsupportedPromptC
     else:
         unsupported = f"{', '.join(parts[:-1])}, or {parts[-1]}"
     return (
-        f"The current {provider} session does not support {unsupported} via ACP prompts. "
+        f"The current {provider} session can't accept {unsupported} directly in this chat. "
         "Try plain text, a different attachment type, or switch agent."
     )
 
@@ -3386,7 +4558,7 @@ def _inline_text_resource_for_prompt(item: PromptTextResource) -> str:
     original_text = item.text
     truncated_text = original_text[:INLINE_TEXT_DOCUMENT_CHAR_LIMIT]
     lines = [
-        "Attached Telegram document content was inlined because the current provider does not support ACP embedded context.",
+        "Attached Telegram document content was pasted into this turn because the current provider can't read attached documents directly.",
         f"URI: {item.uri}",
     ]
     if item.mime_type:
@@ -3424,12 +4596,12 @@ def _save_prompt_item_to_workspace_fallback(
             default_stem=default_stem,
         )
     except Exception as exc:
-        raise AttachmentPromptError("Failed to save attachment into workspace inbox.") from exc
+        raise AttachmentPromptError(_workspace_fallback_save_failed_text()) from exc
 
     return (
         f"Telegram attachment was saved to `{inbox_file.relative_path}` in the current workspace "
-        f"because the current provider does not support {unsupported_kind} via ACP prompts.\n"
-        "Read the file from disk and continue with the user's request using the local workspace state.",
+        f"because the current provider can't read {unsupported_kind} directly in this turn.\n"
+        "Open that file from the workspace and continue with the user's request.",
         _ContextBundleItem(kind="file", relative_path=inbox_file.relative_path),
     )
 
@@ -3794,9 +4966,11 @@ async def _run_agent_attachment_turn_on_message(
     application,
 ) -> None:
     saved_context_items: tuple[_ContextBundleItem, ...] = ()
+    turn_state = None
 
     async def _run(session, stream, state):
-        nonlocal saved_context_items
+        nonlocal saved_context_items, turn_state
+        turn_state = state
         prompt_for_turn = prompt
         if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
             bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
@@ -3827,13 +5001,36 @@ async def _run_agent_attachment_turn_on_message(
         )
 
     async def _after_success(state):
-        for item in saved_context_items:
-            ui_state.add_context_item(
-                user_id,
-                state.provider,
-                state.workspace_id,
-                item,
-            )
+        _preserve_saved_attachment_context(
+            ui_state,
+            user_id=user_id,
+            state=state,
+            saved_context_items=saved_context_items,
+        )
+        await _reply_saved_attachment_notice(
+            message,
+            ui_state=ui_state,
+            user_id=user_id,
+            saved_context_items=saved_context_items,
+            recovery=False,
+        )
+
+    async def _on_turn_failure():
+        if turn_state is None or not saved_context_items:
+            return
+        _preserve_saved_attachment_context(
+            ui_state,
+            user_id=user_id,
+            state=turn_state,
+            saved_context_items=saved_context_items,
+        )
+        await _reply_saved_attachment_notice(
+            message,
+            ui_state=ui_state,
+            user_id=user_id,
+            saved_context_items=saved_context_items,
+            recovery=True,
+        )
 
     await _run_agent_session_turn_on_message(
         message,
@@ -3844,6 +5041,7 @@ async def _run_agent_attachment_turn_on_message(
         application=application,
         turn_runner=_run,
         after_success=_after_success,
+        on_turn_failure=_on_turn_failure,
     )
 
 
@@ -3873,7 +5071,20 @@ async def _run_agent_session_turn_on_message(
 
     create_task = None if application is None else getattr(application, "create_task", None)
     if callable(create_task):
-        runtime_state = await services.snapshot_runtime_state()
+        try:
+            runtime_state = await services.snapshot_runtime_state()
+        except Exception:
+            if on_prepare_failure is not None:
+                try:
+                    await on_prepare_failure()
+                    return
+                except Exception:
+                    pass
+            await message.reply_text(
+                _request_failed_text(),
+                reply_markup=_main_menu_markup(user_id, services),
+            )
+            return
         task: asyncio.Task | None = None
 
         async def _run_in_background() -> None:
@@ -3950,7 +5161,7 @@ async def _execute_agent_session_turn_on_message(
             except Exception:
                 pass
         await message.reply_text(
-            "Request failed.",
+            _request_failed_text(),
             reply_markup=_main_menu_markup(user_id, services),
         )
         return
@@ -4034,6 +5245,7 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
             )
             failure_text, failure_markup = _build_session_loss_recovery_view(
                 provider=state.provider,
+                workspace_id=state.workspace_id,
                 workspace_label=_workspace_label(services, state.workspace_id),
                 user_id=user_id,
                 services=services,
@@ -4042,7 +5254,7 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
             await stream.fail(failure_text, reply_markup=failure_markup)
             await _invoke_turn_failure_callback(on_turn_failure)
             return
-        await stream.fail("Request failed.")
+        await stream.fail(_request_failed_text())
         await _invoke_turn_failure_callback(on_turn_failure)
         return
 
@@ -4055,7 +5267,22 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
     except Exception:
         pass
 
-    await stream.finish(stop_reason=response.stop_reason)
+    workspace_changes_follow_up_git_status = _workspace_changes_follow_up_git_status(
+        before_workspace_git_status,
+        _safe_read_workspace_git_status(state.workspace_path),
+    )
+
+    final_reply_markup = None
+    if response.stop_reason != "cancelled" and workspace_changes_follow_up_git_status is None:
+        final_reply_markup = _completed_turn_reply_markup(
+            ui_state,
+            user_id=user_id,
+        )
+
+    await stream.finish(
+        stop_reason=response.stop_reason,
+        reply_markup=final_reply_markup,
+    )
 
     if after_success is not None:
         try:
@@ -4063,14 +5290,15 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
         except Exception:
             pass
 
-    await _maybe_reply_workspace_changes_follow_up(
-        message,
-        services,
-        ui_state,
-        user_id=user_id,
-        state=state,
-        before_git_status=before_workspace_git_status,
-    )
+    if workspace_changes_follow_up_git_status is not None:
+        await _reply_workspace_changes_follow_up(
+            message,
+            services,
+            ui_state,
+            user_id=user_id,
+            state=state,
+            git_status=workspace_changes_follow_up_git_status,
+        )
 
     if application is not None and session.available_commands:
         await _sync_agent_commands_for_user(
@@ -4157,7 +5385,7 @@ def _status_turn_callbacks(
             services,
             ui_state,
             user_id=user_id,
-            notice="Request failed.",
+            notice=_request_failed_text(),
         )
 
     async def _on_turn_failure() -> None:
@@ -4166,7 +5394,7 @@ def _status_turn_callbacks(
             services,
             ui_state,
             user_id=user_id,
-            notice="Request failed.",
+            notice=_request_failed_text(),
         )
 
     return _after_turn_success, _on_prepare_failure, _on_turn_failure
@@ -4236,7 +5464,7 @@ def _pending_status_turn_callbacks(
             services,
             ui_state,
             user_id=user_id,
-            notice="Request failed.",
+            notice=_request_failed_text(),
         )
 
     async def _on_turn_failure() -> None:
@@ -4245,7 +5473,7 @@ def _pending_status_turn_callbacks(
             services,
             ui_state,
             user_id=user_id,
-            notice="Request failed.",
+            notice=_request_failed_text(),
         )
 
     return _after_turn_success, _on_prepare_failure, _on_turn_failure
@@ -4490,18 +5718,81 @@ async def _start_workspace_search(update: Update, services, ui_state: TelegramUi
 
     ui_state.set_pending_text_action(update.effective_user.id, "workspace_search")
     await update.message.reply_text(
-        "Send your workspace search query as the next plain text message.",
-        reply_markup=InlineKeyboardMarkup(
+        _pending_input_cancel_notice("Send your workspace search query as the next plain text message."),
+        reply_markup=_workspace_search_prompt_markup(
+            ui_state,
+            update.effective_user.id,
+            cancel_action="workspace_search_cancel",
+        ),
+    )
+
+
+def _workspace_search_prompt_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+    *,
+    cancel_action: str,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
             [
-                [
-                    _callback_button(
-                        ui_state,
-                        update.effective_user.id,
-                        "Cancel Search",
-                        "workspace_search_cancel",
-                    )
-                ]
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Cancel Search",
+                    cancel_action,
+                )
             ]
+        ]
+    )
+
+
+def _workspace_search_cancelled_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Search Again",
+                    "recover_workspace_search",
+                )
+            ],
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Bot Status",
+                    "runtime_status_page",
+                )
+            ],
+        ]
+    )
+
+
+async def _show_workspace_search_prompt_from_callback(
+    query,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    cancel_action: str,
+    pending_payload: dict[str, Any] | None = None,
+) -> None:
+    ui_state.set_pending_text_action(
+        user_id,
+        "workspace_search",
+        **({} if pending_payload is None else dict(pending_payload)),
+    )
+    await _edit_query_message(
+        query,
+        _pending_input_cancel_notice("Send your workspace search query as the next plain text message."),
+        reply_markup=_workspace_search_prompt_markup(
+            ui_state,
+            user_id,
+            cancel_action=cancel_action,
         ),
     )
 
@@ -5109,17 +6400,34 @@ def _build_workspace_changes_follow_up_view(
 def _build_session_loss_recovery_view(
     *,
     provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     services,
     ui_state: TelegramUiState,
 ):
-    text = (
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    lines = [
         "Request failed. "
         f"The current live session for {resolve_provider_profile(provider).display_name} "
-        f"in {workspace_label} was closed.\n"
-        "Choose a recovery action."
-    )
+        f"in {workspace_label} was closed."
+    ]
+    if last_turn is not None:
+        lines.append(
+            "Recommended first step: Retry Last Turn to rerun the previous request, or open Bot "
+            "Status if you want to inspect runtime and history first."
+        )
+    else:
+        lines.append(
+            "Recommended first step: Open Bot Status to inspect runtime and history, or start a "
+            "New Session if you want a clean slate."
+        )
+    if last_request is not None:
+        lines.append(
+            f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}"
+        )
+    text = "\n".join(lines)
     buttons = [
         [
             _callback_button(
@@ -5139,8 +6447,8 @@ def _build_session_loss_recovery_view(
             _callback_button(
                 ui_state,
                 user_id,
-                "Fork Last Turn",
-                "recover_fork_last_turn",
+                "Open Bot Status",
+                "runtime_status_page",
             ),
             _callback_button(
                 ui_state,
@@ -5150,6 +6458,12 @@ def _build_session_loss_recovery_view(
             ),
         ],
         [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork Last Turn",
+                "recover_fork_last_turn",
+            ),
             _callback_button(
                 ui_state,
                 user_id,
@@ -5178,27 +6492,70 @@ def _build_session_loss_recovery_view(
     return text, InlineKeyboardMarkup(buttons)
 
 
-async def _maybe_reply_workspace_changes_follow_up(
+def _completed_turn_reply_markup(
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Retry Last Turn",
+                    "recover_retry_last_turn",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Fork Last Turn",
+                    "recover_fork_last_turn",
+                ),
+            ],
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Bot Status",
+                    "recover_runtime_status",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "New Session",
+                    "recover_new_session",
+                ),
+            ],
+        ]
+    )
+
+
+def _workspace_changes_follow_up_git_status(before_git_status, after_git_status):
+    if before_git_status is None or after_git_status is None:
+        return None
+    if not getattr(after_git_status, "is_git_repo", False):
+        return None
+    if not getattr(after_git_status, "entries", ()):
+        return None
+    if _workspace_changes_state_token(before_git_status) == _workspace_changes_state_token(
+        after_git_status
+    ):
+        return None
+    return after_git_status
+
+
+async def _reply_workspace_changes_follow_up(
     message,
     services,
     ui_state: TelegramUiState,
     *,
     user_id: int,
     state,
-    before_git_status,
+    git_status,
 ) -> None:
-    after_git_status = _safe_read_workspace_git_status(state.workspace_path)
-    if before_git_status is None or after_git_status is None:
-        return
-    if not getattr(after_git_status, "is_git_repo", False):
-        return
-    if not getattr(after_git_status, "entries", ()):
-        return
-    if _workspace_changes_state_token(before_git_status) == _workspace_changes_state_token(after_git_status):
-        return
-
     text, markup = _build_workspace_changes_follow_up_view(
-        git_status=after_git_status,
+        git_status=git_status,
         provider=state.provider,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
@@ -5757,7 +7114,7 @@ async def _begin_context_items_ask_from_callback(
     )
     await _edit_query_message(
         query,
-        prompt_text,
+        _pending_input_cancel_notice(prompt_text),
         reply_markup=InlineKeyboardMarkup(
             [
                 [
@@ -5919,52 +7276,8 @@ async def _start_new_session(update: Update, services, ui_state: TelegramUiState
         await _reply_unauthorized(update)
         return
 
-    try:
-        state, session = await _with_active_store(
-            services,
-            lambda store: store.reset(update.effective_user.id),
-        )
-        await session.ensure_started()
-    except Exception:
-        await _reply_session_creation_failed(update, services)
-        return
-
-    try:
-        await state.session_store.record_session_usage(
-            update.effective_user.id,
-            session,
-            title_hint=None,
-        )
-    except Exception:
-        pass
-    ui_state.invalidate_session_bound_interactions()
-    await _sync_agent_commands_for_session(
-        application,
-        ui_state,
-        update.effective_user.id,
-        session,
-    )
-
-    await _reply_with_menu(
-        update.message,
-        services,
-        update.effective_user.id,
-        (
-            f"Started new session: {session.session_id}\n"
-            "Old bot buttons and pending inputs tied to the previous session were cleared."
-        ),
-    )
-
-
-async def _start_new_session_from_callback(
-    query,
-    services,
-    ui_state: TelegramUiState,
-    *,
-    user_id: int,
-    application,
-    back_target: str = "none",
-) -> None:
+    user_id = update.effective_user.id
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
     try:
         state, session = await _with_active_store(
             services,
@@ -5972,16 +7285,11 @@ async def _start_new_session_from_callback(
         )
         await session.ensure_started()
     except Exception:
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice="session creation failed",
-            )
-            return
-        await _edit_query_message(query, "session creation failed")
+        await _reply_session_creation_failed(
+            update,
+            services,
+            notice=pending_upload_notice,
+        )
         return
 
     try:
@@ -6000,9 +7308,69 @@ async def _start_new_session_from_callback(
         session,
     )
 
-    success_text = (
-        f"Started new session: {session.session_id}\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    await _reply_with_menu(
+        update.message,
+        services,
+        user_id,
+        _prefixed_notice_text(
+            pending_upload_notice,
+            _new_session_success_text(session.session_id),
+        ),
+    )
+
+
+async def _start_new_session_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    application,
+    back_target: str = "none",
+) -> None:
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
+    try:
+        state, session = await _with_active_store(
+            services,
+            lambda store: store.reset(user_id),
+        )
+        await session.ensure_started()
+    except Exception:
+        failure_text = _prefixed_notice_text(
+            pending_upload_notice,
+            _session_creation_failed_text(),
+        )
+        if back_target == "status":
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=failure_text,
+            )
+            return
+        await _edit_query_message(query, failure_text)
+        return
+
+    try:
+        await state.session_store.record_session_usage(
+            user_id,
+            session,
+            title_hint=None,
+        )
+    except Exception:
+        pass
+    ui_state.invalidate_session_bound_interactions()
+    await _sync_agent_commands_for_session(
+        application,
+        ui_state,
+        user_id,
+        session,
+    )
+
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        _new_session_success_text(session.session_id),
     )
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -6023,52 +7391,8 @@ async def _restart_agent(update: Update, services, ui_state: TelegramUiState, *,
         await _reply_unauthorized(update)
         return
 
-    try:
-        state, session = await _with_active_store(
-            services,
-            lambda store: store.restart(update.effective_user.id),
-        )
-        await session.ensure_started()
-    except Exception:
-        await _reply_session_creation_failed(update, services)
-        return
-
-    try:
-        await state.session_store.record_session_usage(
-            update.effective_user.id,
-            session,
-            title_hint=None,
-        )
-    except Exception:
-        pass
-    ui_state.invalidate_session_bound_interactions()
-    await _sync_agent_commands_for_session(
-        application,
-        ui_state,
-        update.effective_user.id,
-        session,
-    )
-
-    await _reply_with_menu(
-        update.message,
-        services,
-        update.effective_user.id,
-        (
-            f"Restarted agent: {session.session_id}\n"
-            "Old bot buttons and pending inputs tied to the previous session were cleared."
-        ),
-    )
-
-
-async def _restart_agent_from_callback(
-    query,
-    services,
-    ui_state: TelegramUiState,
-    *,
-    user_id: int,
-    application,
-    back_target: str = "none",
-) -> None:
+    user_id = update.effective_user.id
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
     try:
         state, session = await _with_active_store(
             services,
@@ -6076,16 +7400,11 @@ async def _restart_agent_from_callback(
         )
         await session.ensure_started()
     except Exception:
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice="session creation failed",
-            )
-            return
-        await _edit_query_message(query, "session creation failed")
+        await _reply_session_creation_failed(
+            update,
+            services,
+            notice=pending_upload_notice,
+        )
         return
 
     try:
@@ -6104,9 +7423,69 @@ async def _restart_agent_from_callback(
         session,
     )
 
-    success_text = (
-        f"Restarted agent: {session.session_id}\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    await _reply_with_menu(
+        update.message,
+        services,
+        user_id,
+        _prefixed_notice_text(
+            pending_upload_notice,
+            _restart_agent_success_text(session.session_id),
+        ),
+    )
+
+
+async def _restart_agent_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    application,
+    back_target: str = "none",
+) -> None:
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
+    try:
+        state, session = await _with_active_store(
+            services,
+            lambda store: store.restart(user_id),
+        )
+        await session.ensure_started()
+    except Exception:
+        failure_text = _prefixed_notice_text(
+            pending_upload_notice,
+            _session_creation_failed_text(),
+        )
+        if back_target == "status":
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=failure_text,
+            )
+            return
+        await _edit_query_message(query, failure_text)
+        return
+
+    try:
+        await state.session_store.record_session_usage(
+            user_id,
+            session,
+            title_hint=None,
+        )
+    except Exception:
+        pass
+    ui_state.invalidate_session_bound_interactions()
+    await _sync_agent_commands_for_session(
+        application,
+        ui_state,
+        user_id,
+        session,
+    )
+
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        _restart_agent_success_text(session.session_id),
     )
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -6129,22 +7508,27 @@ async def _fork_live_session_from_callback(
     application,
     back_target: str = "none",
 ) -> None:
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
     try:
         state, session = await _with_active_store(
             services,
             lambda store: store.fork_live_session(user_id),
         )
     except Exception:
+        failure_text = _prefixed_notice_text(
+            pending_upload_notice,
+            _fork_session_failed_text(),
+        )
         if back_target == "status":
             await _show_runtime_status_from_callback(
                 query,
                 services,
                 ui_state,
                 user_id=user_id,
-                notice="Failed to fork session.",
+                notice=failure_text,
             )
             return
-        await _edit_query_message(query, "Failed to fork session.")
+        await _edit_query_message(query, failure_text)
         return
 
     try:
@@ -6163,9 +7547,9 @@ async def _fork_live_session_from_callback(
         session,
     )
 
-    success_text = (
-        f"Forked session: {session.session_id}\n"
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        f"Forked session: {session.session_id}\n{_session_ready_notice_text()}",
     )
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -6490,13 +7874,17 @@ def _build_switch_agent_view(
     lines = []
     if notice:
         lines.append(notice)
+    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
+    lines.append(f"Workspace: {_workspace_label(services, state.workspace_id)}")
     lines.extend(
-        [
-            f"Current provider: {resolve_provider_profile(state.provider).display_name}",
-            f"Workspace: {_workspace_label(services, state.workspace_id)}",
-            "Provider capabilities:",
-        ]
+        _switch_agent_impact_lines(
+            state=state,
+            user_id=user_id,
+            ui_state=ui_state,
+            replay_turn=replay_turn,
+        )
     )
+    lines.append("Provider capabilities:")
     buttons = []
     for profile in iter_provider_profiles():
         lines.append(
@@ -6561,6 +7949,38 @@ def _build_switch_agent_view(
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
+def _switch_agent_impact_lines(
+    *,
+    state,
+    user_id: int,
+    ui_state: TelegramUiState,
+    replay_turn,
+) -> list[str]:
+    lines = [
+        "Switch impact:",
+        "- Old bot buttons and pending inputs will be cleared.",
+    ]
+    bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    if bundle_count > 0:
+        lines.append(
+            "- Context bundle "
+            f"({_status_item_count_summary(bundle_count)}) stays with the current agent runtime "
+            "and won't follow the switch."
+        )
+    else:
+        lines.append("- Context bundle does not follow an agent switch.")
+    if replay_turn is not None:
+        replay_label = _status_text_snippet(replay_turn.title_hint, limit=80) or "untitled turn"
+        lines.append(f"- Last Turn stays available in this workspace: {replay_label}")
+        return lines
+    if ui_state.get_last_request_text(user_id, state.workspace_id) is not None:
+        lines.append("- Last Request stays available in this workspace after the switch.")
+        return lines
+    lines.append("- After switching, send a fresh request or open Bot Status to keep going.")
+    return lines
+
+
 async def _show_switch_agent_menu_from_callback(
     query,
     services,
@@ -6605,7 +8025,15 @@ def _build_switch_workspace_view(
     lines = []
     if notice:
         lines.append(notice)
+    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
     lines.append(f"Current workspace: {_workspace_label(services, state.workspace_id)}")
+    lines.extend(
+        _switch_workspace_impact_lines(
+            state=state,
+            user_id=user_id,
+            ui_state=ui_state,
+        )
+    )
     buttons = []
     for workspace in services.config.agent.workspaces:
         if workspace.id == state.workspace_id:
@@ -6640,6 +8068,48 @@ def _build_switch_workspace_view(
         back_target=back_target,
     )
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _switch_agent_success_detail_text() -> str:
+    return (
+        "Context bundle does not follow an agent switch. "
+        "Last Turn and Last Request stay reusable in this workspace when available."
+    )
+
+
+def _switch_workspace_impact_lines(
+    *,
+    state,
+    user_id: int,
+    ui_state: TelegramUiState,
+) -> list[str]:
+    bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    state_labels = []
+    if bundle_count > 0:
+        state_labels.append(f"Context Bundle ({_status_item_count_summary(bundle_count)})")
+    if ui_state.get_last_request_text(user_id, state.workspace_id) is not None:
+        state_labels.append("Last Request")
+    if ui_state.get_last_turn(user_id, state.provider, state.workspace_id) is not None:
+        state_labels.append("Last Turn")
+
+    lines = [
+        "Switch impact:",
+        "- Old bot buttons and pending inputs will be cleared.",
+    ]
+    if state_labels:
+        lines.append(f"- Current workspace state that will stay behind: {', '.join(state_labels)}.")
+    else:
+        lines.append("- Any Context Bundle, Last Request, or Last Turn from this workspace will stay behind.")
+    lines.append("- Rebuild context in the target workspace before you ask.")
+    return lines
+
+
+def _switch_workspace_success_detail_text() -> str:
+    return (
+        "Workspace-specific context does not follow the switch. "
+        "Rebuild context in the new workspace before you ask."
+    )
 
 
 async def _show_switch_workspace_menu_from_callback(
@@ -6767,16 +8237,14 @@ async def _show_model_mode_menu_from_callback(
             application=application,
         )
     except _ModelModeSessionCreationError:
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice="session creation failed",
-            )
-            return
-        await _edit_query_message(query, "session creation failed")
+        await _show_model_mode_action_recovery(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            text=_session_creation_failed_text(),
+            back_target=back_target,
+        )
         return
     except Exception:
         if back_target == "status":
@@ -6785,7 +8253,7 @@ async def _show_model_mode_menu_from_callback(
                 services,
                 ui_state,
                 user_id=user_id,
-                notice="Failed to load model / mode controls.",
+                notice=_model_mode_load_failed_text(),
             )
             return
         raise
@@ -6904,16 +8372,14 @@ async def _show_selection_detail_from_callback(
             application=application,
         )
     except _ModelModeSessionCreationError:
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice="session creation failed",
-            )
-            return
-        await _edit_query_message(query, "session creation failed")
+        await _show_model_mode_action_recovery(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            text=_session_creation_failed_text(),
+            back_target=back_target,
+        )
         return
     except Exception:
         if back_target == "status":
@@ -6922,7 +8388,7 @@ async def _show_selection_detail_from_callback(
                 services,
                 ui_state,
                 user_id=user_id,
-                notice="Failed to load model / mode controls.",
+                notice=_model_mode_load_failed_text(),
             )
             return
         raise
@@ -6984,6 +8450,7 @@ async def _retry_last_turn(
     *,
     application,
     after_turn_success=None,
+    on_missing_replay_turn=None,
     on_prepare_failure=None,
     on_turn_failure=None,
 ) -> None:
@@ -7005,11 +8472,17 @@ async def _retry_last_turn(
         state.workspace_id,
     )
     if replay_turn is None:
+        if on_missing_replay_turn is not None:
+            try:
+                await on_missing_replay_turn()
+                return
+            except Exception:
+                pass
         await _reply_with_menu(
             update.message,
             services,
             update.effective_user.id,
-            "No previous turn is available to retry for the current provider and workspace.",
+            _no_previous_turn_text(),
         )
         return
 
@@ -7033,6 +8506,7 @@ async def _fork_last_turn(
     *,
     application,
     after_turn_success=None,
+    on_missing_replay_turn=None,
     on_session_creation_failed=None,
     on_turn_failure=None,
 ) -> None:
@@ -7054,11 +8528,17 @@ async def _fork_last_turn(
         state.workspace_id,
     )
     if replay_turn is None:
+        if on_missing_replay_turn is not None:
+            try:
+                await on_missing_replay_turn()
+                return
+            except Exception:
+                pass
         await _reply_with_menu(
             update.message,
             services,
             update.effective_user.id,
-            "No previous turn is available to fork for the current provider and workspace.",
+            _no_previous_turn_text(),
         )
         return
 
@@ -7142,9 +8622,13 @@ async def _switch_provider_from_callback(
     back_target: str = "none",
 ) -> None:
     if query.from_user is None or query.from_user.id != services.admin_user_id:
-        await query.answer("Unauthorized user.", show_alert=True)
+        await query.answer(_unauthorized_text(), show_alert=True)
         return
 
+    pending_upload_notice = _discard_pending_uploads_for_transition(
+        ui_state,
+        query.from_user.id,
+    )
     target_name = resolve_provider_profile(provider).display_name
     await query.answer()
     await _edit_query_message(query, f"Switching to {target_name}...")
@@ -7154,25 +8638,39 @@ async def _switch_provider_from_callback(
             CALLBACK_OPERATION_TIMEOUT_SECONDS,
         )
     except Exception:
-        if back_target == "status":
+        try:
             await _show_switch_agent_menu_from_callback(
                 query,
                 services,
                 ui_state,
                 user_id=query.from_user.id,
                 back_target=back_target,
-                notice="session creation failed",
+                notice=_prefixed_notice_text(
+                    pending_upload_notice,
+                    _switch_agent_failed_text(),
+                ),
             )
             return
-        await _edit_query_message(query, "session creation failed")
-        return
+        except Exception:
+            await _edit_query_message(
+                query,
+                _prefixed_notice_text(
+                    pending_upload_notice,
+                    _switch_agent_failed_text(),
+                ),
+            )
+            return
 
     ui_state.invalidate_runtime_bound_interactions()
     state = await services.snapshot_runtime_state()
-    success_text = (
-        f"Switched agent to {resolve_provider_profile(switched).display_name} "
-        f"in {_workspace_label(services, state.workspace_id)}. "
-        "Old bot buttons and pending inputs were cleared."
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        (
+            f"Switched agent to {resolve_provider_profile(switched).display_name} "
+            f"in {_workspace_label(services, state.workspace_id)}. "
+            "Old bot buttons and pending inputs were cleared.\n"
+            f"{_switch_agent_success_detail_text()}"
+        ),
     )
     if replay_action == "retry_last_turn":
         await _edit_query_message(
@@ -7191,6 +8689,46 @@ async def _switch_provider_from_callback(
                     user_id=query.from_user.id,
                     notice=f"{success_text}\nRetried last turn on the new agent.",
                 )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\nRetried last turn on the new agent.",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\nRetried last turn on the new agent.",
+                )
+
+        async def _on_retry_missing_replay_turn() -> None:
+            if back_target == "status":
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\n{_no_previous_turn_text()}",
+                )
 
         async def _on_retry_prepare_failure() -> None:
             if back_target == "status":
@@ -7199,7 +8737,22 @@ async def _switch_provider_from_callback(
                     services,
                     ui_state,
                     user_id=query.from_user.id,
-                    notice=f"{success_text}\nRequest failed.",
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\n{_request_failed_text()}",
                 )
 
         async def _on_retry_turn_failure() -> None:
@@ -7209,7 +8762,22 @@ async def _switch_provider_from_callback(
                     services,
                     ui_state,
                     user_id=query.from_user.id,
-                    notice=f"{success_text}\nRequest failed.",
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\n{_request_failed_text()}",
                 )
 
         await _retry_last_turn(
@@ -7217,9 +8785,10 @@ async def _switch_provider_from_callback(
             services,
             ui_state,
             application=application,
-            after_turn_success=_after_retry_success if back_target == "status" else None,
-            on_prepare_failure=_on_retry_prepare_failure if back_target == "status" else None,
-            on_turn_failure=_on_retry_turn_failure if back_target == "status" else None,
+            after_turn_success=_after_retry_success,
+            on_missing_replay_turn=_on_retry_missing_replay_turn,
+            on_prepare_failure=_on_retry_prepare_failure,
+            on_turn_failure=_on_retry_turn_failure,
         )
         return
     if replay_action == "fork_last_turn":
@@ -7239,6 +8808,46 @@ async def _switch_provider_from_callback(
                     user_id=query.from_user.id,
                     notice=f"{success_text}\nForked last turn on the new agent.",
                 )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\nForked last turn on the new agent.",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\nForked last turn on the new agent.",
+                )
+
+        async def _on_fork_missing_replay_turn() -> None:
+            if back_target == "status":
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\n{_no_previous_turn_text()}",
+                )
 
         async def _on_fork_session_creation_failed() -> None:
             if back_target == "status":
@@ -7247,7 +8856,22 @@ async def _switch_provider_from_callback(
                     services,
                     ui_state,
                     user_id=query.from_user.id,
-                    notice=f"{success_text}\nsession creation failed",
+                    notice=f"{success_text}\n{_session_creation_failed_text()}",
+                )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_session_creation_failed_text()}",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\n{_session_creation_failed_text()}",
                 )
 
         async def _on_fork_turn_failure() -> None:
@@ -7257,7 +8881,22 @@ async def _switch_provider_from_callback(
                     services,
                     ui_state,
                     user_id=query.from_user.id,
-                    notice=f"{success_text}\nRequest failed.",
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+                return
+            try:
+                await _show_switch_agent_menu_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=query.from_user.id,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    f"{success_text}\n{_request_failed_text()}",
                 )
 
         await _fork_last_turn(
@@ -7265,11 +8904,10 @@ async def _switch_provider_from_callback(
             services,
             ui_state,
             application=application,
-            after_turn_success=_after_fork_success if back_target == "status" else None,
-            on_session_creation_failed=(
-                _on_fork_session_creation_failed if back_target == "status" else None
-            ),
-            on_turn_failure=_on_fork_turn_failure if back_target == "status" else None,
+            after_turn_success=_after_fork_success,
+            on_missing_replay_turn=_on_fork_missing_replay_turn,
+            on_session_creation_failed=_on_fork_session_creation_failed,
+            on_turn_failure=_on_fork_turn_failure,
         )
         return
 
@@ -7282,8 +8920,17 @@ async def _switch_provider_from_callback(
             notice=success_text,
         )
         return
-
-    await _edit_query_message(query, success_text)
+    try:
+        await _show_switch_agent_menu_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=query.from_user.id,
+            back_target=back_target,
+            notice=success_text,
+        )
+    except Exception:
+        await _edit_query_message(query, success_text)
 
 
 async def _switch_history_session_from_callback(
@@ -7299,6 +8946,7 @@ async def _switch_history_session_from_callback(
     back_target: str = "none",
     restore_status_on_failure: bool = False,
 ) -> None:
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
     await query.answer()
     await _edit_query_message(query, "Switching to session...")
     try:
@@ -7317,26 +8965,37 @@ async def _switch_history_session_from_callback(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Failed to switch session.",
+                    notice=_prefixed_notice_text(
+                        pending_upload_notice,
+                        _switch_session_failed_text(),
+                    ),
                 )
                 return
             except Exception:
                 pass
-        if back_target != "none":
-            try:
-                await _show_session_history_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=user_id,
-                    page=page,
-                    back_target=back_target,
-                    notice="Failed to switch session.",
-                )
-                return
-            except Exception:
-                pass
-        await _edit_query_message(query, "Failed to switch session.")
+        try:
+            await _show_session_history_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=page,
+                back_target=back_target,
+                notice=_prefixed_notice_text(
+                    pending_upload_notice,
+                    _switch_session_failed_text(),
+                ),
+            )
+            return
+        except Exception:
+            pass
+        await _edit_query_message(
+            query,
+            _prefixed_notice_text(
+                pending_upload_notice,
+                _switch_session_failed_text(),
+            ),
+        )
         return
     ui_state.invalidate_session_bound_interactions()
     await _sync_agent_commands_for_session(
@@ -7345,11 +9004,14 @@ async def _switch_history_session_from_callback(
         user_id,
         session,
     )
-    success_text = (
-        f"Switched to session {session.session_id} on "
-        f"{resolve_provider_profile(state.provider).display_name} in "
-        f"{_workspace_label(services, state.workspace_id)}. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        (
+            f"Switched to session {session.session_id} on "
+            f"{resolve_provider_profile(state.provider).display_name} in "
+            f"{_workspace_label(services, state.workspace_id)}. "
+            f"{_session_ready_notice_text()}"
+        ),
     )
     if replay_after_switch:
         await _edit_query_message(
@@ -7358,19 +9020,108 @@ async def _switch_history_session_from_callback(
         )
         if query.message is None:
             return
-        await _retry_last_turn(
-            _message_update_from_callback(query),
-            services,
-            ui_state,
-            application=application,
-        )
         if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
+            async def _after_retry_success(state, session) -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            await _retry_last_turn(
+                _message_update_from_callback(query),
                 services,
                 ui_state,
-                user_id=user_id,
-                notice=f"{success_text}\nRetried last turn in this session.",
+                application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
+            )
+            return
+        if query.message is not None:
+            async def _after_retry_success(_state, _session) -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            await _retry_last_turn(
+                _message_update_from_callback(query),
+                services,
+                ui_state,
+                application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
             )
             return
         return
@@ -7383,7 +9134,15 @@ async def _switch_history_session_from_callback(
             notice=success_text,
         )
         return
-    await _edit_query_message(query, success_text)
+    await _show_session_history_from_callback(
+        query,
+        services,
+        ui_state,
+        user_id=user_id,
+        page=page,
+        back_target=back_target,
+        notice=success_text,
+    )
 
 
 async def _fork_history_session_from_callback(
@@ -7416,7 +9175,7 @@ async def _fork_history_session_from_callback(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Failed to fork session.",
+                    notice=_fork_session_failed_text(),
                 )
                 return
             except Exception:
@@ -7429,12 +9188,12 @@ async def _fork_history_session_from_callback(
                 user_id=user_id,
                 page=page,
                 back_target=back_target,
-                notice="Failed to fork session.",
+                notice=_fork_session_failed_text(),
             )
             return
         except Exception:
             pass
-        await _edit_query_message(query, "Failed to fork session.")
+        await _edit_query_message(query, _fork_session_failed_text())
         return
 
     try:
@@ -7456,21 +9215,117 @@ async def _fork_history_session_from_callback(
         f"Forked session {session.session_id} from {session_id} on "
         f"{resolve_provider_profile(state.provider).display_name} in "
         f"{_workspace_label(services, state.workspace_id)}. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+        f"{_session_ready_notice_text()}"
     )
     if replay_after_fork:
         await _edit_query_message(
             query,
             f"{success_text}\nRetrying last turn in this session...",
         )
-        if query.message is not None:
+        if query.message is not None and back_target == "status":
+            async def _after_retry_success(state, session) -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
             await _retry_last_turn(
                 _message_update_from_callback(query),
                 services,
                 ui_state,
                 application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
             )
-        success_text = f"{success_text}\nRetried last turn in this session."
+            return
+        if query.message is not None:
+            async def _after_retry_success(_state, _session) -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_session_history_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=page,
+                    back_target=back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            await _retry_last_turn(
+                _message_update_from_callback(query),
+                services,
+                ui_state,
+                application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
+            )
+            return
 
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -7503,8 +9358,9 @@ async def _switch_provider_session_from_callback(
     replay_after_switch: bool = False,
 ) -> None:
     if query.from_user is None or query.from_user.id != services.admin_user_id:
-        await query.answer("Unauthorized user.", show_alert=True)
+        await query.answer(_unauthorized_text(), show_alert=True)
         return
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
     await query.answer()
     await _edit_query_message(query, "Switching to provider session...")
     back_target = str(payload.get("back_target", "history"))
@@ -7533,10 +9389,19 @@ async def _switch_provider_session_from_callback(
                 history_page=int(payload.get("history_page", 0)),
                 back_target=back_target,
                 history_back_target=history_back_target,
-                notice="Failed to switch provider session.",
+                notice=_prefixed_notice_text(
+                    pending_upload_notice,
+                    _switch_provider_session_failed_text(),
+                ),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to switch provider session.")
+            await _edit_query_message(
+                query,
+                _prefixed_notice_text(
+                    pending_upload_notice,
+                    _switch_provider_session_failed_text(),
+                ),
+            )
         return
 
     ui_state.invalidate_session_bound_interactions()
@@ -7546,9 +9411,12 @@ async def _switch_provider_session_from_callback(
         user_id,
         session,
     )
-    success_text = (
-        f"Switched to provider session {payload['session_id']}. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        (
+            f"Switched to provider session {payload['session_id']}. "
+            f"{_session_ready_notice_text()}"
+        ),
     )
     if replay_after_switch:
         await _edit_query_message(
@@ -7557,21 +9425,120 @@ async def _switch_provider_session_from_callback(
         )
         if query.message is None:
             return
+        if back_target == "status":
+            async def _after_retry_success(state, session) -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            await _retry_last_turn(
+                _message_update_from_callback(query),
+                services,
+                ui_state,
+                application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
+            )
+            return
+        async def _after_retry_success(_state, _session) -> None:
+            await _show_provider_sessions_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                cursor=payload.get("cursor"),
+                previous_cursors=tuple(payload.get("previous_cursors", ())),
+                history_page=int(payload.get("history_page", 0)),
+                back_target=back_target,
+                history_back_target=history_back_target,
+                notice=f"{success_text}\nRetried last turn in this session.",
+            )
+
+        async def _on_retry_missing_replay_turn() -> None:
+            await _show_provider_sessions_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                cursor=payload.get("cursor"),
+                previous_cursors=tuple(payload.get("previous_cursors", ())),
+                history_page=int(payload.get("history_page", 0)),
+                back_target=back_target,
+                history_back_target=history_back_target,
+                notice=f"{success_text}\n{_no_previous_turn_text()}",
+            )
+
+        async def _on_retry_prepare_failure() -> None:
+            await _show_provider_sessions_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                cursor=payload.get("cursor"),
+                previous_cursors=tuple(payload.get("previous_cursors", ())),
+                history_page=int(payload.get("history_page", 0)),
+                back_target=back_target,
+                history_back_target=history_back_target,
+                notice=f"{success_text}\n{_request_failed_text()}",
+            )
+
+        async def _on_retry_turn_failure() -> None:
+            await _show_provider_sessions_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                cursor=payload.get("cursor"),
+                previous_cursors=tuple(payload.get("previous_cursors", ())),
+                history_page=int(payload.get("history_page", 0)),
+                back_target=back_target,
+                history_back_target=history_back_target,
+                notice=f"{success_text}\n{_request_failed_text()}",
+            )
+
         await _retry_last_turn(
             _message_update_from_callback(query),
             services,
             ui_state,
             application=application,
+            after_turn_success=_after_retry_success,
+            on_missing_replay_turn=_on_retry_missing_replay_turn,
+            on_prepare_failure=_on_retry_prepare_failure,
+            on_turn_failure=_on_retry_turn_failure,
         )
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice=f"{success_text}\nRetried last turn in this session.",
-            )
-            return
         return
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -7607,8 +9574,9 @@ async def _fork_provider_session_from_callback(
     replay_after_fork: bool = False,
 ) -> None:
     if query.from_user is None or query.from_user.id != services.admin_user_id:
-        await query.answer("Unauthorized user.", show_alert=True)
+        await query.answer(_unauthorized_text(), show_alert=True)
         return
+    pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
     await query.answer()
     await _edit_query_message(query, "Forking provider session...")
     back_target = str(payload.get("back_target", "history"))
@@ -7637,10 +9605,19 @@ async def _fork_provider_session_from_callback(
                 history_page=int(payload.get("history_page", 0)),
                 back_target=back_target,
                 history_back_target=history_back_target,
-                notice="Failed to fork provider session.",
+                notice=_prefixed_notice_text(
+                    pending_upload_notice,
+                    _fork_provider_session_failed_text(),
+                ),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to fork provider session.")
+            await _edit_query_message(
+                query,
+                _prefixed_notice_text(
+                    pending_upload_notice,
+                    _fork_provider_session_failed_text(),
+                ),
+            )
         return
 
     try:
@@ -7658,23 +9635,134 @@ async def _fork_provider_session_from_callback(
         user_id,
         session,
     )
-    success_text = (
-        f"Forked provider session {payload['session_id']} into {session.session_id}. "
-        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    success_text = _prefixed_notice_text(
+        pending_upload_notice,
+        (
+            f"Forked provider session {payload['session_id']} into {session.session_id}. "
+            f"{_session_ready_notice_text()}"
+        ),
     )
     if replay_after_fork:
         await _edit_query_message(
             query,
             f"{success_text}\nRetrying last turn in this session...",
         )
-        if query.message is not None:
+        if query.message is not None and back_target == "status":
+            async def _after_retry_success(state, session) -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
             await _retry_last_turn(
                 _message_update_from_callback(query),
                 services,
                 ui_state,
                 application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
             )
-        success_text = f"{success_text}\nRetried last turn in this session."
+            return
+        if query.message is not None:
+            async def _after_retry_success(_state, _session) -> None:
+                await _show_provider_sessions_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    cursor=payload.get("cursor"),
+                    previous_cursors=tuple(payload.get("previous_cursors", ())),
+                    history_page=int(payload.get("history_page", 0)),
+                    back_target=back_target,
+                    history_back_target=history_back_target,
+                    notice=f"{success_text}\nRetried last turn in this session.",
+                )
+
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_provider_sessions_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    cursor=payload.get("cursor"),
+                    previous_cursors=tuple(payload.get("previous_cursors", ())),
+                    history_page=int(payload.get("history_page", 0)),
+                    back_target=back_target,
+                    history_back_target=history_back_target,
+                    notice=f"{success_text}\n{_no_previous_turn_text()}",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_provider_sessions_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    cursor=payload.get("cursor"),
+                    previous_cursors=tuple(payload.get("previous_cursors", ())),
+                    history_page=int(payload.get("history_page", 0)),
+                    back_target=back_target,
+                    history_back_target=history_back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_provider_sessions_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    cursor=payload.get("cursor"),
+                    previous_cursors=tuple(payload.get("previous_cursors", ())),
+                    history_page=int(payload.get("history_page", 0)),
+                    back_target=back_target,
+                    history_back_target=history_back_target,
+                    notice=f"{success_text}\n{_request_failed_text()}",
+                )
+
+            await _retry_last_turn(
+                _message_update_from_callback(query),
+                services,
+                ui_state,
+                application=application,
+                after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
+            )
+            return
 
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -7717,12 +9805,26 @@ async def _set_selection_from_callback(
         lambda store: store.peek(user_id),
     )
     if session is None:
-        await _edit_query_message(query, "No active session.")
+        await _show_model_mode_action_recovery(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            text=_no_active_session_text(),
+            back_target=back_target,
+        )
         return
     try:
         await session.set_selection(kind, value)
     except Exception:
-        await _edit_query_message(query, "Failed to update model / mode.")
+        await _show_model_mode_action_recovery(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            text=_selection_update_failed_text(),
+            back_target=back_target,
+        )
         return
     try:
         await state.session_store.record_session_usage(
@@ -7760,7 +9862,7 @@ async def _set_selection_from_callback(
                 back_target=back_target,
                 notice=(
                     f"{updated_notice}\n"
-                    "No previous turn is available to retry in the current workspace."
+                    f"{_no_previous_turn_text()}"
                 ),
             )
             await _edit_query_message(query, text, reply_markup=markup)
@@ -7771,6 +9873,75 @@ async def _set_selection_from_callback(
         )
         if query.message is None:
             return
+        if back_target == "status":
+            async def _after_retry_success(_state, _session) -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{updated_notice}\nRetried last turn with the updated setting.",
+                )
+
+            async def _on_retry_prepare_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{updated_notice}\n{_request_failed_text()}",
+                )
+
+            async def _on_retry_turn_failure() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=f"{updated_notice}\n{_request_failed_text()}",
+                )
+
+            await _run_agent_replay_turn_on_message(
+                query.message,
+                user_id,
+                services,
+                ui_state,
+                replay_turn,
+                application=application,
+                after_turn_success=_after_retry_success,
+                on_prepare_failure=_on_retry_prepare_failure,
+                on_turn_failure=_on_retry_turn_failure,
+            )
+            return
+        async def _after_retry_success(_state, _session) -> None:
+            await _restore_model_mode_menu_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=f"{updated_notice}\nRetried last turn with the updated setting.",
+                back_target=back_target,
+            )
+
+        async def _on_retry_prepare_failure() -> None:
+            await _restore_model_mode_menu_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=f"{updated_notice}\n{_request_failed_text()}",
+                back_target=back_target,
+            )
+
+        async def _on_retry_turn_failure() -> None:
+            await _restore_model_mode_menu_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=f"{updated_notice}\n{_request_failed_text()}",
+                back_target=back_target,
+            )
         await _run_agent_replay_turn_on_message(
             query.message,
             user_id,
@@ -7778,16 +9949,10 @@ async def _set_selection_from_callback(
             ui_state,
             replay_turn,
             application=application,
+            after_turn_success=_after_retry_success,
+            on_prepare_failure=_on_retry_prepare_failure,
+            on_turn_failure=_on_retry_turn_failure,
         )
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice=f"{updated_notice}\nRetried last turn with the updated setting.",
-            )
-            return
         return
 
     text, markup = _build_model_mode_view(
@@ -7799,6 +9964,97 @@ async def _set_selection_from_callback(
         can_retry_last_turn=replay_turn is not None,
         back_target=back_target,
         notice=updated_notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_model_mode_action_recovery(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    text: str,
+    back_target: str,
+) -> None:
+    if back_target == "status":
+        await _show_runtime_status_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            notice=text,
+        )
+        return
+
+    back_kwargs: dict[str, Any] = {}
+    if back_target == "none":
+        back_kwargs = {
+            "back_label": "Open Bot Status",
+            "back_action": "runtime_status_page",
+        }
+
+    await _show_navigation_failure(
+        query,
+        ui_state=ui_state,
+        user_id=user_id,
+        text=text,
+        retry_label="Reopen Model / Mode",
+        retry_action="model_mode_page",
+        retry_payload={"back_target": back_target},
+        back_target=back_target,
+        **back_kwargs,
+    )
+
+
+async def _restore_model_mode_menu_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    notice: str,
+    back_target: str,
+) -> None:
+    try:
+        state, session = await _with_active_store(
+            services,
+            lambda store: store.peek(user_id),
+        )
+    except Exception:
+        await _show_model_mode_action_recovery(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            text=notice,
+            back_target=back_target,
+        )
+        return
+    if session is None:
+        await _show_model_mode_action_recovery(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            text=notice,
+            back_target=back_target,
+        )
+        return
+    text, markup = _build_model_mode_view(
+        user_id=user_id,
+        session_id=session.session_id,
+        model_selection=session.get_selection("model"),
+        mode_selection=session.get_selection("mode"),
+        ui_state=ui_state,
+        can_retry_last_turn=ui_state.get_last_turn(
+            user_id,
+            state.provider,
+            state.workspace_id,
+        )
+        is not None,
+        back_target=back_target,
+        notice=notice,
     )
     await _edit_query_message(query, text, reply_markup=markup)
 
@@ -7823,7 +10079,7 @@ async def _set_selection_from_status_callback(
             services,
             ui_state,
             user_id=user_id,
-            notice="No active session.",
+            notice=_no_active_session_text(),
         )
         return
     try:
@@ -7834,7 +10090,7 @@ async def _set_selection_from_status_callback(
             services,
             ui_state,
             user_id=user_id,
-            notice="Failed to update model / mode.",
+            notice=_selection_update_failed_text(),
         )
         return
     try:
@@ -7881,7 +10137,7 @@ async def _set_selection_retry_from_status_callback(
             services,
             ui_state,
             user_id=user_id,
-            notice="No active session.",
+            notice=_no_active_session_text(),
         )
         return
     try:
@@ -7892,7 +10148,7 @@ async def _set_selection_retry_from_status_callback(
             services,
             ui_state,
             user_id=user_id,
-            notice="Failed to update model / mode.",
+            notice=_selection_update_failed_text(),
         )
         return
     try:
@@ -7925,7 +10181,7 @@ async def _set_selection_retry_from_status_callback(
             user_id=user_id,
             notice=(
                 f"{updated_notice}\n"
-                "No previous turn is available to retry in the current workspace."
+                f"{_no_previous_turn_text()}"
             ),
         )
         return
@@ -7951,7 +10207,7 @@ async def _set_selection_retry_from_status_callback(
             services,
             ui_state,
             user_id=user_id,
-            notice=f"{updated_notice}\nRequest failed.",
+            notice=f"{updated_notice}\n{_request_failed_text()}",
         )
 
     async def _on_retry_turn_failure() -> None:
@@ -7960,7 +10216,7 @@ async def _set_selection_retry_from_status_callback(
             services,
             ui_state,
             user_id=user_id,
-            notice=f"{updated_notice}\nRequest failed.",
+            notice=f"{updated_notice}\n{_request_failed_text()}",
         )
 
     await _run_agent_replay_turn_on_message(
@@ -8040,6 +10296,17 @@ async def _dispatch_callback_action(
         )
         return
 
+    if action == "recover_runtime_status":
+        await query.answer()
+        if query.message is None or query.from_user is None:
+            return
+        await _show_runtime_status(
+            _message_update_from_callback(query),
+            services,
+            ui_state,
+        )
+        return
+
     if action == "recover_session_history":
         await query.answer()
         if query.message is None or query.from_user is None:
@@ -8086,6 +10353,16 @@ async def _dispatch_callback_action(
         )
         return
 
+    if action == "recover_workspace_search":
+        await query.answer()
+        await _show_workspace_search_prompt_from_callback(
+            query,
+            ui_state,
+            user_id=user_id,
+            cancel_action="workspace_search_cancel",
+        )
+        return
+
     if action == "runtime_status_page":
         await query.answer()
         try:
@@ -8096,7 +10373,13 @@ async def _dispatch_callback_action(
                 user_id=user_id,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load bot status.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load Bot Status. Try again or use /start.",
+                retry_action="runtime_status_page",
+            )
         return
 
     if action == "runtime_status_open":
@@ -8193,7 +10476,7 @@ async def _dispatch_callback_action(
                 return
             if target == "provider_sessions":
                 if query.from_user is None or query.from_user.id != services.admin_user_id:
-                    await query.answer("Unauthorized user.", show_alert=True)
+                    await query.answer(_unauthorized_text(), show_alert=True)
                     return
                 await _show_provider_sessions_from_callback(
                     query,
@@ -8222,26 +10505,12 @@ async def _dispatch_callback_action(
                 pending_payload: dict[str, Any] = {"back_target": back_target}
                 if query.message is not None:
                     pending_payload["source_message"] = query.message
-                ui_state.set_pending_text_action(
-                    user_id,
-                    "workspace_search",
-                    **pending_payload,
-                )
-                await _edit_query_message(
+                await _show_workspace_search_prompt_from_callback(
                     query,
-                    "Send your workspace search query as the next plain text message.",
-                    reply_markup=InlineKeyboardMarkup(
-                        [
-                            [
-                                _callback_button(
-                                    ui_state,
-                                    user_id,
-                                    "Cancel Search",
-                                    "runtime_status_search_cancel",
-                                )
-                            ]
-                        ]
-                    ),
+                    ui_state,
+                    user_id=user_id,
+                    cancel_action="runtime_status_search_cancel",
+                    pending_payload=pending_payload,
                 )
                 return
             if target == "changes":
@@ -8265,7 +10534,15 @@ async def _dispatch_callback_action(
                 )
                 return
         except Exception:
-            await _edit_query_message(query, "Failed to open the selected view.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't open that view. Try again or go back to Bot Status.",
+                retry_action="runtime_status_open",
+                retry_payload={"target": target, "back_target": back_target},
+                back_target="status",
+            )
             return
         return
 
@@ -8281,7 +10558,18 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load the last turn.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load the last turn. Try again or go back.",
+                retry_action="last_turn_page",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "last_turn_open":
@@ -8297,7 +10585,19 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load the replay item.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that replay item. Try again or go back.",
+                retry_action="last_turn_open",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "item_index": int(payload.get("item_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "plan_page":
@@ -8312,7 +10612,18 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load agent plan.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load the agent plan. Try again or go back.",
+                retry_action="plan_page",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "plan_open":
@@ -8328,7 +10639,19 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load agent plan.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that plan entry. Try again or go back.",
+                retry_action="plan_open",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "plan_index": int(payload.get("plan_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "tool_activity_page":
@@ -8343,7 +10666,18 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load tool activity.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load tool activity. Try again or go back.",
+                retry_action="tool_activity_page",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "tool_activity_open":
@@ -8359,7 +10693,19 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load tool activity.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that tool activity entry. Try again or go back.",
+                retry_action="tool_activity_open",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "activity_index": int(payload.get("activity_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "tool_activity_open_file":
@@ -8376,7 +10722,20 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load the related file.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that related file. Try again or go back.",
+                retry_action="tool_activity_open_file",
+                retry_payload={
+                    "relative_path": str(payload["relative_path"]),
+                    "page": int(payload.get("page", 0)),
+                    "activity_index": int(payload.get("activity_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "tool_activity_open_change":
@@ -8394,7 +10753,21 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load the related change.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that related change. Try again or go back.",
+                retry_action="tool_activity_open_change",
+                retry_payload={
+                    "relative_path": str(payload["relative_path"]),
+                    "status_code": str(payload["status_code"]),
+                    "page": int(payload.get("page", 0)),
+                    "activity_index": int(payload.get("activity_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "workspace_runtime_open_server":
@@ -8409,7 +10782,18 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load MCP server details.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load MCP server details. Try again or go back.",
+                retry_action="workspace_runtime_open_server",
+                retry_payload={
+                    "server_index": int(payload.get("server_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "runtime_status_control":
@@ -8441,13 +10825,22 @@ async def _dispatch_callback_action(
                     notice="Retried last turn.",
                 )
 
+            async def _on_retry_missing_replay_turn() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=_no_previous_turn_text(),
+                )
+
             async def _on_retry_prepare_failure() -> None:
                 await _show_runtime_status_from_callback(
                     query,
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Request failed.",
+                    notice=_request_failed_text(),
                 )
 
             async def _on_retry_turn_failure() -> None:
@@ -8456,7 +10849,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Request failed.",
+                    notice=_request_failed_text(),
                 )
 
             await _retry_last_turn(
@@ -8465,6 +10858,7 @@ async def _dispatch_callback_action(
                 ui_state,
                 application=application,
                 after_turn_success=_after_retry_success,
+                on_missing_replay_turn=_on_retry_missing_replay_turn,
                 on_prepare_failure=_on_retry_prepare_failure,
                 on_turn_failure=_on_retry_turn_failure,
             )
@@ -8481,13 +10875,22 @@ async def _dispatch_callback_action(
                     notice="Forked last turn into a new session.",
                 )
 
+            async def _on_fork_missing_replay_turn() -> None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=_no_previous_turn_text(),
+                )
+
             async def _on_fork_session_creation_failed() -> None:
                 await _show_runtime_status_from_callback(
                     query,
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="session creation failed",
+                    notice=_session_creation_failed_text(),
                 )
 
             async def _on_fork_turn_failure() -> None:
@@ -8496,7 +10899,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Request failed.",
+                    notice=_request_failed_text(),
                 )
 
             await _fork_last_turn(
@@ -8505,6 +10908,7 @@ async def _dispatch_callback_action(
                 ui_state,
                 application=application,
                 after_turn_success=_after_fork_success,
+                on_missing_replay_turn=_on_fork_missing_replay_turn,
                 on_session_creation_failed=_on_fork_session_creation_failed,
                 on_turn_failure=_on_fork_turn_failure,
             )
@@ -8580,7 +10984,7 @@ async def _dispatch_callback_action(
                 )
                 await _edit_query_message(
                     query,
-                    (
+                    _pending_input_cancel_notice(
                         f"Send arguments for {_agent_command_name(command_name)} "
                         "as your next plain text message.\n"
                         f"Hint: {hint}"
@@ -8659,7 +11063,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No previous request text is available in this workspace.",
+                    notice=_no_previous_request_text(),
                 )
                 return
             after_turn_success, on_prepare_failure, on_turn_failure = _status_turn_callbacks(
@@ -8759,7 +11163,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Context bundle is empty.",
+                    notice=_context_bundle_empty_text(),
                 )
                 return
             ui_state.set_pending_text_action(
@@ -8772,7 +11176,7 @@ async def _dispatch_callback_action(
             )
             await _edit_query_message(
                 query,
-                (
+                _pending_input_cancel_notice(
                     "Send your request for the current context bundle as the next plain text message.\n"
                     "The agent will read the listed files and inspect the listed Git changes from the current workspace."
                 ),
@@ -8802,7 +11206,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Context bundle is empty.",
+                    notice=_context_bundle_empty_text(),
                 )
                 return
             last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
@@ -8812,7 +11216,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No previous request text is available in this workspace.",
+                    notice=_no_previous_request_text(),
                 )
                 return
             after_turn_success, on_prepare_failure, on_turn_failure = _status_turn_callbacks(
@@ -8887,7 +11291,15 @@ async def _dispatch_callback_action(
                     back_target="status",
                 )
             except Exception:
-                await _edit_query_message(query, "Failed to load model / mode controls.")
+                await _show_navigation_failure(
+                    query,
+                    ui_state=ui_state,
+                    user_id=user_id,
+                    text="Couldn't load Model / Mode. Try again or go back to Bot Status.",
+                    retry_action="runtime_status_control",
+                    retry_payload={"target": "model_mode"},
+                    back_target="status",
+                )
             return
         if target == "switch_agent":
             try:
@@ -8899,7 +11311,15 @@ async def _dispatch_callback_action(
                     back_target="status",
                 )
             except Exception:
-                await _edit_query_message(query, "Failed to load switch agent menu.")
+                await _show_navigation_failure(
+                    query,
+                    ui_state=ui_state,
+                    user_id=user_id,
+                    text="Couldn't load Switch Agent. Try again or go back to Bot Status.",
+                    retry_action="runtime_status_control",
+                    retry_payload={"target": "switch_agent"},
+                    back_target="status",
+                )
             return
         if target == "switch_workspace":
             try:
@@ -8911,13 +11331,22 @@ async def _dispatch_callback_action(
                     back_target="status",
                 )
             except Exception:
-                await _edit_query_message(query, "Failed to load switch workspace menu.")
+                await _show_navigation_failure(
+                    query,
+                    ui_state=ui_state,
+                    user_id=user_id,
+                    text="Couldn't load Switch Workspace. Try again or go back to Bot Status.",
+                    retry_action="runtime_status_control",
+                    retry_payload={"target": "switch_workspace"},
+                    back_target="status",
+                )
             return
-        await query.answer("Unknown action.", show_alert=True)
+        await query.answer(_unknown_action_text(), show_alert=True)
         return
 
     if action == "runtime_status_stop_turn":
         await query.answer()
+        notice: str | None = None
         try:
             state = await services.snapshot_runtime_state()
             active_turn = ui_state.get_active_turn(
@@ -8928,17 +11357,11 @@ async def _dispatch_callback_action(
             if active_turn is None:
                 notice = "No active turn to stop."
             else:
-                ui_state.mark_active_turn_stop_requested(
-                    user_id,
-                    task=active_turn.task,
+                await _request_stop_active_turn(
+                    ui_state,
+                    user_id=user_id,
+                    active_turn=active_turn,
                 )
-                cancel_turn = None if active_turn.session is None else getattr(active_turn.session, "cancel_turn", None)
-                if callable(cancel_turn):
-                    cancelled = await cancel_turn()
-                    if not cancelled:
-                        active_turn.task.cancel()
-                else:
-                    active_turn.task.cancel()
                 notice = "Stop requested for the current turn."
             await _show_runtime_status_from_callback(
                 query,
@@ -8948,46 +11371,74 @@ async def _dispatch_callback_action(
                 notice=notice,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to stop the current turn.")
+            await _edit_query_message(
+                query,
+                _runtime_status_refresh_degraded_notice(notice)
+                if notice is not None
+                else _stop_turn_failed_text(),
+            )
         return
 
     if action == "runtime_status_cancel_pending":
         await query.answer()
         cleared = ui_state.clear_pending_text_action(user_id)
+        notice = "Pending input cancelled." if cleared is not None else "No pending input to cancel."
         try:
             await _show_runtime_status_from_callback(
                 query,
                 services,
                 ui_state,
                 user_id=user_id,
-                notice="Pending input cancelled." if cleared is not None else "No pending input to cancel.",
+                notice=notice,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to update bot status.")
+            await _edit_query_message(query, _runtime_status_refresh_degraded_notice(notice))
+        return
+
+    if action == "runtime_status_discard_pending_uploads":
+        await query.answer()
+        cleared = ui_state.cancel_pending_media_groups(user_id)
+        notice = (
+            _pending_media_group_cancelled_text(cleared)
+            if cleared is not None
+            else "No pending uploads to discard."
+        )
+        try:
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=notice,
+            )
+        except Exception:
+            await _edit_query_message(query, _runtime_status_refresh_degraded_notice(notice))
         return
 
     if action == "runtime_status_command_cancel":
         await query.answer()
         ui_state.clear_pending_text_action(user_id)
+        notice = "Command input cancelled."
         try:
             await _show_runtime_status_from_callback(
                 query,
                 services,
                 ui_state,
                 user_id=user_id,
-                notice="Command input cancelled.",
+                notice=notice,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to update bot status.")
+            await _edit_query_message(query, _runtime_status_refresh_degraded_notice(notice))
         return
 
     if action == "runtime_status_start_bundle_chat":
         await query.answer()
+        notice: str | None = None
         try:
             state = await services.snapshot_runtime_state()
             bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
             if bundle is None or not bundle.items:
-                notice = "Context bundle is empty."
+                notice = _context_bundle_empty_text()
             elif ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
                 notice = "Bundle chat is already on."
             else:
@@ -9001,11 +11452,17 @@ async def _dispatch_callback_action(
                 notice=notice,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to update bot status.")
+            await _edit_query_message(
+                query,
+                _runtime_status_refresh_degraded_notice(notice)
+                if notice is not None
+                else _bundle_chat_update_failed_text(),
+            )
         return
 
     if action == "runtime_status_stop_bundle_chat":
         await query.answer()
+        notice: str | None = None
         try:
             state = await services.snapshot_runtime_state()
             if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
@@ -9021,22 +11478,28 @@ async def _dispatch_callback_action(
                 notice=notice,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to update bot status.")
+            await _edit_query_message(
+                query,
+                _runtime_status_refresh_degraded_notice(notice)
+                if notice is not None
+                else _bundle_chat_update_failed_text(),
+            )
         return
 
     if action == "runtime_status_search_cancel":
         await query.answer()
         ui_state.clear_pending_text_action(user_id)
+        notice = "Search cancelled."
         try:
             await _show_runtime_status_from_callback(
                 query,
                 services,
                 ui_state,
                 user_id=user_id,
-                notice="Search cancelled.",
+                notice=notice,
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load bot status.")
+            await _edit_query_message(query, _runtime_status_refresh_degraded_notice(notice))
         return
 
     if action == "switch_provider":
@@ -9076,9 +11539,10 @@ async def _dispatch_callback_action(
 
     if action == "switch_workspace":
         if query.from_user is None or query.from_user.id != services.admin_user_id:
-            await query.answer("Unauthorized user.", show_alert=True)
+            await query.answer(_unauthorized_text(), show_alert=True)
             return
         workspace = services.config.agent.resolve_workspace(payload["workspace_id"])
+        pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
         await query.answer()
         await _edit_query_message(query, f"Switching workspace to {workspace.label}...")
         try:
@@ -9087,24 +11551,37 @@ async def _dispatch_callback_action(
                 CALLBACK_OPERATION_TIMEOUT_SECONDS,
             )
         except Exception:
-            if str(payload.get("back_target", "none")) == "status":
+            try:
                 await _show_switch_workspace_menu_from_callback(
                     query,
                     services,
                     ui_state,
                     user_id=user_id,
-                    back_target="status",
-                    notice="session creation failed",
+                    back_target=str(payload.get("back_target", "none")),
+                    notice=_prefixed_notice_text(
+                        pending_upload_notice,
+                        _switch_workspace_failed_text(),
+                    ),
                 )
-                return
-            await _edit_query_message(query, "session creation failed")
+            except Exception:
+                await _edit_query_message(
+                    query,
+                    _prefixed_notice_text(
+                        pending_upload_notice,
+                        _switch_workspace_failed_text(),
+                    ),
+                )
             return
         ui_state.invalidate_runtime_bound_interactions()
         state = await services.snapshot_runtime_state()
-        success_text = (
-            f"Switched workspace to {workspace.label} on "
-            f"{resolve_provider_profile(state.provider).display_name}. "
-            "Old bot buttons and pending inputs were cleared."
+        success_text = _prefixed_notice_text(
+            pending_upload_notice,
+            (
+                f"Switched workspace to {workspace.label} on "
+                f"{resolve_provider_profile(state.provider).display_name}. "
+                "Old bot buttons and pending inputs were cleared.\n"
+                f"{_switch_workspace_success_detail_text()}"
+            ),
         )
         if str(payload.get("back_target", "none")) == "status":
             await _show_runtime_status_from_callback(
@@ -9115,7 +11592,17 @@ async def _dispatch_callback_action(
                 notice=success_text,
             )
             return
-        await _edit_query_message(query, success_text)
+        try:
+            await _show_switch_workspace_menu_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                back_target=str(payload.get("back_target", "none")),
+                notice=success_text,
+            )
+        except Exception:
+            await _edit_query_message(query, success_text)
         return
 
     if action == "history_page":
@@ -9159,12 +11646,29 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load session history entry.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that session history entry. Try again or go back.",
+                retry_action="history_open",
+                retry_payload={
+                    "session_id": str(payload["session_id"]),
+                    "page": int(payload.get("page", 0)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_label="Back to History",
+                back_action="history_page",
+                back_payload={
+                    "page": int(payload.get("page", 0)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+            )
         return
 
     if action == "history_provider_sessions":
         if query.from_user is None or query.from_user.id != services.admin_user_id:
-            await query.answer("Unauthorized user.", show_alert=True)
+            await query.answer(_unauthorized_text(), show_alert=True)
             return
         await query.answer()
         try:
@@ -9180,7 +11684,31 @@ async def _dispatch_callback_action(
                 history_back_target=str(payload.get("history_back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load provider sessions.")
+            back_target = str(payload.get("back_target", "history"))
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load Provider Sessions. Try again or go back.",
+                retry_action="history_provider_sessions",
+                retry_payload={
+                    "cursor": payload.get("cursor"),
+                    "previous_cursors": tuple(payload.get("previous_cursors", ())),
+                    "history_page": int(payload.get("history_page", 0)),
+                    "back_target": back_target,
+                    "history_back_target": str(payload.get("history_back_target", "none")),
+                },
+                back_label="Back to Bot Status" if back_target == "status" else "Back to History",
+                back_action="runtime_status_page" if back_target == "status" else "history_page",
+                back_payload=(
+                    {}
+                    if back_target == "status"
+                    else {
+                        "page": int(payload.get("history_page", 0)),
+                        "back_target": str(payload.get("history_back_target", "none")),
+                    }
+                ),
+            )
         return
 
     if action == "history_run":
@@ -9277,7 +11805,7 @@ async def _dispatch_callback_action(
                 "Old bot buttons and pending inputs tied to that session were cleared."
             )
         else:
-            notice = "Failed to delete session."
+            notice = _delete_session_failed_text()
         can_fork = await _resolve_runtime_session_fork_support(
             services,
             state=state,
@@ -9312,7 +11840,7 @@ async def _dispatch_callback_action(
         )
         await _edit_query_message(
             query,
-            (
+            _pending_input_cancel_notice(
                 "Send the new session title as your next plain text message.\n"
                 f"Current title: {payload['title']}\n"
                 f"Session: {payload['session_id']}"
@@ -9366,7 +11894,7 @@ async def _dispatch_callback_action(
 
     if action == "provider_sessions_page":
         if query.from_user is None or query.from_user.id != services.admin_user_id:
-            await query.answer("Unauthorized user.", show_alert=True)
+            await query.answer(_unauthorized_text(), show_alert=True)
             return
         await query.answer()
         try:
@@ -9382,12 +11910,36 @@ async def _dispatch_callback_action(
                 history_back_target=str(payload.get("history_back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load provider sessions.")
+            back_target = str(payload.get("back_target", "history"))
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load Provider Sessions. Try again or go back.",
+                retry_action="provider_sessions_page",
+                retry_payload={
+                    "cursor": payload.get("cursor"),
+                    "previous_cursors": tuple(payload.get("previous_cursors", ())),
+                    "history_page": int(payload.get("history_page", 0)),
+                    "back_target": back_target,
+                    "history_back_target": str(payload.get("history_back_target", "none")),
+                },
+                back_label="Back to Bot Status" if back_target == "status" else "Back to History",
+                back_action="runtime_status_page" if back_target == "status" else "history_page",
+                back_payload=(
+                    {}
+                    if back_target == "status"
+                    else {
+                        "page": int(payload.get("history_page", 0)),
+                        "back_target": str(payload.get("history_back_target", "none")),
+                    }
+                ),
+            )
         return
 
     if action == "provider_session_open":
         if query.from_user is None or query.from_user.id != services.admin_user_id:
-            await query.answer("Unauthorized user.", show_alert=True)
+            await query.answer(_unauthorized_text(), show_alert=True)
             return
         await query.answer()
         try:
@@ -9404,7 +11956,30 @@ async def _dispatch_callback_action(
                 history_back_target=str(payload.get("history_back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load provider session.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that provider session. Try again or go back.",
+                retry_action="provider_session_open",
+                retry_payload={
+                    "session_id": str(payload["session_id"]),
+                    "cursor": payload.get("cursor"),
+                    "previous_cursors": tuple(payload.get("previous_cursors", ())),
+                    "history_page": int(payload.get("history_page", 0)),
+                    "back_target": str(payload.get("back_target", "history")),
+                    "history_back_target": str(payload.get("history_back_target", "none")),
+                },
+                back_label="Back to Provider Sessions",
+                back_action="provider_sessions_page",
+                back_payload={
+                    "cursor": payload.get("cursor"),
+                    "previous_cursors": tuple(payload.get("previous_cursors", ())),
+                    "history_page": int(payload.get("history_page", 0)),
+                    "back_target": str(payload.get("back_target", "history")),
+                    "history_back_target": str(payload.get("history_back_target", "none")),
+                },
+            )
         return
 
     if action == "provider_session_run":
@@ -9478,7 +12053,24 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load agent command.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load that agent command. Try again or go back.",
+                retry_action="agent_command_open",
+                retry_payload={
+                    "page": int(payload.get("page", 0)),
+                    "command_index": int(payload.get("command_index", -1)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_label="Back to Agent Commands",
+                back_action="agent_commands_page",
+                back_payload={
+                    "page": int(payload.get("page", 0)),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+            )
         return
 
     if action == "agent_command_use":
@@ -9502,7 +12094,7 @@ async def _dispatch_callback_action(
             )
             await _edit_query_message(
                 query,
-                (
+                _pending_input_cancel_notice(
                     f"Send arguments for {_agent_command_name(payload['command_name'])} "
                     "as your next plain text message.\n"
                     f"Hint: {payload['hint']}"
@@ -9561,7 +12153,15 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load model / mode controls.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load Model / Mode. Try again or go back.",
+                retry_action="model_mode_page",
+                retry_payload={"back_target": str(payload.get("back_target", "none"))},
+                back_target=str(payload.get("back_target", "none")),
+            )
         return
 
     if action == "selection_open":
@@ -9578,7 +12178,21 @@ async def _dispatch_callback_action(
                 back_target=str(payload.get("back_target", "none")),
             )
         except Exception:
-            await _edit_query_message(query, "Failed to load selection details.")
+            await _show_navigation_failure(
+                query,
+                ui_state=ui_state,
+                user_id=user_id,
+                text="Couldn't load selection details. Try again or go back.",
+                retry_action="selection_open",
+                retry_payload={
+                    "kind": str(payload["kind"]),
+                    "value": str(payload["value"]),
+                    "back_target": str(payload.get("back_target", "none")),
+                },
+                back_label="Back to Model / Mode",
+                back_action="model_mode_page",
+                back_payload={"back_target": str(payload.get("back_target", "none"))},
+            )
         return
 
     if action == "workspace_page":
@@ -9796,7 +12410,7 @@ async def _dispatch_callback_action(
                 relative_path=payload.get("relative_path", ""),
                 page=page,
                 back_target=back_target,
-                notice="No previous request text is available in this workspace.",
+                notice=_no_previous_request_text(),
             )
             return
         if query.message is None:
@@ -10024,7 +12638,7 @@ async def _dispatch_callback_action(
                 query_text=payload["query_text"],
                 page=int(payload.get("page", 0)),
                 back_target=back_target,
-                notice="No previous request text is available in this workspace.",
+                notice=_no_previous_request_text(),
             )
             return
         if query.message is None:
@@ -10058,7 +12672,11 @@ async def _dispatch_callback_action(
     if action == "workspace_search_cancel":
         await query.answer()
         ui_state.clear_pending_text_action(user_id)
-        await _edit_query_message(query, "Search cancelled.")
+        await _edit_query_message(
+            query,
+            _workspace_search_cancelled_text(),
+            reply_markup=_workspace_search_cancelled_markup(ui_state, user_id),
+        )
         return
 
     if action == "workspace_changes_page":
@@ -10287,7 +12905,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No previous request text is available in this workspace.",
+                    notice=_no_previous_request_text(),
                 )
             else:
                 await _show_workspace_changes_from_callback(
@@ -10297,7 +12915,7 @@ async def _dispatch_callback_action(
                     user_id=user_id,
                     page=page,
                     back_target=back_target,
-                    notice="No previous request text is available in this workspace.",
+                    notice=_no_previous_request_text(),
                 )
             return
         if query.message is None:
@@ -10329,7 +12947,7 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Request failed.",
+                    notice=_request_failed_text(),
                 )
 
             after_turn_success = _after_follow_up_success
@@ -10467,7 +13085,7 @@ async def _dispatch_callback_action(
         )
         await _edit_query_message(
             query,
-            (
+            _pending_input_cancel_notice(
                 f"Send your request about {payload['relative_path']} as the next plain text message.\n"
                 "The agent will read the file from the current workspace."
             ),
@@ -10492,7 +13110,7 @@ async def _dispatch_callback_action(
         back_target = str(payload.get("back_target", "none"))
         last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
         if last_request_text is None:
-            await query.answer("No previous request text is available in this workspace.", show_alert=True)
+            await query.answer(_no_previous_request_text(), show_alert=True)
             return
         await query.answer()
         if query.message is None:
@@ -10535,7 +13153,7 @@ async def _dispatch_callback_action(
         )
         await _edit_query_message(
             query,
-            (
+            _pending_input_cancel_notice(
                 f"Send your request about the change in {payload['relative_path']} as the next plain text message.\n"
                 "The agent will inspect the current Git change from the local workspace."
             ),
@@ -10560,7 +13178,7 @@ async def _dispatch_callback_action(
         back_target = str(payload.get("back_target", "none"))
         last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
         if last_request_text is None:
-            await query.answer("No previous request text is available in this workspace.", show_alert=True)
+            await query.answer(_no_previous_request_text(), show_alert=True)
             return
         await query.answer()
         if query.message is None:
@@ -10655,7 +13273,7 @@ async def _dispatch_callback_action(
         state = await services.snapshot_runtime_state()
         bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
         if bundle is None:
-            await query.answer("Context bundle is empty.", show_alert=True)
+            await query.answer(_context_bundle_empty_text(), show_alert=True)
             return
         item_index = int(payload["item_index"])
         if item_index < 0 or item_index >= len(bundle.items):
@@ -10804,7 +13422,7 @@ async def _dispatch_callback_action(
     if action == "context_bundle_chat_enable":
         state = await services.snapshot_runtime_state()
         if not ui_state.enable_context_bundle_chat(user_id, state.provider, state.workspace_id):
-            await query.answer("Context bundle is empty.", show_alert=True)
+            await query.answer(_context_bundle_empty_text(), show_alert=True)
             return
         await query.answer()
         source_restore_action, source_restore_payload, source_back_label = _callback_source_restore_values(payload)
@@ -10844,7 +13462,7 @@ async def _dispatch_callback_action(
         state = await services.snapshot_runtime_state()
         bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
         if bundle is None or not bundle.items:
-            await query.answer("Context bundle is empty.", show_alert=True)
+            await query.answer(_context_bundle_empty_text(), show_alert=True)
             return
 
         await query.answer()
@@ -10869,7 +13487,7 @@ async def _dispatch_callback_action(
         )
         await _edit_query_message(
             query,
-            (
+            _pending_input_cancel_notice(
                 "Send your request for the current context bundle as the next plain text message.\n"
                 "The agent will read the listed files and inspect the listed Git changes from the current workspace."
             ),
@@ -10905,7 +13523,7 @@ async def _dispatch_callback_action(
                 user_id=user_id,
                 page=int(payload.get("page", 0)),
                 back_target=back_target,
-                notice="Context bundle is empty.",
+                notice=_context_bundle_empty_text(),
                 source_restore_action=source_restore_action,
                 source_restore_payload=source_restore_payload,
                 source_back_label=source_back_label,
@@ -10921,7 +13539,7 @@ async def _dispatch_callback_action(
                 user_id=user_id,
                 page=int(payload.get("page", 0)),
                 back_target=back_target,
-                notice="No previous request text is available in this workspace.",
+                notice=_no_previous_request_text(),
                 source_restore_action=source_restore_action,
                 source_restore_payload=source_restore_payload,
                 source_back_label=source_back_label,
@@ -11067,7 +13685,7 @@ async def _dispatch_callback_action(
         )
         return
 
-    await query.answer("Unknown action.", show_alert=True)
+    await query.answer(_unknown_action_text(), show_alert=True)
 
 
 def _callback_button(
@@ -11097,12 +13715,23 @@ def _build_runtime_status_view(
     is_admin: bool,
     notice: str | None = None,
 ):
-    lines = []
     active_turn = ui_state.get_active_turn(
         user_id,
         provider=provider,
         workspace_id=workspace_id,
     )
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    last_turn_available = last_turn is not None
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_request_text = None if last_request is None else last_request.text
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    workspace_changes_available = _status_workspace_changes_available(git_status)
+
+    lines = []
     if notice:
         lines.append(notice)
     lines.append(
@@ -11110,6 +13739,41 @@ def _build_runtime_status_view(
     )
     lines.append(f"Workspace ID: {workspace_id}")
     lines.append(f"Path: {workspace_path}")
+    lines.append(
+        _interaction_status_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+        )
+    )
+    lines.append(
+        _recommended_next_step_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_text is not None,
+            last_turn_available=last_turn_available,
+        )
+    )
+    lines.append(
+        _primary_controls_line(
+            session=session,
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_text is not None,
+            last_turn_available=last_turn_available,
+        )
+    )
+    lines.append("")
 
     if session is None:
         lines.append("Session: none (will start on first request)")
@@ -11141,9 +13805,9 @@ def _build_runtime_status_view(
     lines.extend(_status_tool_activity_preview_lines(session))
     tool_activity_count = len(_tool_activity_items(session))
 
-    lines.append(
-        f"Pending input: {_pending_text_action_label(ui_state.get_pending_text_action(user_id))}"
-    )
+    lines.append(f"Pending input: {_pending_text_action_label(pending_text_action)}")
+    if pending_media_group_stats is not None:
+        lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
     lines.append(f"Local sessions: {history_count}")
     recent_history_entries, recent_history_total = _status_recent_history_entries(
         history_entries,
@@ -11157,29 +13821,20 @@ def _build_runtime_status_view(
     )
     lines.append(f"Workspace changes: {_status_workspace_changes_summary(git_status)}")
     lines.extend(_status_workspace_change_preview_lines(git_status))
-    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
     if last_turn is None:
         lines.append("Last turn replay: none")
     else:
         replay_snippet = _status_text_snippet(last_turn.title_hint) or "untitled turn"
         lines.append(f"Last turn replay: available ({replay_snippet})")
-    last_request = ui_state.get_last_request(user_id, workspace_id)
-    last_request_text = None if last_request is None else last_request.text
     if last_request_text is None:
         lines.append("Last request text: none")
     else:
         lines.append(
             f"Last request text: {_status_text_snippet(last_request_text) or '[empty]'}"
         )
-    last_turn_available = last_turn is not None
 
-    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
-    bundle_count = 0 if bundle is None else len(bundle.items)
-    workspace_changes_available = _status_workspace_changes_available(git_status)
     lines.append(f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}")
-    lines.append(
-        f"Bundle chat: {'on' if ui_state.context_bundle_chat_active(user_id, provider, workspace_id) else 'off'}"
-    )
+    lines.append(f"Bundle chat: {'on' if bundle_chat_active else 'off'}")
     lines.extend(_status_context_bundle_preview_lines(bundle))
 
     if session is None:
@@ -11205,20 +13860,96 @@ def _build_runtime_status_view(
                 f"resume={'yes' if getattr(capabilities, 'can_resume', False) else 'no'}"
             )
 
+    lines.append("")
     lines.append(
-        "Main keyboard: New Session, Retry/Fork Last Turn, Model / Mode, Restart Agent."
+        "Main keyboard: New Session and Bot Status first, then Retry/Fork Last Turn, context "
+        "prep tools, and a dedicated Help / Cancel recovery row."
     )
     if is_admin:
         lines.append("Admin switches stay on the main keyboard.")
 
-    buttons = [
-        [
-            _callback_button(ui_state, user_id, "Refresh", "runtime_status_page"),
-            _callback_button(ui_state, user_id, "Session History", "runtime_status_open", target="history"),
-        ],
+    buttons = []
+    primary_buttons = []
+    primary_action_kind = "none"
+    if active_turn is not None:
+        primary_action_kind = "active_turn"
+        primary_buttons.append(
+            _callback_button(ui_state, user_id, "Stop Turn", "runtime_status_stop_turn")
+        )
+    elif pending_text_action is not None:
+        primary_action_kind = "pending_input"
+        primary_buttons.append(
+            _callback_button(ui_state, user_id, "Cancel Pending Input", "runtime_status_cancel_pending")
+        )
+    elif pending_media_group_stats is not None:
+        primary_action_kind = "pending_uploads"
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Discard Pending Uploads",
+                "runtime_status_discard_pending_uploads",
+            )
+        )
+    elif bundle_count > 0:
+        primary_action_kind = "bundle"
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Ask Agent With Context",
+                "runtime_status_control",
+                target="context_bundle_ask",
+            )
+        )
+        if last_request_text is not None:
+            primary_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Bundle + Last Request",
+                    "runtime_status_control",
+                    target="context_bundle_ask_last_request",
+                )
+            )
+        else:
+            primary_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Context Bundle",
+                    "runtime_status_open",
+                    target="bundle",
+                )
+            )
+    elif last_turn_available:
+        primary_action_kind = "last_turn"
+        primary_buttons.extend(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Retry Last Turn",
+                    "runtime_status_control",
+                    target="retry_last_turn",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Fork Last Turn",
+                    "runtime_status_control",
+                    target="fork_last_turn",
+                ),
+            ]
+        )
+    if primary_buttons:
+        buttons.append(primary_buttons)
+    status_nav_row = [
+        _callback_button(ui_state, user_id, "Refresh", "runtime_status_page"),
+        _callback_button(ui_state, user_id, "Session History", "runtime_status_open", target="history"),
     ]
     if is_admin:
-        buttons[0].append(
+        status_nav_row.append(
             _callback_button(
                 ui_state,
                 user_id,
@@ -11227,6 +13958,7 @@ def _build_runtime_status_view(
                 target="provider_sessions",
             )
         )
+    buttons.append(status_nav_row)
     buttons.extend(
         _status_recent_session_quick_buttons(
             ui_state,
@@ -11236,16 +13968,25 @@ def _build_runtime_status_view(
         )
     )
     control_buttons = []
-    if active_turn is not None:
+    if active_turn is not None and primary_action_kind != "active_turn":
         control_buttons.append(
             _callback_button(ui_state, user_id, "Stop Turn", "runtime_status_stop_turn")
         )
-    if ui_state.get_pending_text_action(user_id) is not None:
+    if pending_text_action is not None and primary_action_kind != "pending_input":
         control_buttons.append(
             _callback_button(ui_state, user_id, "Cancel Pending Input", "runtime_status_cancel_pending")
         )
+    if pending_media_group_stats is not None and primary_action_kind != "pending_uploads":
+        control_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Discard Pending Uploads",
+                "runtime_status_discard_pending_uploads",
+            )
+        )
     if bundle_count > 0:
-        if ui_state.context_bundle_chat_active(user_id, provider, workspace_id):
+        if bundle_chat_active:
             control_buttons.append(
                 _callback_button(ui_state, user_id, "Stop Bundle Chat", "runtime_status_stop_bundle_chat")
             )
@@ -11289,7 +14030,7 @@ def _build_runtime_status_view(
                 )
             ]
         )
-    if last_turn_available:
+    if last_turn_available and primary_action_kind != "last_turn":
         buttons.append(
             [
                 _callback_button(
@@ -11308,6 +14049,7 @@ def _build_runtime_status_view(
                 ),
             ]
         )
+    if last_turn_available:
         buttons.append(
             [
                 _callback_button(
@@ -11434,26 +14176,27 @@ def _build_runtime_status_view(
             ]
         )
     if bundle_count > 0:
-        bundle_buttons = [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Ask Agent With Context",
-                "runtime_status_control",
-                target="context_bundle_ask",
-            )
-        ]
-        if last_request_text is not None:
-            bundle_buttons.append(
+        if primary_action_kind != "bundle":
+            bundle_buttons = [
                 _callback_button(
                     ui_state,
                     user_id,
-                    "Bundle + Last Request",
+                    "Ask Agent With Context",
                     "runtime_status_control",
-                    target="context_bundle_ask_last_request",
+                    target="context_bundle_ask",
                 )
-            )
-        buttons.append(bundle_buttons)
+            ]
+            if last_request_text is not None:
+                bundle_buttons.append(
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Bundle + Last Request",
+                        "runtime_status_control",
+                        target="context_bundle_ask_last_request",
+                    )
+                )
+            buttons.append(bundle_buttons)
         buttons.append(
             [
                 _callback_button(
@@ -13492,6 +16235,82 @@ def _append_back_to_status_button(
     )
 
 
+def _navigation_failure_markup(
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    retry_label: str = "Try Again",
+    retry_action: str,
+    retry_payload: dict[str, Any] | None = None,
+    back_target: str = "none",
+    back_label: str | None = None,
+    back_action: str | None = None,
+    back_payload: dict[str, Any] | None = None,
+) -> InlineKeyboardMarkup:
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                retry_label,
+                retry_action,
+                **({} if retry_payload is None else dict(retry_payload)),
+            )
+        ]
+    ]
+    if back_label is not None and back_action is not None:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    back_label,
+                    back_action,
+                    **({} if back_payload is None else dict(back_payload)),
+                )
+            ]
+        )
+    else:
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+    return InlineKeyboardMarkup(buttons)
+
+
+async def _show_navigation_failure(
+    query,
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    text: str,
+    retry_label: str = "Try Again",
+    retry_action: str,
+    retry_payload: dict[str, Any] | None = None,
+    back_target: str = "none",
+    back_label: str | None = None,
+    back_action: str | None = None,
+    back_payload: dict[str, Any] | None = None,
+) -> None:
+    await _edit_query_message(
+        query,
+        text,
+        reply_markup=_navigation_failure_markup(
+            ui_state=ui_state,
+            user_id=user_id,
+            retry_label=retry_label,
+            retry_action=retry_action,
+            retry_payload=retry_payload,
+            back_target=back_target,
+            back_label=back_label,
+            back_action=back_action,
+            back_payload=back_payload,
+        ),
+    )
+
+
 def _callback_source_restore_payload(
     *,
     source_restore_action: str | None,
@@ -14145,7 +16964,7 @@ def _build_context_bundle_view(
     )
 
     if bundle is None or not bundle.items:
-        lines.append("Context bundle is empty.")
+        lines.append(_context_bundle_empty_text())
         buttons: list[list[InlineKeyboardButton]] = []
         _append_restore_source_or_status_button(
             buttons,

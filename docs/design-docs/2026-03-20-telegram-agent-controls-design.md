@@ -19,6 +19,7 @@
 - `Retry Last Turn` 语义是“在当前 Workspace 作用域内，重放上一条真正发给 ACP 的请求”；如果当前 live session 已失效，bot 会先自动拉起新的 session 再重放；如果用户刚切到另一个 agent，只要 workspace 没变，也可以直接把上一回合交给新 agent 再跑一遍。
 - `Fork Last Turn` 语义是“在当前 Workspace 作用域内，先创建一个新的 session，再把上一条真正发给 ACP 的请求重放到新 session 中”；旧 session 仍通过本地 history 保留，用户在手机端即可直接分叉工作线；如果用户刚切到另一个 agent，只要 workspace 没变，也可以直接把上一回合分叉到新 agent 上。
 - 当当前 Workspace 下存在可重放的上一轮请求时，`Switch Agent` 菜单会为每个目标 provider 暴露一键 `Retry on ...` / `Fork on ...` 入口；它们先执行全局 Provider 切换，再立即在目标 provider 上重试或分叉上一轮。
+- `Switch Agent` / `Switch Workspace` 选择器与成功回显都必须显式提示切换影响：旧 callback / 待输入会被清理；`Context Bundle` 不会跨 runtime / workspace 跟随；同 workspace 下的 `Last Turn` / `Last Request` 是否仍可复用也要提前说清楚，避免管理员误判切换副作用。
 - 当当前 Workspace 下存在可重放的上一轮请求时，`Session History` 和管理员可见的 `Provider Sessions` 视图也会暴露一键 `Run+Retry` 入口；它们先接管目标 session，再立即把上一轮请求重放进这个 session。
 - `Session History` 不只保留列表切换；手机端应能先打开单个 history entry 的详情页，检查 session id、cwd、创建/更新时间与当前附着状态，再决定是否切换或分叉。
 - Session history 删除只删 `talk2agent` 本地记录，不尝试硬删除 Provider 侧原始 session。
@@ -33,7 +34,7 @@
 - 如果用户在 `Session History` 里删除的是当前 `[current]` live session，bot 也要同步清理该 session 绑定的旧 callback token、待输入文本动作、agent command alias 和 media group 缓冲，并把该用户的 Telegram slash command 菜单刷新回当前 Provider 的默认发现结果；`Context Bundle` 与 `Bundle Chat` 保持不变。
 - 如果某次普通文本、命令或附件回合因为 provider / session 异常而导致 bot 主动失效当前 live session，bot 也要同步清理该 session 绑定的旧 callback token、待输入文本动作、agent command alias 和 media group 缓冲，并把该用户的 Telegram slash command 菜单刷新回当前 Provider 的默认发现结果；`Context Bundle` 与 `Bundle Chat` 保持不变。
 - 上述 session 异常失效后的失败消息要直接给出恢复入口：普通用户至少能一跳进入 `Retry Last Turn`、`Fork Last Turn`、`New Session`、`Session History`、`Model / Mode`；管理员还应额外得到 `Switch Agent` 和 `Switch Workspace`。
-- Telegram 公开命令菜单只显示当前 agent 暴露的 slash commands；本地 bot 只保留隐藏 `/debug_status`。
+- Telegram 公开命令菜单固定包含本地 `/start`、`/status`、`/help` 与 `/cancel`，并追加当前 agent 暴露的 slash commands；本地 bot 仍只保留隐藏 `/debug_status`。
 - 流式输出从“编辑占位消息”迁移到 Telegram Draft API。
 
 ## 运行时形状

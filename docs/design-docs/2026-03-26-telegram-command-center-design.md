@@ -7,6 +7,8 @@
 ## 核心决策
 
 - 命令来源仍然只有 ACP `available_commands`；bot 不硬编码 provider 专属命令。
+- Telegram slash command 菜单固定保留本地 `/start`、`/status`、`/help` 与 `/cancel`；agent 命令继续由当前 ACP `available_commands` 增量追加。
+- 当 agent 命令 discovery 暂时失败时，Telegram slash command 菜单仍至少保留这些本地恢复入口，避免用户失去恢复路径。
 - 有 live session 时，优先读取该 session 当前暴露的命令集合；没有 live session 时，退回到临时 discovery。
 - 无参数命令可以直接通过 inline button 触发，并像普通文本回合一样进入当前用户的 live session。
 - 带 `hint` 的命令使用两段式交互：先点击命令按钮，再把下一条普通文本当作参数，最终转发为 `/command args`。
