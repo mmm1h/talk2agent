@@ -1429,6 +1429,21 @@ def _recommended_next_step_line(
                 "or send a fresh request."
             )
         return "Recommended next step: tap Ask Agent With Context, or send a fresh request."
+    if last_request_available and last_turn_available:
+        return (
+            "Recommended next step: run the last request again from Bot Status, reuse the "
+            "previous turn with Retry Last Turn / Fork Last Turn, or send a fresh request."
+        )
+    if last_request_available:
+        if session is None:
+            return (
+                "Recommended next step: run the last request again from Bot Status, send text "
+                "or an attachment, or open workspace tools before you ask."
+            )
+        return (
+            "Recommended next step: run the last request again from Bot Status, send text or "
+            "an attachment, or use the workspace tools below if you want more context first."
+        )
     if last_turn_available:
         return (
             "Recommended next step: send a fresh request, or reuse the previous turn with "
@@ -1485,6 +1500,21 @@ def _primary_controls_line(
                 "Context Bundle."
             )
         return "Primary controls right now: Ask Agent With Context or Context Bundle."
+    if last_request_available and last_turn_available:
+        return (
+            "Primary controls right now: Run Last Request, Retry Last Turn, Fork Last Turn, "
+            "or send a fresh request."
+        )
+    if last_request_available:
+        if session is None:
+            return (
+                "Primary controls right now: Run Last Request, send text or an attachment, or "
+                "open Workspace Files/Search/Changes first."
+            )
+        return (
+            "Primary controls right now: Run Last Request, send text or an attachment, or "
+            "prepare context with Workspace Files/Search/Changes and Context Bundle."
+        )
     if last_turn_available:
         return "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh request."
     if session is None:
@@ -2456,6 +2486,8 @@ async def _show_last_request_from_callback(
     state = await services.snapshot_runtime_state()
     text, markup = _build_last_request_view(
         last_request=ui_state.get_last_request(user_id, state.workspace_id),
+        last_turn_available=ui_state.get_last_turn(user_id, state.provider, state.workspace_id)
+        is not None,
         current_provider=state.provider,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
@@ -2901,6 +2933,10 @@ def _usage_utilization_percent(usage) -> float | None:
 
 def _last_request_plain_text_source_summary() -> str:
     return "plain text"
+
+
+def _last_request_replay_source_summary() -> str:
+    return "last request replay"
 
 
 def _last_request_bundle_chat_source_summary(item_count: int) -> str:
@@ -4755,6 +4791,40 @@ async def _run_agent_text_turn_on_message(
     )
 
 
+async def _run_last_request_on_message(
+    message,
+    user_id: int,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    last_request: _LastRequestText,
+    provider: str,
+    workspace_id: str,
+    application,
+    after_turn_success=None,
+    on_prepare_failure=None,
+    on_turn_failure=None,
+) -> None:
+    ui_state.set_last_request_text(
+        user_id,
+        workspace_id,
+        last_request.text,
+        provider=provider,
+        source_summary=_last_request_replay_source_summary(),
+    )
+    await _run_agent_text_turn_on_message(
+        message,
+        user_id,
+        services,
+        ui_state,
+        last_request.text,
+        application=application,
+        after_turn_success=after_turn_success,
+        on_prepare_failure=on_prepare_failure,
+        on_turn_failure=on_turn_failure,
+    )
+
+
 async def _run_workspace_file_request_on_message(
     message,
     user_id: int,
@@ -6427,6 +6497,7 @@ def _build_session_loss_recovery_view(
         lines.append(
             f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}"
         )
+        lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
     text = "\n".join(lines)
     buttons = [
         [
@@ -6443,6 +6514,20 @@ def _build_session_loss_recovery_view(
                 "recover_new_session",
             ),
         ],
+    ]
+    if last_request is not None:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Run Last Request",
+                    "recover_run_last_request",
+                )
+            ]
+        )
+    buttons.extend(
+        [
         [
             _callback_button(
                 ui_state,
@@ -6471,7 +6556,8 @@ def _build_session_loss_recovery_view(
                 "recover_model_mode",
             ),
         ],
-    ]
+        ]
+    )
     if user_id == services.admin_user_id:
         buttons.append(
             [
@@ -7876,6 +7962,7 @@ def _build_switch_agent_view(
         lines.append(notice)
     lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
     lines.append(f"Workspace: {_workspace_label(services, state.workspace_id)}")
+    lines.append("Admin action: this changes the shared agent runtime for every Telegram user.")
     lines.extend(
         _switch_agent_impact_lines(
             state=state,
@@ -8027,6 +8114,8 @@ def _build_switch_workspace_view(
         lines.append(notice)
     lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
     lines.append(f"Current workspace: {_workspace_label(services, state.workspace_id)}")
+    lines.append("Admin action: this changes the shared workspace for every Telegram user.")
+    lines.append("Only configured workspaces are listed below.")
     lines.extend(
         _switch_workspace_impact_lines(
             state=state,
@@ -8072,6 +8161,7 @@ def _build_switch_workspace_view(
 
 def _switch_agent_success_detail_text() -> str:
     return (
+        "Everyone now lands in the selected agent runtime for this workspace. "
         "Context bundle does not follow an agent switch. "
         "Last Turn and Last Request stay reusable in this workspace when available."
     )
@@ -8107,6 +8197,7 @@ def _switch_workspace_impact_lines(
 
 def _switch_workspace_success_detail_text() -> str:
     return (
+        "Everyone now lands in the selected workspace. "
         "Workspace-specific context does not follow the switch. "
         "Rebuild context in the new workspace before you ask."
     )
@@ -8194,13 +8285,16 @@ async def _show_model_mode_menu(update: Update, services, ui_state: TelegramUiSt
             update.message,
             services,
             update.effective_user.id,
-            "Model / mode switching is not available for this agent.",
+            "This agent does not expose model or mode controls in the current session. "
+            "Keep chatting normally, or open Bot Status for the rest of the runtime tools.",
         )
         return
 
     text, markup = _build_model_mode_view(
         user_id=update.effective_user.id,
         session_id=session.session_id,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
         model_selection=model_selection,
         mode_selection=mode_selection,
         ui_state=ui_state,
@@ -8269,7 +8363,8 @@ async def _show_model_mode_menu_from_callback(
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         await _edit_query_message(
             query,
-            "Model / mode switching is not available for this agent.",
+            "This agent does not expose model or mode controls in the current session. "
+            "Keep chatting normally, or open Bot Status for the rest of the runtime tools.",
             reply_markup=markup,
         )
         return
@@ -8277,6 +8372,8 @@ async def _show_model_mode_menu_from_callback(
     text, markup = _build_model_mode_view(
         user_id=user_id,
         session_id=session.session_id,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
         model_selection=model_selection,
         mode_selection=mode_selection,
         ui_state=ui_state,
@@ -9855,6 +9952,8 @@ async def _set_selection_from_callback(
             text, markup = _build_model_mode_view(
                 user_id=user_id,
                 session_id=session.session_id,
+                provider=state.provider,
+                workspace_label=_workspace_label(services, state.workspace_id),
                 model_selection=session.get_selection("model"),
                 mode_selection=session.get_selection("mode"),
                 ui_state=ui_state,
@@ -9958,6 +10057,8 @@ async def _set_selection_from_callback(
     text, markup = _build_model_mode_view(
         user_id=user_id,
         session_id=session.session_id,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
         model_selection=session.get_selection("model"),
         mode_selection=session.get_selection("mode"),
         ui_state=ui_state,
@@ -10044,6 +10145,8 @@ async def _restore_model_mode_menu_from_callback(
     text, markup = _build_model_mode_view(
         user_id=user_id,
         session_id=session.session_id,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
         model_selection=session.get_selection("model"),
         mode_selection=session.get_selection("mode"),
         ui_state=ui_state,
@@ -10292,6 +10395,32 @@ async def _dispatch_callback_action(
             _message_update_from_callback(query),
             services,
             ui_state,
+            application=application,
+        )
+        return
+
+    if action == "recover_run_last_request":
+        await query.answer()
+        if query.message is None or query.from_user is None:
+            return
+        state = await services.snapshot_runtime_state()
+        last_request = ui_state.get_last_request(user_id, state.workspace_id)
+        if last_request is None:
+            await _reply_with_menu(
+                query.message,
+                services,
+                user_id,
+                _no_previous_request_text(),
+            )
+            return
+        await _run_last_request_on_message(
+            query.message,
+            user_id,
+            services,
+            ui_state,
+            last_request=last_request,
+            provider=state.provider,
+            workspace_id=state.workspace_id,
             application=application,
         )
         return
@@ -10861,6 +10990,39 @@ async def _dispatch_callback_action(
                 on_missing_replay_turn=_on_retry_missing_replay_turn,
                 on_prepare_failure=_on_retry_prepare_failure,
                 on_turn_failure=_on_retry_turn_failure,
+            )
+            return
+        if target == "run_last_request":
+            state = await services.snapshot_runtime_state()
+            last_request = ui_state.get_last_request(user_id, state.workspace_id)
+            if last_request is None:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice=_no_previous_request_text(),
+                )
+                return
+            after_turn_success, on_prepare_failure, on_turn_failure = _status_turn_callbacks(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                success_notice="Ran the last request.",
+            )
+            await _run_last_request_on_message(
+                query.message,
+                user_id,
+                services,
+                ui_state,
+                last_request=last_request,
+                provider=state.provider,
+                workspace_id=state.workspace_id,
+                application=application,
+                after_turn_success=after_turn_success,
+                on_prepare_failure=on_prepare_failure,
+                on_turn_failure=on_turn_failure,
             )
             return
         if target == "fork_last_turn":
@@ -13832,6 +13994,7 @@ def _build_runtime_status_view(
         lines.append(
             f"Last request text: {_status_text_snippet(last_request_text) or '[empty]'}"
         )
+        lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
 
     lines.append(f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}")
     lines.append(f"Bundle chat: {'on' if bundle_chat_active else 'off'}")
@@ -14108,10 +14271,17 @@ def _build_runtime_status_view(
                 _callback_button(
                     ui_state,
                     user_id,
+                    "Run Last Request",
+                    "runtime_status_control",
+                    target="run_last_request",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
                     "Last Request",
                     "runtime_status_open",
                     target="last_request",
-                )
+                ),
             ]
         )
     if is_admin:
@@ -14289,7 +14459,22 @@ def _build_history_view(
     )
     buttons = []
     if not entries:
-        lines.append("No local session history.")
+        lines.append("No local session history yet.")
+        lines.append(
+            "Start a new session to create reusable checkpoints, or open Bot Status to keep "
+            "working from the current runtime."
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "New Session",
+                    "runtime_status_control",
+                    target="new_session",
+                )
+            ]
+        )
         if show_provider_sessions:
             buttons.append(
                 [
@@ -14306,17 +14491,12 @@ def _build_history_view(
                     )
                 ]
             )
-        if back_target == "status":
-            buttons.append(
-                [
-                    _callback_button(
-                        ui_state,
-                        user_id,
-                        "Back to Bot Status",
-                        "runtime_status_page",
-                    )
-                ]
-            )
+        _append_status_recovery_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
@@ -14617,14 +14797,58 @@ def _build_provider_sessions_view(
     lines.append(
         f"Provider sessions for {resolve_provider_profile(provider).display_name} in {workspace_label}"
     )
-    lines.append("Only sessions inside the current workspace are shown.")
+    lines.append(
+        "Only sessions inside the current workspace are shown. "
+        "This list comes from the provider, not the bot's local history."
+    )
 
     buttons = []
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
     if not supported:
         lines.append("Provider session browsing is not available for this agent.")
+        lines.append("Use Session History for bot-local checkpoints, or keep working from Bot Status.")
+        if back_target != "status":
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Open Bot Status",
+                        "runtime_status_page",
+                    )
+                ]
+            )
     elif not entries:
         lines.append("No provider sessions found.")
+        lines.append(
+            "Start or reuse a live session, then refresh here if the provider persists reusable sessions."
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Refresh",
+                    "provider_sessions_page",
+                    cursor=cursor,
+                    previous_cursors=previous_cursors,
+                    history_page=history_page,
+                    back_target=back_target,
+                    history_back_target=history_back_target,
+                )
+            ]
+        )
+        if back_target != "status":
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Open Bot Status",
+                        "runtime_status_page",
+                    )
+                ]
+            )
     else:
         for index, entry in enumerate(entries, start=1):
             is_current = entry.session_id == active_session_id
@@ -15023,6 +15247,7 @@ def _build_usage_view(
 def _build_last_request_view(
     *,
     last_request: _LastRequestText | None,
+    last_turn_available: bool,
     current_provider: str,
     workspace_label: str,
     user_id: int,
@@ -15055,6 +15280,15 @@ def _build_last_request_view(
     lines.append(f"Recorded workspace: {last_request.workspace_id}")
     lines.append(f"Source: {_last_request_source_summary(last_request)}")
     lines.append(
+        "Run Last Request sends only this text again in the current provider and workspace. "
+        "It does not restore the original attachments or extra context."
+    )
+    if last_turn_available:
+        lines.append(
+            "Use Retry Last Turn or Fork Last Turn if you need the original attachments or "
+            "extra context back."
+        )
+    lines.append(
         f"Text length: {len(last_request.text)} character{'s' if len(last_request.text) != 1 else ''}"
     )
     content, truncated = _last_turn_render_text_detail(last_request.text)
@@ -15063,6 +15297,36 @@ def _build_last_request_view(
     if truncated:
         lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
 
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Run Last Request",
+                "runtime_status_control",
+                target="run_last_request",
+            )
+        ]
+    )
+    if last_turn_available:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Retry Last Turn",
+                    "runtime_status_control",
+                    target="retry_last_turn",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Fork Last Turn",
+                    "runtime_status_control",
+                    target="fork_last_turn",
+                ),
+            ]
+        )
     _append_back_to_status_button(
         buttons,
         ui_state=ui_state,
@@ -16018,7 +16282,23 @@ def _build_agent_commands_view(
     buttons = []
     if not commands:
         lines.append("No agent commands available.")
-        _append_back_to_status_button(
+        lines.append(
+            "Command discovery may still be loading, or the current agent may not expose any "
+            "slash commands."
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Refresh",
+                    "agent_commands_page",
+                    page=0,
+                    back_target=back_target,
+                )
+            ]
+        )
+        _append_status_recovery_button(
             buttons,
             ui_state=ui_state,
             user_id=user_id,
@@ -16235,6 +16515,35 @@ def _append_back_to_status_button(
     )
 
 
+def _append_status_recovery_button(
+    buttons: list[list[InlineKeyboardButton]],
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    back_target: str,
+    label: str = "Open Bot Status",
+) -> None:
+    existing_count = len(buttons)
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+    if len(buttons) != existing_count:
+        return
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                label,
+                "runtime_status_page",
+            )
+        ]
+    )
+
+
 def _navigation_failure_markup(
     *,
     ui_state: TelegramUiState,
@@ -16419,20 +16728,32 @@ def _build_workspace_listing_view(
 
     if not listing.entries:
         lines.append("[empty directory]")
-        buttons = []
         if listing.relative_path:
-            buttons.append(
-                [
-                    _callback_button(
-                        ui_state,
-                        user_id,
-                        "Up",
-                        "workspace_open_dir",
-                        relative_path=_parent_relative_path(listing.relative_path),
-                    )
-                ]
+            lines.append("Go up, search the workspace, or open Bot Status to continue elsewhere.")
+        else:
+            lines.append("Search the workspace or open Bot Status to continue elsewhere.")
+        buttons = []
+        navigation_buttons = []
+        if listing.relative_path:
+            navigation_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Up",
+                    "workspace_open_dir",
+                    relative_path=_parent_relative_path(listing.relative_path),
+                )
             )
-        _append_back_to_status_button(
+        navigation_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Workspace Search",
+                "recover_workspace_search",
+            )
+        )
+        buttons.append(navigation_buttons)
+        _append_status_recovery_button(
             buttons,
             ui_state=ui_state,
             user_id=user_id,
@@ -16608,8 +16929,28 @@ def _build_workspace_search_results_view(
 
     if not search_results.matches:
         lines.append("No matches found.")
+        lines.append(
+            "Try a broader query, search again, or open Workspace Files to browse manually."
+        )
         buttons: list[list[InlineKeyboardButton]] = []
-        _append_back_to_status_button(
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Search Again",
+                    "recover_workspace_search",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Files",
+                    "runtime_status_open",
+                    target="files",
+                ),
+            ]
+        )
+        _append_status_recovery_button(
             buttons,
             ui_state=ui_state,
             user_id=user_id,
@@ -16782,8 +17123,29 @@ def _build_workspace_changes_view(
 
     if not git_status.is_git_repo:
         lines.append("Current workspace is not a Git repository.")
+        lines.append(
+            "Use Workspace Files or Workspace Search when you still need local project context."
+        )
         buttons: list[list[InlineKeyboardButton]] = []
-        _append_back_to_status_button(
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Files",
+                    "runtime_status_open",
+                    target="files",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Search",
+                    "runtime_status_open",
+                    target="search",
+                ),
+            ]
+        )
+        _append_status_recovery_button(
             buttons,
             ui_state=ui_state,
             user_id=user_id,
@@ -16795,8 +17157,29 @@ def _build_workspace_changes_view(
     lines.append(f"Branch: {git_status.branch_line or 'unknown'}")
     if not git_status.entries:
         lines.append("No working tree changes.")
+        lines.append(
+            "Browse files, search the workspace, or send a fresh request if you are ready to keep going."
+        )
         buttons = []
-        _append_back_to_status_button(
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Files",
+                    "runtime_status_open",
+                    target="files",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Search",
+                    "runtime_status_open",
+                    target="search",
+                ),
+            ]
+        )
+        _append_status_recovery_button(
             buttons,
             ui_state=ui_state,
             user_id=user_id,
@@ -16965,7 +17348,40 @@ def _build_context_bundle_view(
 
     if bundle is None or not bundle.items:
         lines.append(_context_bundle_empty_text())
+        lines.append(
+            "Add files from Workspace Files or Search, or add current Git changes, then come "
+            "back here to reuse that context."
+        )
         buttons: list[list[InlineKeyboardButton]] = []
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Files",
+                    "runtime_status_open",
+                    target="files",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Search",
+                    "runtime_status_open",
+                    target="search",
+                ),
+            ]
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Workspace Changes",
+                    "runtime_status_open",
+                    target="changes",
+                )
+            ]
+        )
         _append_restore_source_or_status_button(
             buttons,
             ui_state=ui_state,
@@ -16975,6 +17391,13 @@ def _build_context_bundle_view(
             source_restore_payload=source_restore_payload,
             source_back_label=source_back_label,
         )
+        if source_restore_action is None and back_target == "none":
+            _append_status_recovery_button(
+                buttons,
+                ui_state=ui_state,
+                user_id=user_id,
+                back_target=back_target,
+            )
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
@@ -17293,6 +17716,8 @@ def _build_model_mode_view(
     *,
     user_id: int,
     session_id: str | None,
+    provider: str,
+    workspace_label: str,
     model_selection,
     mode_selection,
     ui_state: TelegramUiState,
@@ -17303,11 +17728,39 @@ def _build_model_mode_view(
     lines = []
     if notice:
         lines.append(notice)
+    lines.append(
+        f"Model / Mode for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
     lines.append(f"Session: {session_id or 'pending'}")
+    current_setup = _model_mode_current_setup_line(
+        model_selection=model_selection,
+        mode_selection=mode_selection,
+    )
+    if current_setup is not None:
+        lines.append(current_setup)
+    if model_selection is None and mode_selection is not None:
+        lines.append(
+            "Model controls are not exposed in this session. Use the available mode controls "
+            "below, or keep chatting normally if you do not need to change it."
+        )
+    if mode_selection is None and model_selection is not None:
+        lines.append(
+            "Mode controls are not exposed in this session. Use the available model controls "
+            "below, or keep chatting normally if you do not need to change it."
+        )
+    lines.append("This updates the current live session in place.")
+    if can_retry_last_turn:
+        lines.append(
+            "Shortcut: use ...+Retry to rerun the last turn immediately with the updated setting."
+        )
+    else:
+        lines.append("Open a choice first if you want to inspect its details before switching.")
+    lines.append("")
     buttons = []
 
     if model_selection is not None:
-        lines.append(f"Model: {_current_choice_label(model_selection)}")
+        lines.extend(_selection_overview_lines(prefix="Model", selection=model_selection))
+        lines.append("")
         buttons.extend(
             _selection_buttons(
                 user_id=user_id,
@@ -17320,7 +17773,8 @@ def _build_model_mode_view(
         )
 
     if mode_selection is not None:
-        lines.append(f"Mode: {_current_choice_label(mode_selection)}")
+        lines.extend(_selection_overview_lines(prefix="Mode", selection=mode_selection))
+        lines.append("")
         buttons.extend(
             _selection_buttons(
                 user_id=user_id,
@@ -17339,6 +17793,26 @@ def _build_model_mode_view(
         back_target=back_target,
     )
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _model_mode_current_setup_line(*, model_selection, mode_selection) -> str | None:
+    parts = []
+    if model_selection is not None:
+        parts.append(f"model={_current_choice_label(model_selection)}")
+    if mode_selection is not None:
+        parts.append(f"mode={_current_choice_label(mode_selection)}")
+    if not parts:
+        return None
+    return "Current setup: " + ", ".join(parts)
+
+
+def _selection_overview_lines(*, prefix: str, selection) -> list[str]:
+    lines = [f"{prefix} choices:"]
+    for choice_index, choice in enumerate(selection.choices, start=1):
+        current_suffix = " [current]" if choice.value == selection.current_value else ""
+        lines.append(f"{choice_index}. {choice.label}{current_suffix}")
+    lines.append(f"Tap {prefix}: ... to switch now, or Open {prefix} N for details.")
+    return lines
 
 
 def _selection_buttons(
@@ -17462,9 +17936,20 @@ def _build_selection_detail_view(
     else:
         lines.append("Description:")
         lines.append(description)
-    lines.append(f"Action: tap Use {kind_label} to switch to this choice.")
-    if can_retry_last_turn and not is_current:
-        lines.append("Retry shortcut: available for this choice.")
+    lines.append("Effect: this updates the current live session in place.")
+    if is_current:
+        lines.append(
+            f"Recommended next step: go back to Model / Mode, or inspect another {kind_label.lower()} choice."
+        )
+    elif can_retry_last_turn:
+        lines.append(
+            f"Recommended next step: tap Use {kind_label} to switch now, or Use {kind_label} + Retry "
+            "to rerun the last turn immediately."
+        )
+    else:
+        lines.append(
+            f"Recommended next step: tap Use {kind_label} to switch now, or go back to compare another choice."
+        )
 
     selection_payload = _selection_choice_payload(
         selection=selection,

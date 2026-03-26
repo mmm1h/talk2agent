@@ -596,6 +596,7 @@ def assert_switch_agent_success_notice(text, *, provider, workspace="Default Wor
         "Old bot buttons and pending inputs were cleared."
     ) in text
     assert (
+        "Everyone now lands in the selected agent runtime for this workspace. "
         "Context bundle does not follow an agent switch. "
         "Last Turn and Last Request stay reusable in this workspace when available."
     ) in text
@@ -607,6 +608,7 @@ def assert_switch_workspace_success_notice(text, *, workspace, provider):
         "Old bot buttons and pending inputs were cleared."
     ) in text
     assert (
+        "Everyone now lands in the selected workspace. "
         "Workspace-specific context does not follow the switch. "
         "Rebuild context in the new workspace before you ask."
     ) in text
@@ -2291,8 +2293,13 @@ def test_workspace_changes_follow_up_open_context_bundle_can_go_back(monkeypatch
     bundle_text, bundle_markup = follow_up_message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first."
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(bundle_markup, "Workspace Files")
+    assert find_inline_button(bundle_markup, "Workspace Search")
+    assert find_inline_button(bundle_markup, "Workspace Changes")
     back_button = find_inline_button(bundle_markup, "Back to Change Update")
 
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=follow_up_message)
@@ -2449,6 +2456,7 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert "Local sessions: 2" in text
     assert "Last turn replay: available (hello)" in text
     assert "Last request text: search for adapter" in text
+    assert "Last request source: plain text" in text
     assert "Context bundle: 1 item" in text
     assert "Bundle chat: on" in text
     assert "Bundle preview:" in text
@@ -2469,6 +2477,7 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert find_inline_button(markup, "New Session")
     assert find_inline_button(markup, "Retry Last Turn")
     assert find_inline_button(markup, "Fork Last Turn")
+    assert find_inline_button(markup, "Run Last Request")
     assert find_inline_button(markup, "Last Request")
     assert find_inline_button(markup, "Model / Mode")
     assert find_inline_button(markup, "Restart Agent")
@@ -2511,6 +2520,33 @@ def test_bot_status_shows_workspace_git_preview_for_dirty_repo(monkeypatch):
     assert "2. [??] notes.txt" in text
     assert "3. [R] old.py -> new.py" in text
     assert "... 1 more change" in text
+    assert store.get_or_create_calls == []
+
+
+def test_bot_status_prioritizes_run_last_request_when_cached_request_is_available():
+    from talk2agent.bots.telegram_bot import BUTTON_BOT_STATUS, TelegramUiState, handle_text
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the rollout summary")
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert (
+        "Recommended next step: run the last request again from Bot Status, send text or an "
+        "attachment, or open workspace tools before you ask."
+    ) in text
+    assert (
+        "Primary controls right now: Run Last Request, send text or an attachment, or open "
+        "Workspace Files/Search/Changes first."
+    ) in text
+    assert "Last request text: Re-run the rollout summary" in text
+    assert "Last request source: plain text" in text
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Last Request")
     assert store.get_or_create_calls == []
 
 
@@ -3483,9 +3519,15 @@ def test_bot_status_can_open_last_request_and_back_to_status():
     assert "Recorded provider: Claude Code" in request_text
     assert "Recorded workspace: default" in request_text
     assert "Source: selected context request (current workspace changes, 1 item)" in request_text
+    assert (
+        "Run Last Request sends only this text again in the current provider and workspace. "
+        "It does not restore the original attachments or extra context."
+        in request_text
+    )
     assert "Text length: 59 characters" in request_text
     assert "Request text:" in request_text
     assert "Review the workspace changes.\nFocus on failing tests first." in request_text
+    assert find_inline_button(request_markup, "Run Last Request")
 
     back_button = find_inline_button(request_markup, "Back to Bot Status")
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=callback_message)
@@ -3494,6 +3536,98 @@ def test_bot_status_can_open_last_request_and_back_to_status():
     restored_text, restored_markup = callback_message.edit_calls[-1]
     assert restored_text.startswith("Bot status for Codex in Default Workspace")
     assert find_inline_button(restored_markup, "Last Request")
+
+
+def test_bot_status_last_request_view_can_run_last_request_and_return_to_status():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(session_id="session-abc")
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(
+        123,
+        "default",
+        "Review the workspace changes.\nFocus on failing tests first.",
+        provider="claude",
+        source_summary="selected context request (current workspace changes, 1 item)",
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    callback_message = FakeIncomingMessage("status")
+    services, store = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    request_button = find_inline_button(update.message.reply_markups[0], "Last Request")
+    request_update = FakeCallbackUpdate(123, request_button.callback_data, message=callback_message)
+    run(handle_callback_query(request_update, None, services, ui_state))
+
+    run_button = find_inline_button(callback_message.edit_calls[-1][1], "Run Last Request")
+    run_update = FakeCallbackUpdate(123, run_button.callback_data, message=callback_message)
+    run(handle_callback_query(run_update, make_context(application=FakeApplication()), services, ui_state))
+
+    assert session.prompts == ["Review the workspace changes.\nFocus on failing tests first."]
+    assert callback_message.reply_calls == ["hello world"]
+    assert store.record_session_usage_calls == [
+        (123, "session-abc", "Review the workspace changes.\nFocus on failing tests first.")
+    ]
+    last_request = ui_state.get_last_request(123, "default")
+    assert last_request is not None
+    assert last_request.source_summary == "last request replay"
+    final_text, final_markup = callback_message.edit_calls[-1]
+    assert final_text.startswith("Ran the last request.\nBot status for Codex in Default Workspace")
+    assert find_inline_button(final_markup, "Run Last Request")
+
+
+def test_bot_status_last_request_view_offers_last_turn_replay_recovery():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(
+        123,
+        "default",
+        "Review the workspace changes.\nFocus on failing tests first.",
+        provider="claude",
+        source_summary="selected context request (current workspace changes, 1 item)",
+    )
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the workspace changes."),),
+            title_hint="Review the workspace changes.",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    request_button = find_inline_button(update.message.reply_markups[0], "Last Request")
+    callback_message = FakeIncomingMessage("status")
+    request_update = FakeCallbackUpdate(123, request_button.callback_data, message=callback_message)
+    run(handle_callback_query(request_update, None, services, ui_state))
+
+    request_text, request_markup = callback_message.edit_calls[-1]
+    assert (
+        "Use Retry Last Turn or Fork Last Turn if you need the original attachments or extra "
+        "context back."
+        in request_text
+    )
+    assert find_inline_button(request_markup, "Run Last Request")
+    assert find_inline_button(request_markup, "Retry Last Turn")
+    assert find_inline_button(request_markup, "Fork Last Turn")
 
 
 def test_bot_status_session_info_without_live_session_does_not_create_one():
@@ -6294,8 +6428,11 @@ def test_bot_status_model_mode_control_clears_pending_and_starts_session():
     assert store.get_or_create_calls == [123]
     edited_text, edited_markup = callback_message.edit_calls[-1]
     assert edited_text.startswith(
-        "Started session for model / mode controls.\nSession: session-123"
+        "Started session for model / mode controls.\n"
+        "Model / Mode for Claude Code in Default Workspace\n"
+        "Session: session-123"
     )
+    assert "Current setup: model=GPT-5.4, mode=xhigh" in edited_text
     assert find_inline_button(edited_markup, "Back to Bot Status")
     assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
@@ -6385,7 +6522,11 @@ def test_bot_status_model_mode_selection_keeps_back_to_status():
     assert services.final_session.set_selection_calls == [("model", "gpt-5.4-mini")]
     assert store.record_session_usage_calls == [(123, "session-123", None)]
     final_text, final_markup = callback_message.edit_calls[-1]
-    assert final_text.startswith("Updated model to GPT-5.4 Mini.\nSession: session-123")
+    assert final_text.startswith(
+        "Updated model to GPT-5.4 Mini.\n"
+        "Model / Mode for Codex in Default Workspace\n"
+        "Session: session-123"
+    )
     assert find_inline_button(final_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(
@@ -6503,6 +6644,11 @@ def test_bot_status_model_mode_choice_detail_keeps_back_to_status():
     assert "Value: low" in detail_text
     assert "Description:" in detail_text
     assert "Lower effort mode for faster iterations." in detail_text
+    assert "Effect: this updates the current live session in place." in detail_text
+    assert (
+        "Recommended next step: tap Use Mode to switch now, or go back to compare another choice."
+        in detail_text
+    )
     assert find_inline_button(detail_markup, "Use Mode")
 
     back_button = find_inline_button(detail_markup, "Back to Model / Mode")
@@ -6510,7 +6656,9 @@ def test_bot_status_model_mode_choice_detail_keeps_back_to_status():
     run(handle_callback_query(back_update, None, services, ui_state))
 
     selection_text, selection_markup = callback_message.edit_calls[-1]
-    assert selection_text.startswith("Session: session-123")
+    assert selection_text.startswith(
+        "Model / Mode for Codex in Default Workspace\nSession: session-123"
+    )
     assert find_inline_button(selection_markup, "Back to Bot Status")
 
     back_to_status_update = FakeCallbackUpdate(
@@ -7405,8 +7553,13 @@ def test_bot_status_workspace_files_open_context_bundle_restores_folder_then_sta
     bundle_text, bundle_markup = callback_message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Codex in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first."
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(bundle_markup, "Workspace Files")
+    assert find_inline_button(bundle_markup, "Workspace Search")
+    assert find_inline_button(bundle_markup, "Workspace Changes")
     back_to_folder_button = find_inline_button(bundle_markup, "Back to Folder")
 
     back_to_folder_update = FakeCallbackUpdate(
@@ -8330,8 +8483,13 @@ def test_bot_status_context_bundle_empty_can_back_to_status():
     bundle_text, bundle_markup = callback_message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Codex in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first."
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(bundle_markup, "Workspace Files")
+    assert find_inline_button(bundle_markup, "Workspace Search")
+    assert find_inline_button(bundle_markup, "Workspace Changes")
     back_button = find_inline_button(bundle_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=callback_message)
@@ -8551,6 +8709,7 @@ def test_bot_status_switch_agent_can_open_and_back_to_status():
     assert switch_text.startswith(
         "Current provider: Codex\n"
         "Workspace: Default Workspace\n"
+        "Admin action: this changes the shared agent runtime for every Telegram user.\n"
         "Switch impact:"
     )
     assert "- Context bundle does not follow an agent switch." in switch_text
@@ -8621,6 +8780,8 @@ def test_bot_status_switch_workspace_can_open_and_back_to_status():
     assert switch_text.startswith(
         "Current provider: Codex\n"
         "Current workspace: Default Workspace\n"
+        "Admin action: this changes the shared workspace for every Telegram user.\n"
+        "Only configured workspaces are listed below.\n"
         "Switch impact:"
     )
     assert (
@@ -8682,6 +8843,7 @@ def test_switch_agent_button_shows_provider_choices():
     assert switch_text.startswith(
         "Current provider: Codex\n"
         "Workspace: Default Workspace\n"
+        "Admin action: this changes the shared agent runtime for every Telegram user.\n"
         "Switch impact:\n"
         "- Old bot buttons and pending inputs will be cleared.\n"
         "- Context bundle does not follow an agent switch.\n"
@@ -8811,6 +8973,7 @@ def test_switch_agent_button_shows_unavailable_provider_capability_summary():
     assert switch_text.startswith(
         "Current provider: Codex\n"
         "Workspace: Default Workspace\n"
+        "Admin action: this changes the shared agent runtime for every Telegram user.\n"
         "Switch impact:\n"
         "- Old bot buttons and pending inputs will be cleared.\n"
         "- Context bundle does not follow an agent switch.\n"
@@ -8900,6 +9063,8 @@ def test_switch_workspace_button_shows_choices_and_switches():
     assert switch_text.startswith(
         "Current provider: Codex\n"
         "Current workspace: Default Workspace\n"
+        "Admin action: this changes the shared workspace for every Telegram user.\n"
+        "Only configured workspaces are listed below.\n"
         "Switch impact:"
     )
     assert "Current workspace state that will stay behind: Context Bundle (1 item), Last Request, Last Turn." in switch_text
@@ -9885,6 +10050,26 @@ def test_session_history_shows_provider_sessions_button_for_admin():
     assert find_inline_button(update.message.reply_markups[0], "Provider Sessions").text == "Provider Sessions"
 
 
+def test_session_history_empty_state_offers_new_session_and_status_recovery():
+    from talk2agent.bots.telegram_bot import BUTTON_SESSION_HISTORY, TelegramUiState, handle_text
+
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(history_entries=[], peek_session=None)
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls[0] == (
+        "Session history for Claude Code in Default Workspace\n"
+        "No local session history yet.\n"
+        "Start a new session to create reusable checkpoints, or open Bot Status to keep "
+        "working from the current runtime."
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "New Session")
+    assert find_inline_button(markup, "Provider Sessions")
+    assert find_inline_button(markup, "Open Bot Status")
+
+
 def test_session_history_hides_provider_sessions_button_for_non_admin():
     from talk2agent.bots.telegram_bot import BUTTON_SESSION_HISTORY, TelegramUiState, handle_text
 
@@ -10479,10 +10664,45 @@ def test_provider_sessions_show_unsupported_message():
     provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
     run(handle_callback_query(provider_update, None, services, ui_state))
 
-    assert provider_update.callback_query.message.edit_calls[-1][0].startswith(
-        "Provider sessions for Claude Code in Default Workspace"
+    provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
+    assert provider_text == (
+        "Provider sessions for Claude Code in Default Workspace\n"
+        "Only sessions inside the current workspace are shown. This list comes from the provider, not the bot's local history.\n"
+        "Provider session browsing is not available for this agent.\n"
+        "Use Session History for bot-local checkpoints, or keep working from Bot Status."
     )
-    assert "Provider session browsing is not available for this agent." in provider_update.callback_query.message.edit_calls[-1][0]
+    assert find_inline_button(provider_markup, "Open Bot Status")
+    assert find_inline_button(provider_markup, "Back to History")
+
+
+def test_provider_sessions_empty_state_offers_refresh_and_status_recovery():
+    from talk2agent.bots.telegram_bot import BUTTON_SESSION_HISTORY, TelegramUiState, handle_callback_query, handle_text
+
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={
+            None: SimpleNamespace(entries=tuple(), next_cursor=None, supported=True),
+        },
+    )
+    ui_state = TelegramUiState()
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
+    run(handle_callback_query(provider_update, None, services, ui_state))
+
+    provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
+    assert provider_text == (
+        "Provider sessions for Claude Code in Default Workspace\n"
+        "Only sessions inside the current workspace are shown. This list comes from the provider, not the bot's local history.\n"
+        "No provider sessions found.\n"
+        "Start or reuse a live session, then refresh here if the provider persists reusable sessions."
+    )
+    assert find_inline_button(provider_markup, "Refresh")
+    assert find_inline_button(provider_markup, "Open Bot Status")
+    assert find_inline_button(provider_markup, "Back to History")
 
 
 def test_agent_commands_button_shows_discovered_commands_without_live_session():
@@ -10506,6 +10726,26 @@ def test_agent_commands_button_shows_discovered_commands_without_live_session():
     )
     assert "/status" in update.message.reply_calls[0]
     assert "args: model id" in update.message.reply_calls[0]
+
+
+def test_agent_commands_empty_state_offers_refresh_and_status_recovery():
+    from talk2agent.bots.telegram_bot import BUTTON_AGENT_COMMANDS, TelegramUiState, handle_text
+
+    update = FakeUpdate(user_id=123, text=BUTTON_AGENT_COMMANDS)
+    services, _ = make_services(session=FakeSession(available_commands=[]), peek_session=None)
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls[0] == (
+        "Agent commands for Claude Code in Default Workspace\n"
+        "Session: none (will start on first command)\n"
+        "No agent commands available.\n"
+        "Command discovery may still be loading, or the current agent may not expose any "
+        "slash commands."
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Refresh")
+    assert find_inline_button(markup, "Open Bot Status")
 
 
 def test_agent_commands_detail_can_open_without_live_session_and_back():
@@ -11056,6 +11296,25 @@ def test_workspace_file_preview_back_returns_to_parent_listing(tmp_path):
     )
 
 
+def test_workspace_listing_empty_directory_offers_search_and_status_recovery(tmp_path):
+    from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_FILES, TelegramUiState, handle_text
+
+    update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_FILES)
+    services, _ = make_services(workspace_path=str(tmp_path))
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls[0] == (
+        "Workspace files for Claude Code in Default Workspace\n"
+        "Path: .\n"
+        "[empty directory]\n"
+        "Search the workspace or open Bot Status to continue elsewhere."
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Workspace Search")
+    assert find_inline_button(markup, "Open Bot Status")
+
+
 def test_workspace_listing_can_add_visible_files_to_context_bundle(tmp_path):
     from talk2agent.bots.telegram_bot import (
         BUTTON_WORKSPACE_FILES,
@@ -11320,6 +11579,32 @@ def test_workspace_search_uses_next_text_message_and_shows_matches(tmp_path):
     assert find_inline_button(query_update.message.reply_markups[0], "Open Context Bundle")
 
 
+def test_workspace_search_no_matches_offers_recovery_buttons(tmp_path):
+    from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_SEARCH, TelegramUiState, handle_text
+
+    (tmp_path / "README.md").write_text("agent guide\n", encoding="utf-8")
+
+    ui_state = TelegramUiState()
+    start_update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_SEARCH)
+    services, _ = make_services(workspace_path=str(tmp_path))
+
+    run(handle_text(start_update, None, services, ui_state))
+
+    query_update = FakeUpdate(user_id=123, text="missing-token")
+    run(handle_text(query_update, None, services, ui_state))
+
+    assert query_update.message.reply_calls[0] == (
+        "Workspace search for Claude Code in Default Workspace\n"
+        "Query: missing-token\n"
+        "No matches found.\n"
+        "Try a broader query, search again, or open Workspace Files to browse manually."
+    )
+    markup = query_update.message.reply_markups[0]
+    assert find_inline_button(markup, "Search Again")
+    assert find_inline_button(markup, "Workspace Files")
+    assert find_inline_button(markup, "Open Bot Status")
+
+
 def test_workspace_search_open_file_and_back(tmp_path):
     from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_SEARCH, TelegramUiState, handle_callback_query, handle_text
 
@@ -11412,8 +11697,13 @@ def test_workspace_search_open_context_bundle_can_go_back_to_search(tmp_path):
     bundle_text, bundle_markup = bundle_update.callback_query.message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first."
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(bundle_markup, "Workspace Files")
+    assert find_inline_button(bundle_markup, "Workspace Search")
+    assert find_inline_button(bundle_markup, "Workspace Changes")
     back_button = find_inline_button(bundle_markup, "Back to Search")
 
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=bundle_update.callback_query.message)
@@ -11734,8 +12024,13 @@ def test_workspace_file_preview_open_context_bundle_can_go_back_to_file(tmp_path
     bundle_text, bundle_markup = bundle_update.callback_query.message.edit_calls[-1]
     assert bundle_text == (
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first."
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(bundle_markup, "Workspace Files")
+    assert find_inline_button(bundle_markup, "Workspace Search")
+    assert find_inline_button(bundle_markup, "Workspace Changes")
     back_button = find_inline_button(bundle_markup, "Back to File")
 
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=bundle_update.callback_query.message)
@@ -11805,8 +12100,15 @@ def test_context_bundle_button_shows_empty_bundle():
 
     assert update.message.reply_calls == [
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first."
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     ]
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Workspace Files")
+    assert find_inline_button(markup, "Workspace Search")
+    assert find_inline_button(markup, "Workspace Changes")
+    assert find_inline_button(markup, "Open Bot Status")
 
 
 def test_workspace_previews_can_add_context_and_bundle_can_run_agent_turn(monkeypatch, tmp_path):
@@ -12182,6 +12484,37 @@ def test_workspace_changes_button_shows_git_status(monkeypatch):
     assert find_inline_button(update.message.reply_markups[0], "Start Bundle Chat With Changes")
     assert find_inline_button(update.message.reply_markups[0], "Add All Changes to Context")
     assert find_inline_button(update.message.reply_markups[0], "Open Context Bundle")
+
+
+def test_workspace_changes_not_git_repo_offers_workspace_recovery_buttons(monkeypatch):
+    from talk2agent.bots import telegram_bot
+    from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_CHANGES, TelegramUiState, handle_text
+    from talk2agent.workspace_git import WorkspaceGitStatus
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "read_workspace_git_status",
+        lambda _path: WorkspaceGitStatus(
+            is_git_repo=False,
+            branch_line=None,
+            entries=(),
+        ),
+    )
+
+    update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_CHANGES)
+    services, _ = make_services()
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    assert update.message.reply_calls[0] == (
+        "Workspace changes for Claude Code in Default Workspace\n"
+        "Current workspace is not a Git repository.\n"
+        "Use Workspace Files or Workspace Search when you still need local project context."
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Workspace Files")
+    assert find_inline_button(markup, "Workspace Search")
+    assert find_inline_button(markup, "Open Bot Status")
 
 
 def test_workspace_changes_open_diff_and_back(monkeypatch):
@@ -12803,11 +13136,17 @@ def test_context_bundle_can_remove_and_clear_items():
     clear_update = FakeCallbackUpdate(123, clear_button.callback_data, message=remove_update.callback_query.message)
     run(handle_callback_query(clear_update, None, services, ui_state))
 
-    assert clear_update.callback_query.message.edit_calls[-1] == (
+    cleared_text, cleared_markup = clear_update.callback_query.message.edit_calls[-1]
+    assert cleared_text == (
         "Cleared context bundle.\nContext bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first.",
-        None,
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(cleared_markup, "Workspace Files")
+    assert find_inline_button(cleared_markup, "Workspace Search")
+    assert find_inline_button(cleared_markup, "Workspace Changes")
+    assert find_inline_button(cleared_markup, "Open Bot Status")
 
 
 def test_context_bundle_can_open_file_preview_and_back(tmp_path):
@@ -13048,12 +13387,18 @@ def test_context_bundle_clear_turns_off_bundle_chat():
     clear_update = FakeCallbackUpdate(123, clear_button.callback_data, message=start_update.callback_query.message)
     run(handle_callback_query(clear_update, None, services, ui_state))
 
-    assert clear_update.callback_query.message.edit_calls[-1] == (
+    cleared_text, cleared_markup = clear_update.callback_query.message.edit_calls[-1]
+    assert cleared_text == (
         "Cleared context bundle. Bundle chat was turned off.\n"
         "Context bundle for Claude Code in Default Workspace\n"
-        "Context bundle is empty. Add files or changes first.",
-        None,
+        "Context bundle is empty. Add files or changes first.\n"
+        "Add files from Workspace Files or Search, or add current Git changes, then come "
+        "back here to reuse that context."
     )
+    assert find_inline_button(cleared_markup, "Workspace Files")
+    assert find_inline_button(cleared_markup, "Workspace Search")
+    assert find_inline_button(cleared_markup, "Workspace Changes")
+    assert find_inline_button(cleared_markup, "Open Bot Status")
 
 
 def test_model_mode_button_shows_direct_choices_and_current_is_noop():
@@ -13065,6 +13410,12 @@ def test_model_mode_button_shows_direct_choices_and_current_is_noop():
 
     run(handle_text(update, None, services, ui_state))
 
+    assert update.message.reply_calls[0].startswith(
+        "Model / Mode for Claude Code in Default Workspace\nSession: session-123"
+    )
+    assert "Current setup: model=GPT-5.4, mode=xhigh" in update.message.reply_calls[0]
+    assert "Model choices:" in update.message.reply_calls[0]
+    assert "Tap Model: ... to switch now, or Open Model N for details." in update.message.reply_calls[0]
     markup = update.message.reply_markups[0]
     assert find_inline_button(markup, "Current Model: GPT-5.4")
     assert find_inline_button(markup, "Model: GPT-5.4 Mini")
@@ -13083,6 +13434,50 @@ def test_model_mode_button_shows_direct_choices_and_current_is_noop():
     assert callback_update.callback_query.message.edit_calls == []
 
 
+@pytest.mark.parametrize(
+    ("missing_kind", "expected_line", "present_button", "missing_button"),
+    [
+        (
+            "mode",
+            "Mode controls are not exposed in this session. Use the available model controls "
+            "below, or keep chatting normally if you do not need to change it.",
+            "Model: GPT-5.4 Mini",
+            "Mode: low",
+        ),
+        (
+            "model",
+            "Model controls are not exposed in this session. Use the available mode controls "
+            "below, or keep chatting normally if you do not need to change it.",
+            "Mode: low",
+            "Model: GPT-5.4 Mini",
+        ),
+    ],
+)
+def test_model_mode_view_explains_when_only_one_control_is_available(
+    missing_kind,
+    expected_line,
+    present_button,
+    missing_button,
+):
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, _ = make_services()
+    services.final_session.selections[missing_kind] = None
+
+    run(handle_text(update, None, services, ui_state))
+
+    assert expected_line in update.message.reply_calls[0]
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, present_button)
+    assert all(
+        button.text != missing_button
+        for row in markup.inline_keyboard
+        for button in row
+    )
+
+
 def test_model_mode_button_starts_session_when_none_exists():
     from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_text
 
@@ -13099,8 +13494,11 @@ def test_model_mode_button_starts_session_when_none_exists():
     assert store.get_or_create_calls == [123]
     assert store.record_session_usage_calls == [(123, "session-123", None)]
     assert update.message.reply_calls[0].startswith(
-        "Started session for model / mode controls.\nSession: session-123"
+        "Started session for model / mode controls.\n"
+        "Model / Mode for Claude Code in Default Workspace\n"
+        "Session: session-123"
     )
+    assert "Current setup: model=GPT-5.4, mode=xhigh" in update.message.reply_calls[0]
     assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
 
@@ -13121,7 +13519,9 @@ def test_model_mode_selection_updates_choice_and_edits_menu():
     assert services.final_session.set_selection_calls == [("model", "gpt-5.4-mini")]
     assert store.record_session_usage_calls == [(123, "session-123", None)]
     assert callback_update.callback_query.message.edit_calls[-1][0].startswith(
-        "Updated model to GPT-5.4 Mini.\nSession: session-123"
+        "Updated model to GPT-5.4 Mini.\n"
+        "Model / Mode for Claude Code in Default Workspace\n"
+        "Session: session-123"
     )
 
 
@@ -13278,6 +13678,7 @@ def test_model_mode_selection_retry_replays_last_turn():
     assert final_text.startswith(
         "Updated model to GPT-5.4 Mini.\n"
         "Retried last turn with the updated setting.\n"
+        "Model / Mode for Claude Code in Default Workspace\n"
         "Session: session-123"
     )
     assert find_inline_button(final_markup, "Current Model: GPT-5.4 Mini")
@@ -13317,6 +13718,7 @@ def test_model_mode_selection_retry_prepare_failure_restores_menu_with_failure_n
     assert final_text.startswith(
         "Updated model to GPT-5.4 Mini.\n"
         "Request failed. Try again, use /start, or open Bot Status.\n"
+        "Model / Mode for Claude Code in Default Workspace\n"
         "Session: session-123"
     )
     assert "Retried last turn with the updated setting." not in final_text
@@ -13431,6 +13833,11 @@ def test_model_mode_choice_detail_can_open_and_back():
     assert "Value: gpt-5.4-mini" in detail_text
     assert "Description:" in detail_text
     assert "Smaller GPT-5.4 profile for lighter work." in detail_text
+    assert "Effect: this updates the current live session in place." in detail_text
+    assert (
+        "Recommended next step: tap Use Model to switch now, or go back to compare another choice."
+        in detail_text
+    )
     assert find_inline_button(detail_markup, "Use Model")
 
     back_button = find_inline_button(detail_markup, "Back to Model / Mode")
@@ -13438,7 +13845,9 @@ def test_model_mode_choice_detail_can_open_and_back():
     run(handle_callback_query(back_update, None, services, ui_state))
 
     restored_text, restored_markup = callback_message.edit_calls[-1]
-    assert restored_text.startswith("Session: session-123")
+    assert restored_text.startswith(
+        "Model / Mode for Claude Code in Default Workspace\nSession: session-123"
+    )
     assert find_inline_button(restored_markup, "Open Model 2")
 
 
@@ -13653,6 +14062,52 @@ def test_failed_text_turn_recovery_retry_replays_last_turn():
     assert session.prompt_items[0][0].text == "hello"
     assert message.reply_calls[-1] == "hello world"
     assert store.record_session_usage_calls == [(123, "session-123", "hello")]
+
+
+def test_failed_text_turn_recovery_can_run_last_request_directly():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _run_agent_text_turn_on_message,
+        handle_callback_query,
+    )
+
+    application = FakeApplication()
+    session = FakeSession(error=RuntimeError("boom"), raise_before_stream=True)
+    message = FakeIncomingMessage("hello")
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the sync check")
+    services, store = make_services(provider="codex", session=session)
+
+    run(
+        _run_agent_text_turn_on_message(
+            message,
+            123,
+            services,
+            ui_state,
+            "hello",
+            application=application,
+        )
+    )
+
+    recovery_markup = message.reply_markups[0]
+    assert message.reply_calls[0].startswith(
+        "Request failed. The current live session for Codex in Default Workspace was closed."
+    )
+    assert "Last request source: plain text" in message.reply_calls[0]
+    run_button = find_inline_button(recovery_markup, "Run Last Request")
+
+    session.error = None
+    session.raise_before_stream = False
+    run_update = FakeCallbackUpdate(123, run_button.callback_data, message=message)
+    run(handle_callback_query(run_update, make_context(application=application), services, ui_state))
+
+    assert store.invalidate_calls == [(123, session)]
+    assert session.prompts == ["hello", "Re-run the sync check"]
+    assert message.reply_calls[-1] == "hello world"
+    assert store.record_session_usage_calls == [(123, "session-123", "Re-run the sync check")]
+    last_request = ui_state.get_last_request(123, "default")
+    assert last_request is not None
+    assert last_request.source_summary == "last request replay"
 
 
 def test_failed_text_turn_recovery_fork_replays_last_turn_in_new_session():
