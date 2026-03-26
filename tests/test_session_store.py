@@ -1,23 +1,31 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 
+from talk2agent.session_history import SessionHistoryStore
 from talk2agent.session_store import RetiredSessionStoreError, SessionStore
 
 
 class FakeSession:
-    def __init__(self, user_id, last_used_at, close_error=None):
+    def __init__(self, user_id, last_used_at, close_error=None, session_id=None):
         self.user_id = user_id
         self.last_used_at = last_used_at
         self.close_error = close_error
+        self.session_id = session_id or f"session-{user_id}-{int(last_used_at)}"
         self.closed = False
         self.close_calls = 0
+        self.load_calls = []
 
     async def close(self):
         self.closed = True
         self.close_calls += 1
         if self.close_error is not None:
             raise self.close_error
+
+    async def load_session(self, session_id, *, prefer_resume):
+        self.session_id = session_id
+        self.load_calls.append((session_id, prefer_resume))
 
 
 class FakeSessionFactory:
@@ -34,6 +42,7 @@ class FakeSessionFactory:
             user_id,
             self.last_used_at_by_user_id.get(user_id, 0.0),
             close_error=self.close_error_by_user_id.get(user_id),
+            session_id=f"session-{user_id}-{len(self.created_user_ids) + 1}",
         )
         original_close = session.close
 
@@ -406,3 +415,196 @@ def test_slow_reset_for_one_user_does_not_block_other_user():
     assert other_user_session.user_id == 2
     assert reset_session.user_id == 1
     assert factory.created_user_ids == [1, 1, 2]
+
+
+def test_activate_history_session_replaces_current_live_session():
+    factory = FakeSessionFactory()
+    store = SessionStore(session_factory=factory, idle_timeout_minutes=30)
+
+    async def scenario():
+        original = await store.get_or_create(123)
+        replacement = await store.activate_history_session(123, "historic-session")
+        current = await store.peek(123)
+        return original, replacement, current
+
+    original, replacement, current = asyncio.run(scenario())
+
+    assert original.closed is True
+    assert replacement is current
+    assert replacement.load_calls == [("historic-session", True)]
+    assert replacement.session_id == "historic-session"
+
+
+def test_record_session_usage_persists_local_history(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        session = await store.get_or_create(123)
+        await store.record_session_usage(123, session, title_hint="hello world from telegram")
+        return await store.list_history(123)
+
+    entries = asyncio.run(scenario())
+
+    assert len(entries) == 1
+    assert entries[0].provider == "codex"
+    assert entries[0].telegram_user_id == 123
+    assert entries[0].session_id.startswith("session-123-")
+    assert entries[0].title == "hello world from telegram"
+
+
+def test_delete_history_removes_local_entry_and_active_session(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        session = await store.get_or_create(123)
+        await store.record_session_usage(123, session, title_hint="first")
+        deleted_active = await store.delete_history(123, session.session_id)
+        history = await store.list_history(123)
+        current = await store.peek(123)
+        return deleted_active, history, current, session
+
+    deleted_active, history, current, session = asyncio.run(scenario())
+
+    assert deleted_active is True
+    assert history == []
+    assert current is None
+    assert session.closed is True
+
+
+def test_history_is_scoped_to_current_workspace(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    first_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-a",
+        history_store=history_store,
+    )
+    second_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-b",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        first = await first_store.get_or_create(123)
+        second = await second_store.get_or_create(123)
+        await first_store.record_session_usage(123, first, title_hint="first")
+        await second_store.record_session_usage(123, second, title_hint="second")
+        first_entries = await first_store.list_history(123)
+        second_entries = await second_store.list_history(123)
+        return first_entries, second_entries
+
+    first_entries, second_entries = asyncio.run(scenario())
+
+    assert [entry.title for entry in first_entries] == ["first"]
+    assert [entry.title for entry in second_entries] == ["second"]
+
+
+def test_rename_history_updates_only_current_workspace_entry(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    first_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-a",
+        history_store=history_store,
+    )
+    second_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-b",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        first = await first_store.get_or_create(123)
+        second = await second_store.get_or_create(123)
+        await first_store.record_session_usage(123, first, title_hint="first")
+        await second_store.record_session_usage(123, second, title_hint="second")
+        renamed = await first_store.rename_history(123, first.session_id, "renamed title")
+        first_entries = await first_store.list_history(123)
+        second_entries = await second_store.list_history(123)
+        return renamed, first_entries, second_entries
+
+    renamed, first_entries, second_entries = asyncio.run(scenario())
+
+    assert renamed.title == "renamed title"
+    assert [entry.title for entry in first_entries] == ["renamed title"]
+    assert [entry.title for entry in second_entries] == ["second"]
+
+
+def test_activate_history_session_rejects_session_from_other_workspace(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    first_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-a",
+        history_store=history_store,
+    )
+    second_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-b",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        first = await first_store.get_or_create(123)
+        await first_store.record_session_usage(123, first, title_hint="first")
+        with pytest.raises(KeyError):
+            await second_store.activate_history_session(123, first.session_id)
+
+    asyncio.run(scenario())
+
+
+def test_activate_provider_session_imports_external_session_into_local_history(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        session = await store.activate_provider_session(
+            123,
+            "desktop-session",
+            title_hint="Desktop Flow",
+        )
+        history = await store.list_history(123)
+        return session, history
+
+    session, history = asyncio.run(scenario())
+
+    assert session.load_calls == [("desktop-session", True)]
+    assert session.session_id == "desktop-session"
+    assert [entry.session_id for entry in history] == ["desktop-session"]
+    assert history[0].title == "Desktop Flow"

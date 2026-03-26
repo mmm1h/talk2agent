@@ -5,10 +5,10 @@
 
 ## 这个仓库是什么
 
-- `talk2agent` 是一个自托管的 Telegram 轮询机器人，会把已授权用户的纯文本消息转发给本地 ACP 兼容智能体运行时。
-- 进程同一时刻只维护一个活跃 Provider：`claude`、`codex` 或 `gemini`。
-- 每个 Telegram 用户会在当前 Provider 运行时中拥有一个长生命周期 ACP 会话。
-- Provider 切换是全局的，仅管理员可用，并且会跨重启持久化。
+- `talk2agent` 是一个自托管的 Telegram 轮询机器人，会把已授权用户的纯文本、图片、语音、音频和文档消息转发给本地 ACP 兼容智能体运行时。
+- 进程同一时刻只维护一个活跃 Provider：`claude`、`codex` 或 `gemini`，以及一个全局 Workspace。
+- 每个 Telegram 用户会在当前 Provider + Workspace 运行时中拥有一个长生命周期 ACP 会话。
+- Provider / Workspace 切换是全局的，仅管理员可用，并且会跨重启持久化。
 
 ## 从这里开始
 
@@ -31,16 +31,17 @@
 
 - `talk2agent/cli.py`：`init` 和 `start` 入口
 - `talk2agent/config.py`：YAML 配置结构、默认值和校验
-- `talk2agent/app.py`：服务装配、运行时快照、Provider 切换
-- `talk2agent/provider_runtime.py`：Provider 注册表和持久化 Provider 状态
+- `talk2agent/app.py`：服务装配、运行时快照、Provider / Workspace 切换
+- `talk2agent/provider_runtime.py`：Provider 注册表和持久化运行时状态
 - `talk2agent/session_store.py`：按用户管理会话、失效、空闲清理和退休机制
 - `talk2agent/acp/`：ACP 协议边界
 - `talk2agent/bots/`：Telegram 传输边界
+- `talk2agent/workspace_inbox.py`：将 Telegram 附件安全落到当前 workspace 的受控 inbox
 
 ## 按任务阅读
 
 - 启动或运维流程：`README.md` -> `talk2agent/config.py` -> `talk2agent/app.py`
-- Provider 切换：`ARCHITECTURE.md` -> `talk2agent/provider_runtime.py` -> `talk2agent/app.py` -> `tests/test_app.py`
+- Provider / Workspace 切换：`ARCHITECTURE.md` -> `talk2agent/provider_runtime.py` -> `talk2agent/app.py` -> `tests/test_app.py`
 - Telegram 命令行为：`talk2agent/bots/telegram_bot.py` -> `talk2agent/bots/telegram_stream.py` -> `tests/test_telegram_bot.py`
 - 会话生命周期：`talk2agent/session_store.py` -> `talk2agent/acp/agent_session.py` -> `tests/test_session_store.py`
 - 历史设计背景：`docs/design-docs/index.md`
@@ -52,6 +53,7 @@
 - 修改运行时切换行为：`talk2agent/app.py` -> `talk2agent/session_store.py` -> `tests/test_app.py`
 - 修改 Telegram 命令或回复：`talk2agent/bots/telegram_bot.py` -> `tests/test_telegram_bot.py`
 - 修改流式文本行为：`talk2agent/bots/telegram_stream.py` -> `tests/test_telegram_stream.py`
+- 修改 Telegram 附件落盘或 inbox 降级：`talk2agent/workspace_inbox.py` -> `talk2agent/bots/telegram_bot.py` -> 对应测试
 - 修改 ACP 会话行为：`talk2agent/acp/agent_session.py` -> `tests/test_agent_session.py`
 - 修改配置结构：`talk2agent/config.py` -> `README.md` -> `tests/test_config.py`
 
@@ -77,7 +79,7 @@
 
 - 不要把 Telegram 格式化或占位消息编辑逻辑混进 `talk2agent/acp/`。
 - 不要让 Provider 命令选择逻辑泄漏到 bot handler 中。
-- 不要在只读检查路径里创建会话，例如 `/status`。
+- 不要在只读检查路径里创建会话，例如 `/debug_status`。
 - 已经有 `docs/` 承载位置时，不要再把设计说明或执行计划扔回仓库根目录。
 
 ## 系统不变量
@@ -85,11 +87,11 @@
 - Telegram 轮询是唯一受支持的传输方式。
 - ACP 是唯一受支持的后端协议。
 - `permissions.mode` 固定为 `auto_approve`。
-- `SessionStore` 为每个 Telegram 用户在当前活跃 Provider 运行时里维护一个活会话。
-- `/status` 必须保持只读，不能创建新会话。
-- `/provider` 切换的是整个运行时，而不是某个用户的单独会话。
+- `SessionStore` 为每个 Telegram 用户在当前活跃 Provider + Workspace 运行时里维护一个活会话。
+- `/debug_status` 必须保持只读，不能创建新会话。
+- `Switch Agent` / `Switch Workspace` 切换的是整个运行时，而不是某个用户的单独会话。
 - Provider 命令解析必须来自 `talk2agent/provider_runtime.py`，而不是手写运行命令字符串。
-- Provider 切换中的持久化失败必须回滚运行时状态。
+- Provider / Workspace 切换中的持久化失败必须回滚运行时状态。
 
 ## 快速验证
 

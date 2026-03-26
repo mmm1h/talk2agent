@@ -12,6 +12,7 @@
 
 - [completed/2026-03-20-telegram-bot-mvp.md](completed/2026-03-20-telegram-bot-mvp.md)：Telegram + ACP 机器人最初的 MVP 构建计划。
 - [completed/2026-03-20-multi-provider-acp-telegram-bot.md](completed/2026-03-20-multi-provider-acp-telegram-bot.md)：后续引入多 Provider 切换和运行时 Provider 持久化的实现计划。
+- [completed/2026-03-20-telegram-agent-controls.md](completed/2026-03-20-telegram-agent-controls.md)：按钮化 agent 控制、session history、restart 与 model/mode 切换的实现计划。
 
 ## 约定
 

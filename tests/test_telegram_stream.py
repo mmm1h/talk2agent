@@ -18,14 +18,18 @@ class FakeClock:
 
 class FakeMessage:
     def __init__(self):
-        self.edit_calls = []
         self.reply_calls = []
+        self.reply_markups = []
+        self.draft_calls = []
 
-    async def edit_text(self, text):
-        self.edit_calls.append(text)
-
-    async def reply_text(self, text):
+    async def reply_text(self, text, reply_markup=None):
         self.reply_calls.append(text)
+        self.reply_markups.append(reply_markup)
+        return FakeMessage()
+
+    async def reply_text_draft(self, draft_id, text):
+        self.draft_calls.append((draft_id, text))
+        return True
 
 
 def test_render_update_text_returns_agent_message_text():
@@ -67,18 +71,20 @@ def test_split_telegram_text_chunks_long_text_to_limit():
     assert split_telegram_text("abcdefghij", limit=4) == ["abcd", "efgh", "ij"]
 
 
-def test_on_update_edits_placeholder_when_interval_elapsed():
+def test_start_and_updates_send_draft_messages():
     from talk2agent.bots.telegram_stream import TelegramTurnStream
 
     clock = FakeClock()
     message = FakeMessage()
     stream = TelegramTurnStream(
-        placeholder=message,
+        message=message,
         clock=clock,
         edit_interval=1.0,
+        draft_id=99,
     )
 
     async def scenario():
+        await stream.start()
         clock.now = 0.2
         await stream.on_update(update_agent_message_text("hello "))
         clock.now = 1.3
@@ -86,7 +92,7 @@ def test_on_update_edits_placeholder_when_interval_elapsed():
 
     run(scenario())
 
-    assert message.edit_calls == ["hello world"]
+    assert message.draft_calls == [(99, "Thinking..."), (99, "hello world")]
     assert message.reply_calls == []
 
 
@@ -96,10 +102,11 @@ def test_on_update_keeps_preview_moving_after_text_limit_is_reached():
     clock = FakeClock()
     message = FakeMessage()
     stream = TelegramTurnStream(
-        placeholder=message,
+        message=message,
         clock=clock,
         edit_interval=0.0,
         text_limit=4,
+        draft_id=99,
     )
 
     async def scenario():
@@ -109,17 +116,15 @@ def test_on_update_keeps_preview_moving_after_text_limit_is_reached():
 
     run(scenario())
 
-    assert message.edit_calls == ["abcd", "cdef", "efgh"]
+    assert message.draft_calls == [(99, "abcd"), (99, "cdef"), (99, "efgh")]
 
 
 def test_finish_sends_overflow_chunks_with_reply_text():
     from talk2agent.bots.telegram_stream import TelegramTurnStream
 
-    clock = FakeClock()
     message = FakeMessage()
     stream = TelegramTurnStream(
-        placeholder=message,
-        clock=clock,
+        message=message,
         edit_interval=60.0,
         text_limit=4,
     )
@@ -130,28 +135,41 @@ def test_finish_sends_overflow_chunks_with_reply_text():
 
     run(scenario())
 
-    assert message.edit_calls == ["abcd"]
-    assert message.reply_calls == ["efgh", "ij"]
+    assert message.reply_calls == ["abcd", "efgh", "ij"]
 
 
 def test_finish_uses_empty_response_fallback_when_no_text_buffered():
     from talk2agent.bots.telegram_stream import TelegramTurnStream
 
     message = FakeMessage()
-    stream = TelegramTurnStream(placeholder=message)
+    stream = TelegramTurnStream(message=message)
 
     run(stream.finish(stop_reason="completed"))
 
-    assert message.edit_calls == ["[empty response] stop_reason=completed"]
-    assert message.reply_calls == []
+    assert message.reply_calls == ["[empty response] stop_reason=completed"]
 
 
-def test_fail_replaces_placeholder_with_error_text():
+def test_fail_sends_error_message():
     from talk2agent.bots.telegram_stream import TelegramTurnStream
 
     message = FakeMessage()
-    stream = TelegramTurnStream(placeholder=message)
+    stream = TelegramTurnStream(message=message)
 
     run(stream.fail("Request failed."))
 
-    assert message.edit_calls == ["Request failed."]
+    assert message.reply_calls == ["Request failed."]
+
+
+def test_fail_sends_error_message_with_reply_markup():
+    from telegram import InlineKeyboardMarkup
+
+    from talk2agent.bots.telegram_stream import TelegramTurnStream
+
+    message = FakeMessage()
+    stream = TelegramTurnStream(message=message)
+    markup = InlineKeyboardMarkup([])
+
+    run(stream.fail("Request failed.", reply_markup=markup))
+
+    assert message.reply_calls == ["Request failed."]
+    assert message.reply_markups == [markup]

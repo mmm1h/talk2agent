@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import time
 
 from acp.schema import AgentMessageChunk, ToolCallProgress, ToolCallStart
@@ -32,19 +33,26 @@ def split_telegram_text(text, limit=4000):
 class TelegramTurnStream:
     def __init__(
         self,
-        placeholder,
+        message,
         *,
         clock=None,
         edit_interval=0.75,
         text_limit=4000,
+        draft_id: int | None = None,
     ):
-        self._placeholder = placeholder
+        self._message = message
         self._clock = time.monotonic if clock is None else clock
         self._edit_interval = edit_interval
         self._text_limit = text_limit
+        self._draft_id = draft_id or (secrets.randbelow(2_147_483_647) + 1)
         self._fragments = []
         self._last_edit_at = self._clock()
-        self._last_placeholder_text = None
+        self._last_draft_text = None
+        self._draft_started = False
+        self._draft_enabled = True
+
+    async def start(self):
+        await self._send_draft("Thinking...")
 
     async def on_update(self, update):
         fragment = render_update_text(update)
@@ -55,7 +63,7 @@ class TelegramTurnStream:
         if self._clock() - self._last_edit_at < self._edit_interval:
             return
 
-        await self._edit_placeholder(self._preview_text())
+        await self._send_draft(self._preview_text())
 
     async def finish(self, stop_reason):
         text = self._full_text()
@@ -63,15 +71,11 @@ class TelegramTurnStream:
             text = f"[empty response] stop_reason={stop_reason}"
 
         chunks = split_telegram_text(text, limit=self._text_limit)
-        await self._edit_placeholder(chunks[0])
+        for chunk in chunks:
+            await self._message.reply_text(chunk)
 
-        for chunk in chunks[1:]:
-            await self._placeholder.reply_text(chunk)
-
-    async def fail(self, text):
-        await self._placeholder.edit_text(text)
-        self._last_placeholder_text = text
-        self._last_edit_at = self._clock()
+    async def fail(self, text, reply_markup=None):
+        await self._message.reply_text(text, reply_markup=reply_markup)
 
     def _full_text(self):
         return "".join(self._fragments)
@@ -82,10 +86,16 @@ class TelegramTurnStream:
             return text
         return text[-self._text_limit :]
 
-    async def _edit_placeholder(self, text):
-        if text == self._last_placeholder_text:
+    async def _send_draft(self, text):
+        if not self._draft_enabled or text == self._last_draft_text:
             return
 
-        await self._placeholder.edit_text(text)
-        self._last_placeholder_text = text
+        try:
+            await self._message.reply_text_draft(self._draft_id, text)
+        except Exception:
+            self._draft_enabled = False
+            return
+
+        self._draft_started = True
+        self._last_draft_text = text
         self._last_edit_at = self._clock()
