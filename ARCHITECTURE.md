@@ -1,13 +1,12 @@
 # ARCHITECTURE.md
 
-这份文档提供系统的顶层地图。
-它描述领域边界与包分层，而不是逐行解释实现细节。
+这份文档只描述系统地图、领域边界和关键不变量。
+它不承担操作者说明、按钮清单、手工验收步骤或逐功能设计细节。
 
 ## 系统概览
 
 `talk2agent` 是一个位于单一活跃 ACP Provider 运行时之前的 Telegram 轮询机器人。
-已授权的 Telegram 用户发送纯文本、图片、语音、音频或文档提示词，机器人把请求路由到 Provider 支撑的 ACP 会话中，再通过 Telegram Draft API 把流式输出回传到 Telegram。
-当 Provider 通过 ACP client 侧能力请求本地文件或终端时，bot 也会在当前 workspace 内提供受控的文件读写与命令执行能力。
+已授权用户通过 Telegram 发送文本或附件，bot 将其路由到当前 Provider + Workspace 上下文中的 ACP 会话，再把流式结果回传到 Telegram。
 
 当前进程支持三个 Provider：
 
@@ -15,184 +14,59 @@
 - `codex`
 - `gemini`
 
-同一时刻只能有一个 Provider 处于活跃状态。
-同一时刻也只会有一个全局 Workspace 处于活跃状态。
-配置中的管理员可以通过按钮式 `Switch Agent` 和 `Switch Workspace` 对整个进程做全局切换。
+同一时刻只有一个活跃 Provider。
+同一时刻也只有一个活跃 Workspace。
+管理员可以执行全局 `Switch Agent` 和 `Switch Workspace`，并把结果跨重启持久化。
 
 ## 分层地图
 
 | 分层 | 模块 | 职责 | 不应承担 |
 | --- | --- | --- | --- |
 | 入口层 | `talk2agent/__main__.py`、`talk2agent/cli.py` | 解析命令并启动应用 | Telegram 逻辑、ACP 协议细节 |
-| 应用编排层 | `talk2agent/app.py` | 构建服务、解析启动 Provider / Workspace、切换运行时、优雅关闭 | 消息格式化、YAML 解析细节 |
-| 传输适配层 | `talk2agent/bots/telegram_bot.py`、`talk2agent/bots/telegram_stream.py` | Telegram 命令、reply keyboard / inline button、鉴权检查、消息流式输出 | Provider 注册表、ACP 初始化 |
-| 运行时策略层 | `talk2agent/config.py`、`talk2agent/provider_runtime.py` | 配置结构、校验、Provider Profile、Workspace 白名单、workspace 级 MCP server 配置、持久化运行时状态 | 会话归属、Telegram Handler |
-| 会话领域层 | `talk2agent/session_store.py`、`talk2agent/session_history.py` | 按用户管理 live session、本地 session history、按 workspace 过滤、重置、失效、空闲清理、退休 | Telegram 专属行为、Provider 持久化 |
-| 工作区只读视图层 | `talk2agent/workspace_files.py`、`talk2agent/workspace_git.py` | 在当前白名单 workspace 内做安全路径解析、目录列举、全文搜索、Git 变更读取和文本预览 | Telegram callback、Provider 路由 |
-| 工作区附件入口层 | `talk2agent/workspace_inbox.py` | 将 Telegram 附件安全写入当前 workspace 的受控 inbox，供 agent 回退读取 | Telegram handler、Provider 选择逻辑 |
-| ACP 边界层 | `talk2agent/acp/agent_session.py`、`talk2agent/acp/bot_client.py`、`talk2agent/acp/mcp_servers.py`、`talk2agent/acp/permission.py` | ACP 子进程生命周期、会话创建、Prompt 分发、MCP server 透传、权限策略 | Telegram API 细节、Provider 切换策略 |
+| 应用编排层 | `talk2agent/app.py` | 构建服务、切换运行时、优雅关闭 | Telegram 格式化、配置解析细节 |
+| 传输适配层 | `talk2agent/bots/telegram_bot.py`、`talk2agent/bots/telegram_stream.py` | Telegram Handler、鉴权、流式消息输出 | Provider 注册表、ACP 初始化细节 |
+| 运行时策略层 | `talk2agent/config.py`、`talk2agent/provider_runtime.py` | 配置结构、Provider Profile、Workspace 白名单、运行时持久化 | Telegram 回调逻辑、会话归属 |
+| 会话领域层 | `talk2agent/session_store.py`、`talk2agent/session_history.py` | live session、本地 history、退休与失效语义 | Telegram 专属行为、Provider 持久化 |
+| 工作区视图层 | `talk2agent/workspace_files.py`、`talk2agent/workspace_git.py`、`talk2agent/workspace_inbox.py` | 只读浏览、搜索、Git 变更读取、附件安全落盘 | Telegram callback、Provider 选择逻辑 |
+| ACP 边界层 | `talk2agent/acp/` | ACP 子进程生命周期、会话控制、prompt 转换、client bridge | Telegram API 细节、全局切换策略 |
 
-## 包依赖方向
+## 依赖方向
 
-期望的依赖方向是：
+期望依赖方向：
 
 `cli/config` -> `app` -> `bots` 与 `session/domain` -> `acp`
 
-额外的辅助依赖路径：
+补充约束：
 
-- `app` 依赖 `provider_runtime.py` 来解析当前活跃 Provider。
-- `bots` 依赖 `AppServices`、`SessionStore` 和 `AgentSession` 的公开行为。
-- `tests/` 应该镜像这些模块边界，并与之保持一致。
+- `talk2agent/bots/` 保持为薄适配层。
+- `talk2agent/acp/` 是唯一了解 ACP 协议细节的区域。
+- Provider 命令解析和持久化 Provider 状态必须集中在 `talk2agent/provider_runtime.py`。
+- `tests/` 应镜像这些包边界。
 
-`talk2agent/bots/` 应保持为薄适配层。
-`talk2agent/acp/` 应继续作为唯一了解 ACP 协议细节的区域。
+## 核心流程
 
-## 主要运行流程
+### 启动
 
-### 启动流程
-
-1. `cli.py` 解析 `init` 或 `start`。
+1. `cli.py` 解析 `init`、`harness` 或 `start`。
 2. `config.py` 加载并校验 YAML 配置。
-3. `app.py` 根据持久化状态或配置默认值解析启动 Provider 与 Workspace，并取出当前 workspace 绑定的 MCP servers。
-4. `app.py` 构建一个 `RuntimeState`，其中包含活跃 Provider、Workspace 及其 `SessionStore`。
-5. `bots/telegram_bot.py` 把 Telegram Handlers 绑定到应用对象上。
+3. `app.py` 解析持久化运行时状态，构建当前 Provider + Workspace 的 `RuntimeState`。
+4. `telegram_bot.py` 将 Telegram Handlers 绑定到应用对象上。
 
-### 用户消息回合
+### 用户回合
 
-1. `telegram_bot.py` 先检查白名单授权。
-2. Handler 对当前运行时状态做一次快照。
-3. 活跃 `SessionStore` 会先清理空闲会话，再返回当前用户的会话。
-4. `telegram_bot.py` 会把文本、图片、语音、音频、视频和文档输入归一化成 ACP prompt item；图片会进入 `image` block，语音/音频会进入 `audio` block，视频和其他二进制附件会进入 resource block 或受控 inbox 降级，文档则按 MIME 类型映射到 image/resource/audio block。
-5. 如果 Telegram 连续投递同一 `media_group_id` 的多附件，`telegram_bot.py` 会先做短暂收敛，再把整组附件合并为一次 ACP 回合。
-6. `acp/agent_session.py` 在需要时懒启动 ACP 子进程和 ACP 会话。
-7. 当运行环境支持后台 task 时，实际 ACP turn 会在后台执行；bot 会在 UI 状态里登记当前 active turn，供状态页展示与停止。
-8. ACP 更新流被转发到 `TelegramTurnStream`。
-9. `telegram_stream.py` 负责驱动 Telegram Draft 流，并在结束时发出最终普通消息；若回合被取消且没有文本输出，则会返回 `Turn cancelled.`。
+1. `telegram_bot.py` 做鉴权并抓取一次运行时快照。
+2. `SessionStore` 返回当前用户在当前运行时中的 live session。
+3. 传输层把文本和附件归一化为 ACP prompt item，必要时写入 workspace inbox。
+4. `acp/agent_session.py` 负责会话控制、prompt 分发和更新流消费。
+5. `telegram_stream.py` 把更新折叠为适合 Telegram 的流式输出。
 
-### 按钮控制流程
+### 全局切换
 
-1. `telegram_bot.py` 为白名单用户提供常驻 reply keyboard。
-2. `Bot Status` 及其 `Session Info` / `Workspace Runtime` / `Usage` / `Last Request` / `Last Turn` / `Agent Plan` / `Tool Activity` 子视图、`Switch Agent`、`Switch Workspace`、`Session History`、`Agent Commands`、`Workspace Files`、`Workspace Search`、`Workspace Changes`、`Context Bundle`、`Model / Mode`、`Fork Session` 等需要选择的动作通过 inline button + callback query 完成；其中 `Model / Mode` 既支持直接切换，也支持打开单个 choice 的详情页做只读检查，并在从状态页进入时保留返回链。
-3. callback token 只在 bot 进程内短期保存，避免把长 `session_id` 直接暴露到 Telegram callback data。
-4. `Session History` 只展示当前 Provider + 当前 Workspace 下、当前 Telegram 用户在本 bot 中记录过的本地历史；当前活跃会话会带 `[current]` 标记，列表提供 `Open`、`Run`、`Fork`、`Rename`、`Delete`，详情页提供创建/更新时间、cwd 与当前附着状态检查，且在存在 replay turn 时额外提供 `Run+Retry` / `Fork+Retry`。
-5. 管理员可以从 `Session History` 继续进入 `Provider Sessions`，浏览当前 workspace 下 provider 原生保存的 ACP sessions，并先打开单个 session 详情检查标题、cwd、更新时间与当前附着状态，再把该 session 接管或原生分叉到自己当前的 Telegram 会话槽位。
-6. `Rename` 与带参数的 `Agent Commands` 都采用两段式交互：按钮只负责进入待输入状态，下一条普通文本消息才真正提交标题或命令参数。
-7. `Workspace Files`、`Workspace Search` 与 `Workspace Changes` 都只能在当前活跃 workspace 根目录内做只读浏览、搜索、Git 变更查看和文件预览，不能逃逸到根目录之外。
-8. `Context Bundle` 只在当前 Provider + 当前 Workspace + 当前 Telegram 用户范围内累积文件和变更项，并通过两段式交互把 bundle 请求提交给当前 live session。
-9. Telegram 命令菜单会按允许用户逐个同步为当前 agent 暴露的 slash commands；bot 自己只保留隐藏 `/debug_status`。
-10. 一旦全局 `Switch Agent` 或 `Switch Workspace` 成功，旧 callback token、待输入文本动作、agent command alias、media group 缓冲和已开启的 bundle chat 都必须立刻失效，避免旧 Telegram 界面把请求落到新运行时。
-11. 一旦当前 live session 被 `New Session`、`Restart Agent`、`Fork Session`、`Session History -> Run/Fork` 或 `Provider Sessions -> Run/Fork` 替换，旧 callback token、待输入文本动作、agent command alias 和 media group 缓冲都必须立刻失效；`Context Bundle` 与 bundle chat 保持不变，因为它们绑定的是 Provider + Workspace，而不是单个 session。
-12. 当当前用户已有后台运行中的 active turn 时，新的 agent turn 不应并发启动；状态页必须提供 `Stop Turn`，并优先通过 ACP `session/cancel` 停止当前回合。
-13. `Bot Status` 必须提供 `Session Info`，用于查看当前 live session 的标题、更新时间、能力矩阵、usage 与缓存状态，而且不能为只读查看而隐式创建新 session；从 `Session Info` 打开的 workspace runtime、usage、上一条请求、命令、计划、工具活动和上一轮回放视图应支持回到 `Session Info`。
-14. `Bot Status` 必须提供 `Workspace Runtime`，用于查看当前 workspace 作用域下的 bot client filesystem/terminal bridge，以及当前 workspace 配置的 MCP server 列表；当存在 MCP server 时，还应支持打开单个 server 详情检查 transport、command/url、args 与 env/header key 名称，但不能泄露 secret value；这个视图同样必须保持只读。
-15. 当当前 workspace 下缓存了最近一次可复用的请求文本时，状态页必须提供 `Last Request` 视图，允许手机端检查该请求的来源 provider、来源类型和完整文本，再决定是否继续用它驱动 `Ask With Last Request` 一类工作流。
-16. 当当前 workspace 下缓存了可重放的上一轮请求时，状态页必须提供 `Last Turn` 视图，允许手机端在重放前检查 replay payload 的来源 provider、prompt item 和保存的 context item。
-17. 当当前 live session 缓存了 recent ACP plan 时，状态页必须提供 `Agent Plan` 列表和单条计划详情，允许手机端查看完整计划内容，而不只看 preview。
-18. 当当前 live session 缓存了 recent tool activities 时，状态页必须提供 `Tool Activity` 列表；工具详情页可以展示输入摘要、terminal 输出尾部，并复用现有 workspace file/change 预览能力。
-
-### Provider / Workspace 切换
-
-1. 管理员执行 `Switch Agent` 或 `Switch Workspace`。
-2. 在展示 `Switch Agent` 菜单时，`app.py` 会通过短生命周期 discovery session 读取各 provider 在当前 workspace 下的 prompt/session 能力摘要。
-3. `app.py` 解析目标 Provider Profile 或 Workspace 配置。
-4. `app.py` 先做 Provider 可执行文件和带当前 workspace MCP servers 的 ACP `new_session` 预检。
-5. 预检通过后，`app.py` 构建一个绑定到目标 Provider + Workspace 的 `SessionStore`。
-6. 在同一把锁下，旧 Store 被标记退休，新运行时被安装，新的 Provider / Workspace 会被持久化。
-7. 如果持久化失败，`app.py` 会恢复旧运行时并重新激活旧 Store。
-8. 切换成功后，退休 Store 里的旧会话会被尽力关闭。
-
-## 领域边界
-
-### Telegram 传输层
-
-`talk2agent/bots/telegram_bot.py` 负责：
-
-- 命令处理
-- Agent slash command 菜单同步与别名映射
-- Reply keyboard 与 inline button 菜单
-- 当前运行时 `Bot Status` 总览、`Session Info` / `Workspace Runtime` / `Usage` / `Last Request` / `Last Turn` / `Agent Plan` / `Tool Activity` 下钻、`Agent Commands` / `Session History` / `Provider Sessions` 的列表与单项详情、`Model / Mode` choice 详情、快捷入口，以及待输入取消、bundle chat 启停、新建/重试/分叉 session、model/mode、provider sessions 与运行时切换入口等高频状态控制
-- 当前 active turn 的登记、状态展示，以及 `Stop Turn` 到 ACP `session/cancel` 的桥接
-- `Switch Agent` 菜单中的 provider capability 摘要展示
-- Telegram 图片/语音/音频/文档下载、media group 收敛、能力感知降级，以及到 ACP 结构化 prompt item 的桥接
-- ACP command center 列表与按钮执行
-- 当前 workspace 的只读目录浏览、全文搜索、Git 变更查看与文件预览
-- 当前 live session 的标题、更新时间、能力矩阵、usage 与缓存概览
-- 最近可重放上一轮请求的 payload 检查与回放入口
-- 最近 ACP plan 的分页列表与单条详情
-- 最近 ACP tool activity 的列表、详情、terminal 输出尾部，以及到 workspace file/change 预览的桥接
-- 从文件预览页发起“下一条文本作为文件请求”的 agent 回合
-- 从 Git diff 预览页发起“下一条文本作为变更请求”的 agent 回合
-- 按当前 Provider + Workspace + 用户聚合的 context bundle 收集、分页、移除、清空与提交
-- 历史会话重命名的短期待输入状态
-- 带参数 agent command 的短期待输入状态
-- workspace search 查询词的短期待输入状态
-- workspace file request 查询词的短期待输入状态
-- workspace change request 查询词的短期待输入状态
-- context bundle request 查询词的短期待输入状态
-- 白名单与管理员校验
-- 当旧快照撞上退休 Store 时的单次重试逻辑
-- 构建 `python-telegram-bot` 应用
-
-`talk2agent/bots/telegram_stream.py` 负责：
-
-- 将 ACP 更新渲染为纯文本
-- 将 ACP tool / plan / usage 更新折叠成适合手机端的轻量流式摘要
-- 节流 Draft 更新频率
-- Telegram Draft 流与最终文本切块投递
-
-### Provider 运行时
-
-`talk2agent/provider_runtime.py` 负责：
-
-- 支持的 Provider 名称集合
-- Provider 到命令的映射
-- Provider / Workspace 状态文件的读写
-- 启动 Provider 的解析逻辑
-
-它必须保持为运行时可执行命令选择的唯一事实来源。
-
-### 会话生命周期
-
-`talk2agent/session_store.py` 负责：
-
-- 每个 Telegram 用户唯一的会话实例
-- 当前 Provider + Workspace 下、当前 Telegram 用户的本地 history 索引接入
-- 把 provider 原生 session 接管为当前 Telegram 用户的 live session，并回写到本地 history
-- 重置和失效语义
-- 空闲会话清理
-- Provider / Workspace 切换时的 Store 退休机制
-
-它不应该了解 Telegram 命令名或 Provider 持久化细节。
-
-### ACP 集成
-
-`talk2agent/acp/agent_session.py` 负责：
-
-- 启动 ACP 子进程
-- 创建或复用单一 ACP 会话
-- 在 initialize 阶段广告当前 client 的 ACP filesystem / terminal capabilities
-- 将当前 workspace 绑定的 MCP servers 透传到 `new_session` / `load_session` / `resume_session` / `fork_session`
-- 读取并缓存 agent `promptCapabilities`，作为 Bot 多模态输入的能力边界
-- `session/load` / `session/resume` / `session/set_config_option` 等 ACP 会话控制
-- `session/fork` 等 ACP 会话分支控制
-- 把文本、图片、音频和资源类 prompt item 转成 ACP content block，并对可降级的文本类文档输入做能力感知降级
-- 捕获 ACP `available_commands_update` 并缓存当前 agent 命令集合
-- 捕获 ACP `session_info_update`、plan 与 usage 更新，并缓存当前会话的原生标题、计划和使用量快照
-- 捕获 ACP tool call 更新，归一化输入摘要、路径引用、terminal 与内容类型，并缓存最近几条工具活动摘要，供状态页和回合结束后的移动端追踪使用
-- 读取当前 session 绑定 client terminal 的输出尾部，供 Telegram `Tool Activity` 详情页展示
-- 通过生命周期锁串行化每一轮对话
-- 只把更新转发给当前回合对应的输出 sink
-
-`talk2agent/acp/bot_client.py`、`talk2agent/acp/mcp_servers.py` 和 `talk2agent/acp/permission.py` 为这层提供支撑，并应保持传输层无关。
-其中 `bot_client.py` 负责 ACP client 文件与终端能力，`mcp_servers.py` 负责把 workspace 配置转换为 ACP MCP server schema 对象。
-
-### 工作区附件入口
-
-`talk2agent/workspace_inbox.py` 负责：
-
-- 将 Telegram 附件写入当前 workspace 下的 `.talk2agent/telegram-inbox/`
-- 生成安全、不可逃逸的 inbox 路径
-- 在 provider 不支持某类 ACP prompt block 时，为 bot 提供“落盘后让 agent 从本地读取”的降级基础
+1. 管理员选择目标 Provider 或 Workspace。
+2. `app.py` 执行 discovery / 预检，验证目标运行时可启动。
+3. 在同一把锁下安装新运行时并持久化状态。
+4. 如果持久化失败，则回滚到旧运行时。
+5. 切换成功后，旧 `SessionStore` 进入退休并尽力关闭旧会话。
 
 ## 架构不变量
 
@@ -200,34 +74,25 @@
 - ACP 是唯一后端协议。
 - 在当前 MVP 中，`permissions.mode` 保持为 `auto_approve`。
 - 每个进程恰好只有一个活跃 Provider + Workspace 运行时。
-- 在任意一个 Store 中，每个 Telegram 用户至多只有一个活会话。
-- Session history 是当前 bot 的本地索引，不等于 Provider 侧全局 session 仓库，并按 Provider + Workspace 过滤。
-- `/debug_status` 是观测命令，绝不能隐式创建新会话。
-- `Switch Agent` / `Switch Workspace` 切换的是整个进程运行时，并会清空旧会话。
-- Provider 持久化是对配置的补充，而不是改写主 YAML 文件。
+- 每个 `SessionStore` 中，每个 Telegram 用户至多只有一个活会话。
+- Session history 是本 bot 的本地索引，不等于 Provider 侧全局 session 仓库。
+- `/debug_status` 是只读观测入口，绝不能隐式创建新会话。
+- `Switch Agent` / `Switch Workspace` 切换的是整个进程运行时。
+- Provider / Workspace 切换中的持久化失败必须回滚运行时状态。
 
-## 变更入口图
+## 什么不应放在这里
 
-当你新增 Provider 时：
-
-- 更新 `talk2agent/provider_runtime.py`
-- 如有必要，更新配置校验和默认值
-- 更新 `README.md`
-- 更新 Provider 相关测试
-
-当你调整 Telegram 交互时：
-
-- 从 `talk2agent/bots/` 开始
-- 确认没有把 ACP 或 Provider 策略泄漏进传输层
-
-当你调整会话语义时：
-
-- 从 `talk2agent/session_store.py` 开始
-- 确认 `talk2agent/app.py` 和 `talk2agent/bots/telegram_bot.py` 仍然正确处理退休 Store 行为
+- Reply keyboard 或 inline button 的枚举。
+- 手机端视图层的逐页文案和返回链。
+- 手工验收 checklist。
+- 逐功能设计缘由与边界讨论。
 
 ## 相关文档
 
 - [AGENTS.md](AGENTS.md)：仓库导航地图
-- [docs/index.md](docs/index.md)：项目文档总入口
-- [docs/design-docs/index.md](docs/design-docs/index.md)：设计背景
-- [docs/exec-plans/index.md](docs/exec-plans/index.md)：实现历史
+- [README.md](README.md)：给人的快速开始
+- [docs/index.md](docs/index.md)：文档总入口
+- [docs/operator-guide.md](docs/operator-guide.md)：操作者说明
+- [docs/manual-checklist.md](docs/manual-checklist.md)：手工验收清单
+- [docs/design-docs/index.md](docs/design-docs/index.md)：设计缘由
+- [docs/exec-plans/index.md](docs/exec-plans/index.md)：执行记录

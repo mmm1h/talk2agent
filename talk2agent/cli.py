@@ -5,6 +5,7 @@ from pathlib import Path
 
 from talk2agent.app import run_app
 from talk2agent.config import load_config, write_default_config
+from talk2agent.harness import run_harness
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -13,6 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--config", default="config.yaml")
+
+    subparsers.add_parser("harness")
 
     start_parser = subparsers.add_parser("start")
     start_parser.add_argument("--config", default="config.yaml")
@@ -25,6 +28,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "init":
         write_default_config(Path(args.config))
         return 0
+    if args.command == "harness":
+        return run_harness()
     if args.command == "start":
         config = load_config(Path(args.config))
         return run_app(config)

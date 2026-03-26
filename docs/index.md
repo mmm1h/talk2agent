@@ -1,26 +1,30 @@
 # 文档索引
 
-这个目录是项目的记录系统。
-请保持文档精炼、可链接、按主题收口，让读者可以先从窄入口开始，再按需深入。
+`docs/` 是项目的记录系统。
+这里承接从顶层地图下沉出来的细节，并通过渐进式披露把读者引向更窄的真实信息源。
 
 ## 推荐阅读顺序
 
 1. [../AGENTS.md](../AGENTS.md)
 2. [../ARCHITECTURE.md](../ARCHITECTURE.md)
-3. 再进入下面最相关的子区域
+3. 再进入下面最相关的专题文档
 
-## 文档分区
+## 常驻文档
 
-- [design-docs/index.md](design-docs/index.md)：跨多个模块的设计说明，以及已接受的解决方案形状
-- [exec-plans/index.md](exec-plans/index.md)：实现计划、进行中的工作以及归档执行记录
+- [operator-guide.md](operator-guide.md)：面向操作者的日常使用说明
+- [manual-checklist.md](manual-checklist.md)：端到端手工验收清单
+- [harness.md](harness.md)：自动化 harness、文档预算和 CI 入口
 
-## 约定
+## 结构化目录
 
-- 可长期保存的系统指引应放在 `AGENTS.md`、`ARCHITECTURE.md` 或 `docs/` 下的专题文档里。
-- `AGENTS.md` 保持在 100 行以内；如果超过上限，应拆到更窄的专题文档，并从入口文档回链。
+- [design-docs/index.md](design-docs/index.md)：跨多个模块的设计缘由和已接受的方案形状
+- [exec-plans/index.md](exec-plans/index.md)：实现计划、进行中的工作和归档执行记录
+
+## 文档边界约定
+
+- `AGENTS.md` 是地图，不是手册。
+- `ARCHITECTURE.md` 是系统地图，不是 UI 规格。
+- `README.md` 是给人的快速开始，不是默认工程上下文。
 - 设计缘由放在 `docs/design-docs/`。
-- 执行计划放在 `docs/exec-plans/`。
-- 已完成计划归档到 `docs/exec-plans/completed/`。
-- 每份文档都应收敛在自己的主题边界内；超出边界的内容应迁移到更合适的文档，而不是继续横向膨胀。
-- 尽量链接代码和测试，而不是把大段代码直接复制进文档。
-- 如果文档已经不再代表当前状态，但仍有历史价值，应归档，而不是继续留在主路径中。
+- 执行计划放在 `docs/exec-plans/`，完成后归档到 `completed/`。
+- 每份文档都应收敛在自己的主题边界内；超出边界的内容应迁移到更窄的文档。
