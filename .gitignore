@@ -12,6 +12,7 @@ build/
 
 # Local runtime state
 .talk2agent-provider-state.json
+.talk2agent-session-history.json
 config.yaml
 
 # Scratch files

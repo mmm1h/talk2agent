@@ -118,6 +118,102 @@ runtime:
     assert config.agent.default_workspace.id == "repo-b"
 
 
+def test_load_config_parses_workspace_mcp_servers(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+telegram:
+  bot_token: "x"
+  allowed_user_ids: [123]
+  admin_user_id: 123
+agent:
+  provider: "codex"
+  workspace_dir: "F:/repo-a"
+  workspaces:
+    - id: "repo-a"
+      label: "Repo A"
+      path: "F:/repo-a"
+      mcp_servers:
+        - name: "local-docs"
+          transport: "stdio"
+          command: "uvx"
+          args: ["docs-mcp"]
+          env:
+            API_KEY: "secret"
+        - name: "remote-search"
+          transport: "http"
+          url: "https://example.com/mcp"
+          headers:
+            - name: "Authorization"
+              value: "Bearer token"
+        - name: "events"
+          transport: "sse"
+          url: "https://example.com/sse"
+          headers:
+            X-Workspace: "repo-a"
+permissions:
+  mode: "auto_approve"
+runtime:
+  idle_timeout_minutes: 30
+  stream_edit_interval_ms: 700
+  provider_state_path: ".provider-state.json"
+  session_history_path: ".session-history.json"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+    servers = config.agent.default_workspace.mcp_servers
+
+    assert [server.name for server in servers] == ["local-docs", "remote-search", "events"]
+    assert servers[0].transport == "stdio"
+    assert servers[0].command == "uvx"
+    assert servers[0].args == ["docs-mcp"]
+    assert [(item.name, item.value) for item in servers[0].env] == [("API_KEY", "secret")]
+    assert servers[1].transport == "http"
+    assert servers[1].url == "https://example.com/mcp"
+    assert [(item.name, item.value) for item in servers[1].headers] == [
+        ("Authorization", "Bearer token")
+    ]
+    assert servers[2].transport == "sse"
+    assert [(item.name, item.value) for item in servers[2].headers] == [
+        ("X-Workspace", "repo-a")
+    ]
+
+
+def test_load_config_rejects_invalid_mcp_server_transport(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        """
+telegram:
+  bot_token: "x"
+  allowed_user_ids: [123]
+  admin_user_id: 123
+agent:
+  provider: "codex"
+  workspace_dir: "."
+  workspaces:
+    - id: "default"
+      label: "Default"
+      path: "."
+      mcp_servers:
+        - name: "broken"
+          transport: "websocket"
+permissions:
+  mode: "auto_approve"
+runtime:
+  idle_timeout_minutes: 30
+  stream_edit_interval_ms: 700
+  provider_state_path: ".provider-state.json"
+  session_history_path: ".session-history.json"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="mcp_servers\\[\\]\\.transport|mcp_servers.*transport"):
+        load_config(path)
+
+
 def test_load_config_parses_runtime_provider_state_path(tmp_path: Path):
     path = tmp_path / "config.yaml"
     path.write_text(

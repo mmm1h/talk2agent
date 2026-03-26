@@ -53,6 +53,30 @@
    - 将 `telegram.admin_user_id` 设为其中一个允许的用户 ID
    - 选择启动时的 `agent.provider`：`claude`、`codex` 或 `gemini`
    - 配置 `agent.workspaces` 白名单；`agent.workspace_dir` 必须对应其中一个默认 workspace
+   - 如果希望 bot 端也携带桌面端常用的 MCP tools，可在某个 workspace 下追加 `mcp_servers`
+
+   示例：
+
+   ```yaml
+   agent:
+     workspace_dir: "F:/repo-a"
+     workspaces:
+       - id: "repo-a"
+         label: "Repo A"
+         path: "F:/repo-a"
+         mcp_servers:
+           - name: "docs"
+             transport: "stdio"
+             command: "uvx"
+             args: ["docs-mcp"]
+             env:
+               API_KEY: "secret"
+           - name: "search"
+             transport: "http"
+             url: "https://example.com/mcp"
+             headers:
+               Authorization: "Bearer token"
+   ```
 
 5. 启动机器人：
 
@@ -100,18 +124,28 @@
 - 如果当前 workspace 下存在可重放的上一轮请求，`Switch Agent` 菜单还会为每个目标 provider 额外提供一键 `Retry on ...` / `Fork on ...` 入口：先执行全局 agent 切换，再立刻在目标 provider 上重试或分叉上一轮
 - `Switch Workspace` 只展示配置白名单中的路径；切换同样是全局行为，并且会跨重启持久化
 - 当 `Switch Agent` 或 `Switch Workspace` 成功后，旧 inline buttons、待输入文本动作、agent command alias、media group 缓冲和已开启的 `Bundle Chat` 会立即失效，避免把旧界面的操作送进新运行时
-- `Bot Status` 会用只读方式汇总当前 Provider、Workspace、当前 workspace 的 Git 变更摘要、当前 live session、当前 live session 在本地 history 中的标题（如果已有）、model/mode、待输入状态摘要、本地 session history 数量、可重放上一轮及其短摘要、最近一次普通文本请求摘要、`Context Bundle` 项数与 `Bundle Chat` 状态；当当前 workspace 是 Git 仓库且存在工作区变更时，状态页还会直接展示前几项 change 预览和剩余数量，方便手机端快速确认本地工作区脏状态，并可直接在状态页里对“当前变更集”执行 `Ask Agent...`、`Ask With Last Request`、`Add All Changes to Context`、`Start Bundle Chat With Changes`；当 bundle 非空时，状态页还会直接展示前几项 bundle 预览和剩余数量，方便手机端在不跳转子页面的情况下确认当前工作上下文，并可直接在状态页里执行 `Ask Agent With Context`、`Bundle + Last Request`、`Clear Bundle`；当 live session 已经缓存 agent commands 时，状态页也会直接展示前几项命令预览和剩余数量，方便快速判断当前 agent 能做什么，并为前几条已缓存命令直接提供 `Run /...` 或 `Args /...` 快捷按钮，减少进入完整命令页的往返；如果当前 live session 已经暴露真实 model / mode 选项，状态页也会直接给出前几个可切换的 `Model: ...` / `Mode: ...` 按钮，切换后原状态消息会立即刷新为最新运行时快照；当当前 workspace 还存在可重放的上一轮请求时，这些常用选项还会额外提供 `Model+Retry: ...` / `Mode+Retry: ...` 快捷按钮，允许用户在手机端直接完成“切配置并立即重跑上一轮”；而当当前 Provider + Workspace 下已有其他本地历史会话时，状态页也会直接展示最近几条 session 预览，并提供 `Switch ...` / `Switch+Retry ...` 快捷按钮，让用户无需先进入完整 `Session History` 即可切换工作线。它本身不会为查看状态而主动拉起新 session，但会提供通往 `Session History`、`Agent Commands`、`Workspace Files`、`Workspace Search`、`Workspace Changes` 和 `Context Bundle` 的快捷入口，并允许直接 `Cancel Pending Input`、对当前 bundle 执行 `Start/Stop Bundle Chat`、在当前消息里直接打开 `Model / Mode` 菜单，以及直接触发 `New Session`、`Retry/Fork Last Turn`、`Restart Agent`；管理员还可直接从这里进入 `Provider Sessions`、`Switch Agent` / `Switch Workspace`。这些直接控制、子视图和内联菜单都会尽量在当前状态消息内刷新，并支持 `Back to Bot Status` 返回当前运行时总览；从状态页直接执行 `Retry/Fork Last Turn`，或进入 `Session History`、`Provider Sessions`、`Model / Mode`、`Switch Agent` 后执行带重放的快捷操作会回到状态页；从状态页打开 `Workspace Search` 后输入搜索词，也会继续在原状态消息里展开结果；而从状态页打开的 `Agent Commands` 参数输入、`Workspace Files` / `Workspace Changes` / `Context Bundle` 里的两段式 `Ask Agent...` 请求，以及这些视图里的 `Ask With Last Request`，在成功后都会回到状态页；如果这些从状态页发起的回合在真正执行 turn 时失败，原状态消息也会恢复为最新 `Bot Status`，避免旧 inline 视图悬空
-- `Session History` 只显示当前 Provider + 当前 Workspace 下、当前 Telegram 用户自己在本 bot 中使用过的会话；当前活跃会话会被标记为 `[current]`，每条记录支持 `Run`、`Rename` 和 `Delete`；如果当前 workspace 下存在可重放的上一轮请求，还会额外提供 `Run+Retry`
+- `Bot Status` 会用只读方式汇总当前 Provider、Workspace、当前 workspace 的 Git 变更摘要、当前 live session、当前 live session 在本地 history 中的标题（如果已有；若当前 session 已通过 ACP `session_info_update` 上报原生标题，也会直接显示）、model/mode、最近一次 ACP usage 快照、最近一次 ACP plan 预览、最近几条 ACP 工具活动摘要、待输入状态摘要、本地 session history 数量、可重放上一轮及其短摘要、最近一次普通文本请求摘要、`Context Bundle` 项数与 `Bundle Chat` 状态；当当前 workspace 是 Git 仓库且存在工作区变更时，状态页还会直接展示前几项 change 预览和剩余数量，方便手机端快速确认本地工作区脏状态，并可直接在状态页里对“当前变更集”执行 `Ask Agent...`、`Ask With Last Request`、`Add All Changes to Context`、`Start Bundle Chat With Changes`；当 bundle 非空时，状态页还会直接展示前几项 bundle 预览和剩余数量，方便手机端在不跳转子页面的情况下确认当前工作上下文，并可直接在状态页里执行 `Ask Agent With Context`、`Bundle + Last Request`、`Clear Bundle`；当 live session 已经缓存 agent commands 时，状态页也会直接展示前几项命令预览和剩余数量，方便快速判断当前 agent 能做什么，并为前几条已缓存命令直接提供 `Run /...` 或 `Args /...` 快捷按钮，减少进入完整命令页的往返；如果当前 live session 已经暴露真实 model / mode 选项，状态页也会直接给出前几个可切换的 `Model: ...` / `Mode: ...` 按钮，切换后原状态消息会立即刷新为最新运行时快照；如果当前 live session 的 provider 支持 ACP `session/fork`，状态页还会直接提供 `Fork Session`，用于在手机端原生分叉整个 provider session，而不是仅重放上一轮请求；当当前 workspace 还存在可重放的上一轮请求时，这些常用选项还会额外提供 `Model+Retry: ...` / `Mode+Retry: ...` 快捷按钮，允许用户在手机端直接完成“切配置并立即重跑上一轮”；而当当前 Provider + Workspace 下已有其他本地历史会话时，状态页也会直接展示最近几条 session 预览，并提供 `Switch ...` / `Switch+Retry ...` 快捷按钮，让用户无需先进入完整 `Session History` 即可切换工作线。它本身不会为查看状态而主动拉起新 session，但会提供通往 `Session History`、`Agent Commands`、`Workspace Files`、`Workspace Search`、`Workspace Changes` 和 `Context Bundle` 的快捷入口，并允许直接 `Cancel Pending Input`、对当前 bundle 执行 `Start/Stop Bundle Chat`、在当前消息里直接打开 `Model / Mode` 菜单，以及直接触发 `New Session`、`Fork Session`、`Retry/Fork Last Turn`、`Restart Agent`；管理员还可直接从这里进入 `Provider Sessions`、`Switch Agent` / `Switch Workspace`。这些直接控制、子视图和内联菜单都会尽量在当前状态消息内刷新，并支持 `Back to Bot Status` 返回当前运行时总览；从状态页直接执行 `Fork Session`、`Retry/Fork Last Turn`，或进入 `Session History`、`Provider Sessions`、`Model / Mode`、`Switch Agent` 后执行带重放的快捷操作会回到状态页；从状态页打开 `Workspace Search` 后输入搜索词，也会继续在原状态消息里展开结果；而从状态页打开的 `Agent Commands` 参数输入、`Workspace Files` / `Workspace Changes` / `Context Bundle` 里的两段式 `Ask Agent...` 请求，以及这些视图里的 `Ask With Last Request`，在成功后都会回到状态页；如果这些从状态页发起的回合在真正执行 turn 时失败，原状态消息也会恢复为最新 `Bot Status`，避免旧 inline 视图悬空
+- `Bot Status` 还会额外提供 `Session Info` 子视图；用户可以查看当前 live session 的标题、更新时间、model/mode、prompt 与 session capabilities、usage 快照，以及命令/计划/工具活动缓存数量，并继续跳到 `Workspace Runtime`、`Usage`、`Last Request`、`Agent Commands`、`Agent Plan` 或 `Tool Activity`；这些从 `Session Info` 打开的子视图会保留 `Back to Session Info`
+- `Bot Status` 还会提供 `Workspace Runtime` 子视图；用户可以检查当前 workspace 下 bot 自带的 ACP client filesystem / terminal bridge，以及当前 workspace 透传给 Provider 的 MCP server 列表；如果配置了 MCP server，还可以继续打开单个 server 详情页，检查 transport、command/url、args 与 env/header key 名称，而不会泄露 secret value
+- 如果当前 live session 已缓存最近一次 ACP usage 快照，`Bot Status` 还会提供 `Usage` 子视图；用户可以查看当前 token window 的 used / size、remaining、utilization 与 cost，而不必只看状态页中的单行摘要
+- 如果当前 workspace 下已缓存最近一次可复用的请求文本，`Bot Status` 还会提供 `Last Request` 子视图；用户可以查看该文本的完整内容、记录时的 provider，以及它来自普通文本、Bundle Chat、Context Bundle 还是文件/变更跟进请求
+- 如果当前 workspace 下存在可重放的上一轮请求，`Bot Status` 还会提供 `Last Turn` 子视图；用户可以在真正执行 `Retry/Fork Last Turn` 之前，先检查缓存的 replay payload，包括来源 provider、prompt items、文本/资源内容摘要和能力降级时保存的 context item 引用
+- 当 live session 缓存了最近 ACP plan 时，`Bot Status` 会额外提供 `Agent Plan` 子视图；用户可以分页查看完整计划项，并打开单条计划详情查看完整内容、状态和优先级，再返回计划列表或状态页
+- 当 live session 缓存了最近工具活动时，`Bot Status` 会额外提供 `Tool Activity` 子视图；用户可以逐条查看 ACP tool call 的标题、状态、输入摘要、关联路径、内容类型与最近终端输出尾部，并可直接打开相关文件预览或当前 Git change 预览，再返回工具详情或状态页
+- 当某个 ACP turn 正在后台运行时，`Bot Status` 会额外显示当前 turn 状态，并提供 `Stop Turn`；点击后会优先通过 ACP `session/cancel` 停止当前 live session 的这一次回合，空输出会以 `Turn cancelled.` 收尾
+- 当同一 Telegram 用户已经有一个后台 turn 在运行时，bot 会拒绝启动新的文本、命令或附件回合，并提示先去 `Bot Status` 停止或等待当前回合结束
+- `Session History` 只显示当前 Provider + 当前 Workspace 下、当前 Telegram 用户自己在本 bot 中使用过的会话；当前活跃会话会被标记为 `[current]`，列表里每条记录支持 `Open`、`Run`、`Fork`、`Rename` 和 `Delete`；打开后还可以先在详情页检查 session id、cwd、创建/更新时间与当前附着状态，再决定是否 `Run`、`Run+Retry`、`Fork` 或 `Fork+Retry`
 - 通过 `New Session`、`Restart Agent` 或 `Model / Mode` 首次拉起的本地 live session，会立即写入本地 `Session History`，不需要先跑一轮 prompt 才出现
-- 管理员可在 `Session History` 视图内继续打开 `Provider Sessions`，浏览当前 workspace 下 provider 原生保存的 ACP sessions，并把其中某个 session 接管到自己当前的 Telegram 会话槽位；接管成功后会同步写回本 bot 的本地 history；如果当前 workspace 下存在可重放的上一轮请求，provider session 列表里同样会额外提供 `Run+Retry`
-- 当 `New Session`、`Restart Agent`、`Session History -> Run` 或 `Provider Sessions -> Run` 成功替换当前 live session 后，旧 inline buttons、待输入文本动作、agent command alias 和 media group 缓冲会立即失效；`Context Bundle` 与已开启的 `Bundle Chat` 会保留，因为它们的作用域仍然是当前 Provider + Workspace
+- 管理员可在 `Session History` 视图内继续打开 `Provider Sessions`，浏览当前 workspace 下 provider 原生保存的 ACP sessions，并先打开单个 session 的详情页检查标题、cwd、更新时间与当前附着状态，再决定是否 `Run`、`Run+Retry`、`Fork` 或 `Fork+Retry`；这些操作成功后都会同步写回本 bot 的本地 history；如果当前 workspace 下存在可重放的上一轮请求，provider session 列表和详情页里都会额外提供 `Run+Retry` / `Fork+Retry`
+- 当 `New Session`、`Restart Agent`、`Fork Session`、`Session History -> Run/Fork` 或 `Provider Sessions -> Run/Fork` 成功替换当前 live session 后，旧 inline buttons、待输入文本动作、agent command alias 和 media group 缓冲会立即失效；`Context Bundle` 与已开启的 `Bundle Chat` 会保留，因为它们的作用域仍然是当前 Provider + Workspace
 - 当在 `Session History` 里删除当前 `[current]` live session 时，也会立即清理与该 session 绑定的旧 inline buttons、待输入文本动作、agent command alias 和 media group 缓冲，并把当前用户的 Telegram slash command 菜单刷新回当前 Provider 的默认发现结果；`Context Bundle` 与已开启的 `Bundle Chat` 仍保留
 - 当某次普通文本、命令或附件回合因为 provider / session 异常而导致 bot 主动失效当前 live session 时，也会立即清理与该 session 绑定的旧 inline buttons、待输入文本动作、agent command alias 和 media group 缓冲，并把当前用户的 Telegram slash command 菜单刷新回当前 Provider 的默认发现结果；`Context Bundle` 与已开启的 `Bundle Chat` 仍保留
 - `Retry Last Turn` 会在当前 workspace 作用域内重放上一条真正发给 ACP 的请求，覆盖普通文本、命令包装、上下文文件/变更请求、`Bundle Chat` 包装后的文本，以及附件 / media group 回合；如果当前 live session 已失效，bot 会先自动拉起新的 session 再重放；如果用户刚切换到另一个 agent，只要 workspace 没变，也可以直接把上一回合交给新 agent 再跑一遍
 - `Fork Last Turn` 会在当前 workspace 下先创建一个新的 live session，再把上一条真正发给 ACP 的请求重放到这个新 session 中；旧 session 仍可通过 `Session History` 找回，相当于在手机端直接从上一回合分叉一条新工作线；如果用户刚切换到另一个 agent，只要 workspace 没变，也可以直接把上一回合分叉到新 agent 上
+- `Fork Session` 会在当前 live session 的 provider 支持 ACP `session/fork` 时，直接分叉整个 provider session；它和 `Fork Last Turn` 不同，前者复制的是 provider 原生上下文，后者只重放上一条请求
 - 上述 session 异常失效后的失败消息会直接附带恢复入口：`Retry Last Turn`、`Fork Last Turn`、`New Session`、`Session History`、`Model / Mode`；管理员还会额外看到 `Switch Agent` 和 `Switch Workspace`
 - 点击 `Rename` 后，用户下一条普通文本消息只会用于重命名该历史会话，不会被转发给当前 agent；也可以直接点击 `Cancel Rename` 放弃
-- `Agent Commands` 会直接展示当前 ACP agent 暴露的真实 slash commands；无参命令可一键执行，带 hint 的命令会进入“下一条普通文本作为参数”的待输入状态，并支持 `Cancel Command`
+- `Agent Commands` 会直接展示当前 ACP agent 暴露的真实 slash commands；列表里每条命令既可直接执行，也可先打开详情页检查名称、描述、args hint 与示例，再决定是否运行；无参命令可一键执行，带 hint 的命令会进入“下一条普通文本作为参数”的待输入状态，并支持 `Cancel Command`
 - `Workspace Files` 会在当前白名单 workspace 内提供只读目录浏览和文本文件预览；目录导航和文件预览都不会离开当前 workspace 根目录，目录页既支持把当前页可见文件批量加入 `Context Bundle`，也支持直接用当前可见文件发起下一条 agent 请求，或一键用当前可见文件启动 `Bundle Chat`；如果当前 workspace 下已经有最近一次普通文本请求，目录页还会额外提供 `Ask With Last Request`，可直接把同一句需求重用到当前页可见文件集合
 - 在文件预览页可以直接点击 `Ask Agent About File`；随后下一条普通文本会作为用户请求，与该相对路径一起转发给当前 agent，让 agent 在本地 workspace 中读取最新文件内容后继续工作。如果当前 workspace 下已经有最近一次普通文本请求，预览页还会额外提供 `Ask With Last Request`，可直接用同一句需求重问当前文件。预览页也支持直接用当前文件启动 `Bundle Chat`，或直接打开 `Context Bundle`；如果 bundle 是从当前目录页或文件预览页打开的，bundle 里也会保留返回该目录页或预览页的入口
 - `Workspace Search` 会在当前白名单 workspace 内做只读全文搜索；点击按钮后，下一条普通文本会被当作搜索词，结果支持分页、打开命中文件、把当前命中的文件批量加入 `Context Bundle`、直接基于当前命中文件集合发起 agent 请求、直接用当前命中文件集合启动 `Bundle Chat`，以及 `Cancel Search`；如果当前 workspace 下已经有最近一次普通文本请求，结果页还会额外提供 `Ask With Last Request`，可直接把同一句需求重用到当前命中文件集合；如果 bundle 是从搜索结果页或命中文件预览页打开的，bundle 里也会保留返回搜索结果或预览页的入口
@@ -119,8 +153,11 @@
 - 文件预览页和 diff 预览页都支持把当前条目加入 `Context Bundle`；bundle 作用域固定为“当前 Provider + 当前 Workspace + 当前 Telegram 用户”
 - `Context Bundle` 会把多个文件和 Git 变更聚合成一次 agent 请求；bundle 视图本身也支持重新打开其中某个文件或变更进行检查。用户既可以点击 `Ask Agent With Context` 发起一次性请求，也可以在当前 workspace 下已有最近一次普通文本请求时直接点击 `Ask With Last Request` 复用同一句需求，还可以开启 `Bundle Chat`，让后续普通文本以及附件回合持续自动附着当前 bundle；agent 会在本地 workspace 中读取最新文件和 diff 状态；能力降级后落到 `.talk2agent/telegram-inbox/` 的附件也会自动出现在这里；如果 bundle 是从某个具体只读视图打开的，bundle 内会保留返回该来源视图的入口，而从 bundle 里重新打开的文件/变更预览也会同时保留返回 bundle 和返回原来源页的入口
 - 当成功回合让当前 workspace 的 Git 变更集合发生变化时，bot 会补一条轻量提示，允许用户直接打开 `Workspace Changes`、直接基于当前变更继续追问 agent、直接用当前变更启动 `Bundle Chat`、批量把当前变更加入 `Context Bundle`，或直接打开 bundle 继续追问；如果当前 workspace 下存在最近一次普通文本请求，这条 follow-up 里也会额外提供 `Ask With Last Request`，并且从这条 follow-up 发起的 `Ask Agent...` / `Ask With Last Request` / `Cancel Ask` 都会尽量在同一条 follow-up 消息内刷新；如果从这条 follow-up 继续打开 `Workspace Changes` 或 `Context Bundle`，子页面也会保留 `Back to Change Update`
-- `Model / Mode` 会直接展示当前 live session 暴露的实际选项，不再经过额外子菜单；如果当前用户还没有 live session，bot 会先为该用户拉起一个 session，再显示真实 model/mode 选项。切换成功后，当前 session 的本地 history 时间戳和 Telegram slash command 菜单也会立刻刷新；如果当前 workspace 下已有可重放的上一轮请求，还会额外提供 `Model+Retry ...` / `Mode+Retry ...`，用于一键切配置并立即重跑上一轮
+- `Model / Mode` 会直接展示当前 live session 暴露的实际选项，不再经过额外子菜单；如果当前用户还没有 live session，bot 会先为该用户拉起一个 session，再显示真实 model/mode 选项。每个选项还支持单独打开详情页，检查 label、value、description、当前是否生效以及对应的 config option，再决定是否切换；如果这个菜单是从 `Bot Status` 打开的，详情页也会保留返回 `Bot Status` 的链路。切换成功后，当前 session 的本地 history 时间戳和 Telegram slash command 菜单也会立刻刷新；如果当前 workspace 下已有可重放的上一轮请求，还会额外提供 `Model+Retry ...` / `Mode+Retry ...`，用于一键切配置并立即重跑上一轮
 - Telegram 命令菜单会动态显示当前 agent 暴露的 slash commands；本地仅保留隐藏调试命令 `/debug_status`
+- 当 Provider 通过 ACP client 侧 `fs/read_text_file` / `fs/write_text_file` 访问本地文件时，bot 现在会在当前 workspace 根目录内安全响应这些请求；越界路径会被拒绝
+- 当 Provider 通过 ACP client 侧 `terminal/*` 访问本地终端时，bot 现在会在当前 workspace 根目录内创建受控子进程，并支持读取输出、等待退出、终止与释放；`cwd` 越界会被拒绝
+- 当前 workspace 还可以声明自己的 `mcp_servers`；这些 MCP servers 会在 bot 拉起、恢复、分叉或预检 ACP session 时一并透传给当前 Provider
 
 ## Telegram 命令
 
@@ -158,7 +195,7 @@
 14. 以管理员身份点击 `Switch Agent`，选择 `Codex` 或 `Gemini CLI`，确认切换成功；如果当前 workspace 下已经有上一轮请求，也可以直接点击 `Retry on ...` / `Fork on ...`，确认 bot 会先切换 agent，再在目标 provider 上立即重试或分叉上一轮；如果目标 Provider 缺少可执行文件或无法创建 session，应返回 `session creation failed`。
 15. 以管理员身份点击 `Switch Workspace`，确认只显示配置白名单中的路径，并且切换成功后 `/debug_status` 中的 `workspace_id` / `cwd` 发生变化。
 16. 点击 `New Session`，确认该用户的会话被重置。
-17. 点击 `Session History`，确认可以看到当前用户在当前 Provider + 当前 Workspace 下的本地历史；当前活跃会话会显示 `[current]`，并可执行 `Run` / `Rename` / `Delete`；如果当前 workspace 下已有上一轮请求，也可以直接点击 `Run+Retry`，确认 bot 会先切到所选历史 session，再立刻重放上一轮。
+17. 点击 `Session History`，确认可以看到当前用户在当前 Provider + 当前 Workspace 下的本地历史；当前活跃会话会显示 `[current]`，并可执行 `Open` / `Run` / `Rename` / `Delete`；打开单条历史详情后，应能查看 session id、cwd、创建/更新时间与当前附着状态，并通过 `Back to History` 返回；如果当前 workspace 下已有上一轮请求，也可以直接点击 `Run+Retry`，确认 bot 会先切到所选历史 session，再立刻重放上一轮。
 18. 以管理员身份在 `Session History` 里点击 `Provider Sessions`，确认可以看到当前 workspace 下 provider 原生保存的 ACP sessions；点击 `Run` 后，当前 Telegram 用户应接管该 session，并且该 session 会回写到本地 history；如果当前 workspace 下已有上一轮请求，也可以直接点击 `Run+Retry`，确认 bot 会先接管该 provider session，再立刻重放上一轮。
 19. 在 `Session History` 里点击 `Rename`，发送下一条普通文本，确认该文本只会更新历史标题，不会被转发给 agent；如果点击 `Cancel Rename`，则应返回历史列表。
 20. 点击 `Agent Commands`，确认可以看到当前 agent 暴露的 slash commands 列表；无参命令可直接运行，带 `args:` hint 的命令会要求下一条普通文本作为参数。
@@ -170,11 +207,12 @@
 26. 在文件预览页或 diff 预览页点击 `Add ... to Context`，再点击 `Context Bundle`，确认可以看到当前用户在当前 Provider + 当前 Workspace 下收集的 bundle 项，并可从 bundle 内重新打开文件预览或 diff 预览、直接移除当前预览项并返回 bundle；如果某个附件因 provider 能力不足被降级保存到 `.talk2agent/telegram-inbox/`，也应自动出现在 bundle 中。
 27. 在 `Context Bundle` 中点击 `Ask Agent With Context`，发送下一条普通文本，确认 agent 实际收到的是“多文件/多变更上下文 + 用户请求”，并基于当前 workspace 的最新本地状态作答。如果当前 workspace 下已经有最近一次普通文本请求，也要确认 bundle 视图的 `Ask With Last Request` 会直接复用同一句需求重新请求当前 bundle。也要确认 `Start Bundle Chat` 打开后，后续普通文本以及附件回合会持续自动附着当前 bundle，直到点击 `Stop Bundle Chat` 或清空 bundle。
 28. 让 agent 执行一次实际会修改工作区的任务，确认如果当前 Git 变更集合发生变化，bot 会额外发出一条快捷提示，可直接打开 `Workspace Changes`、点击 `Ask Agent With Current Changes` 继续追问、点击 `Start Bundle Chat With Changes` 进入持续上下文、批量加入 bundle 或打开 `Context Bundle`。也要确认从这条 follow-up 打开的 `Workspace Changes` / `Context Bundle` 子页面会带上 `Back to Change Update`，可以回到原始快捷提示。
-29. 点击 `Model / Mode`，确认可以直接看到当前 agent 暴露的模型/模式选项；如果当前用户还没有 live session，bot 应先拉起一个 session 再展示选项，并在切换后给出成功提示；如果当前 workspace 下已有上一轮请求，也可以直接点击 `Model+Retry ...` / `Mode+Retry ...`，确认 bot 会先更新配置，再立即重跑上一轮。
+29. 点击 `Model / Mode`，确认可以直接看到当前 agent 暴露的模型/模式选项；如果当前用户还没有 live session，bot 应先拉起一个 session 再展示选项，并在切换后给出成功提示；也要确认每个选项都可以通过 `Open Model N` / `Open Mode N` 进入详情页，查看 label、value、description、当前状态与 config option，并通过 `Back to Model / Mode` 返回；如果这个菜单是从 `Bot Status` 打开的，也要确认它还能继续 `Back to Bot Status`。如果当前 workspace 下已有上一轮请求，也可以直接点击 `Model+Retry ...` / `Mode+Retry ...`，确认 bot 会先更新配置，再立即重跑上一轮。
 30. 打开 Telegram 命令菜单，确认显示的是当前 agent 暴露的 slash commands，而不是 bot 自己的管理命令。
 31. 点击 `Restart Agent`，确认会话被重新拉起并分配新的 session。
 32. 重启机器人，确认它恢复到最近一次选中的 Provider 与 Workspace，而不是更早的配置默认值。
-33. 点击 `Bot Status`，确认它不会为查看状态而隐式创建新 session，但会展示当前 Provider、Workspace、路径、session、model/mode、待输入状态、session history 数量、last turn replay、last request text、`Context Bundle` 和 `Bundle Chat` 状态；也要确认其中的 `Session History`、`Agent Commands`、`Workspace Files`、`Workspace Search`、`Workspace Changes`、`Context Bundle`、`Model / Mode`、`Switch Agent`、`Switch Workspace` 快捷按钮都能直接打开对应视图或内联菜单，并且这些从状态页打开的子视图/菜单都支持 `Back to Bot Status` 返回；同时确认可以直接 `Cancel Pending Input`、对当前 bundle 执行 `Start/Stop Bundle Chat`、以及直接触发 `New Session`、`Retry/Fork Last Turn`、`Restart Agent`；管理员还应能直接进入 `Provider Sessions`。
+33. 点击 `Bot Status`，确认它不会为查看状态而隐式创建新 session，但会展示当前 Provider、Workspace、路径、session、session title（本地 history 或 ACP 原生标题）、model/mode、最近一次 ACP usage 快照、最近一次 ACP plan 预览、最近几条 ACP 工具活动摘要、待输入状态、session history 数量、last turn replay、last request text、`Context Bundle` 和 `Bundle Chat` 状态；如果当前 provider 支持 ACP `session/fork`，也要确认状态页会直接展示 `Fork Session`。同时确认其中的 `Session History`、`Session Info`、`Agent Commands`、`Workspace Files`、`Workspace Search`、`Workspace Changes`、`Context Bundle`、`Model / Mode`、`Switch Agent`、`Switch Workspace` 快捷按钮都能直接打开对应视图或内联菜单，并且这些从状态页打开的子视图/菜单都支持 `Back to Bot Status` 返回；同时应确认状态页会直接提供 `Workspace Runtime`；如果当前 live session 已缓存 usage 快照，也应确认状态页会显示 `Usage`；如果最近请求文本非空，也应确认状态页会显示 `Last Request`。同时确认可以直接 `Cancel Pending Input`、对当前 bundle 执行 `Start/Stop Bundle Chat`、以及直接触发 `New Session`、`Fork Session`、`Retry/Fork Last Turn`、`Restart Agent`；管理员还应能直接进入 `Provider Sessions`。打开 `Session Info` 后，应能查看当前 live session 的标题、更新时间、model/mode、capability 矩阵、usage 快照，以及命令/计划/工具活动缓存数量；如果对应缓存非空，也应能继续跳到 `Workspace Runtime`、`Usage`、`Last Request`、`Agent Commands`、`Agent Plan`、`Tool Activity`、`Last Turn`，并通过 `Back to Session Info` 回到 inspection hub，再返回 `Bot Status`。打开 `Workspace Runtime` 后，应能查看当前 workspace path、bot client filesystem / terminal bridge 状态，以及 workspace 级 MCP server 列表；如果当前 workspace 配置了 MCP server，还应能继续打开单个 server 详情，检查 transport、command/url、args 与 env/header key 名称，同时确认 secret value 不会显示出来，并支持 `Back to Workspace Runtime`，再返回 `Bot Status` 或 `Session Info`。如果最近 usage 快照非空，也要确认 `Usage` 视图会展示 used / size、remaining、utilization 和 cost，并支持 `Back to Bot Status` 或 `Back to Session Info`。如果最近请求文本非空，也要确认 `Last Request` 视图会展示完整文本、记录时的 provider 和来源摘要，并支持 `Back to Bot Status` 或 `Back to Session Info`。如果最近上一轮回放非空，也要确认状态页会显示 `Last Turn`；打开后应能检查 replay payload 的来源 provider、prompt item 列表、文本/资源详情，以及保存的 context item 预览，并能直接执行 `Retry/Fork Last Turn`。如果最近 plan 非空，也要确认状态页会显示 `Agent Plan`；打开后应能分页查看完整计划，并进入单条计划详情查看内容、状态和优先级，再通过 `Back to Agent Plan` / `Back to Bot Status` 返回。如果最近工具活动非空，也要确认状态页会显示 `Tool Activity`；打开后应能查看每条 tool call 的详情、终端输出尾部，并直接跳到关联文件或变更预览，再通过 `Back to Tool Activity` / `Back to Bot Status` 返回。
+34. 让 agent 执行一个会持续几秒的请求，在完成前打开 `Bot Status`，确认能看到 `Turn: running` 和 `Stop Turn`；点击 `Stop Turn` 后，确认状态页先刷新为“stop requested”，随后该回合以已有部分输出或 `Turn cancelled.` 结束，并且在回合结束前新的文本/命令/附件请求会被拒绝。
 
 这个 MVP 只支持 Telegram 轮询模式，不支持 webhook。
 

@@ -1,7 +1,15 @@
 import asyncio
 
 from acp.helpers import update_agent_message_text
-from acp.schema import ToolCallProgress, ToolCallStart
+from acp.schema import (
+    AgentPlanUpdate,
+    Cost,
+    PlanEntry,
+    ToolCallLocation,
+    ToolCallProgress,
+    ToolCallStart,
+    UsageUpdate,
+)
 
 
 def run(coro):
@@ -63,6 +71,66 @@ def test_render_update_text_formats_tool_events():
     assert render_update_text(start) == "\n[tool] Search docs\n"
     assert render_update_text(progress) == "[tool completed] Search docs\n"
     assert render_update_text(ignored) is None
+
+
+def test_render_update_text_formats_tool_event_details():
+    from talk2agent.bots.telegram_stream import render_update_text
+
+    start = ToolCallStart(
+        sessionUpdate="tool_call",
+        toolCallId="tool-1",
+        title="Run tests",
+        kind="execute",
+        status="in_progress",
+        rawInput={"command": "python -m pytest -q"},
+        locations=[ToolCallLocation(path="tests/test_app.py", line=12)],
+    )
+    completed = ToolCallProgress(
+        sessionUpdate="tool_call_update",
+        toolCallId="tool-1",
+        title="Run tests",
+        kind="execute",
+        status="completed",
+        rawInput={"command": "python -m pytest -q"},
+        locations=[ToolCallLocation(path="tests/test_app.py", line=12)],
+    )
+
+    assert render_update_text(start) == (
+        "\n[tool] Run tests [execute]\n"
+        "cmd: python -m pytest -q\n"
+        "paths: tests/test_app.py:12\n"
+    )
+    assert render_update_text(completed) == (
+        "[tool completed] Run tests [execute]\n"
+        "cmd: python -m pytest -q\n"
+        "paths: tests/test_app.py:12\n"
+    )
+
+
+def test_render_update_text_formats_plan_updates():
+    from talk2agent.bots.telegram_stream import render_update_text
+
+    update = AgentPlanUpdate(
+        sessionUpdate="plan",
+        entries=[
+            PlanEntry(
+                content="Audit runtime status",
+                status="in_progress",
+                priority="high",
+            ),
+            PlanEntry(
+                content="Update Telegram tests",
+                status="pending",
+                priority="medium",
+            ),
+        ],
+    )
+
+    assert render_update_text(update) == (
+        "\n[plan]\n"
+        "1. [>] Audit runtime status\n"
+        "2. [ ] Update Telegram tests\n"
+    )
 
 
 def test_split_telegram_text_chunks_long_text_to_limit():
@@ -138,6 +206,29 @@ def test_finish_sends_overflow_chunks_with_reply_text():
     assert message.reply_calls == ["abcd", "efgh", "ij"]
 
 
+def test_finish_appends_last_usage_update_once():
+    from talk2agent.bots.telegram_stream import TelegramTurnStream
+
+    message = FakeMessage()
+    stream = TelegramTurnStream(message=message)
+
+    async def scenario():
+        await stream.on_update(update_agent_message_text("hello from agent"))
+        await stream.on_update(
+            UsageUpdate(
+                sessionUpdate="usage_update",
+                used=128,
+                size=1024,
+                cost=Cost(amount=0.1, currency="USD"),
+            )
+        )
+        await stream.finish(stop_reason="completed")
+
+    run(scenario())
+
+    assert message.reply_calls == ["hello from agent\n[usage] used=128 size=1024 cost=0.10 USD"]
+
+
 def test_finish_uses_empty_response_fallback_when_no_text_buffered():
     from talk2agent.bots.telegram_stream import TelegramTurnStream
 
@@ -147,6 +238,17 @@ def test_finish_uses_empty_response_fallback_when_no_text_buffered():
     run(stream.finish(stop_reason="completed"))
 
     assert message.reply_calls == ["[empty response] stop_reason=completed"]
+
+
+def test_finish_uses_cancelled_fallback_when_turn_is_cancelled_without_text():
+    from talk2agent.bots.telegram_stream import TelegramTurnStream
+
+    message = FakeMessage()
+    stream = TelegramTurnStream(message=message)
+
+    run(stream.finish(stop_reason="cancelled"))
+
+    assert message.reply_calls == ["Turn cancelled."]
 
 
 def test_fail_sends_error_message():

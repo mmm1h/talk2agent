@@ -13,9 +13,11 @@ class FakeSession:
         self.last_used_at = last_used_at
         self.close_error = close_error
         self.session_id = session_id or f"session-{user_id}-{int(last_used_at)}"
+        self.session_title = None
         self.closed = False
         self.close_calls = 0
         self.load_calls = []
+        self.fork_calls = []
 
     async def close(self):
         self.closed = True
@@ -26,6 +28,10 @@ class FakeSession:
     async def load_session(self, session_id, *, prefer_resume):
         self.session_id = session_id
         self.load_calls.append((session_id, prefer_resume))
+
+    async def fork_session(self, session_id):
+        self.fork_calls.append(session_id)
+        self.session_id = f"fork-{session_id}"
 
 
 class FakeSessionFactory:
@@ -460,6 +466,29 @@ def test_record_session_usage_persists_local_history(tmp_path: Path):
     assert entries[0].title == "hello world from telegram"
 
 
+def test_record_session_usage_prefers_provider_session_title_when_available(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        session = await store.get_or_create(123)
+        session.session_title = "Workspace Refactor"
+        await store.record_session_usage(123, session, title_hint="fallback telegram title")
+        return await store.list_history(123)
+
+    entries = asyncio.run(scenario())
+
+    assert len(entries) == 1
+    assert entries[0].title == "Workspace Refactor"
+
+
 def test_delete_history_removes_local_entry_and_active_session(tmp_path: Path):
     history_store = SessionHistoryStore(tmp_path / "session-history.json")
     factory = FakeSessionFactory()
@@ -608,3 +637,116 @@ def test_activate_provider_session_imports_external_session_into_local_history(t
     assert session.session_id == "desktop-session"
     assert [entry.session_id for entry in history] == ["desktop-session"]
     assert history[0].title == "Desktop Flow"
+
+
+def test_fork_history_session_replaces_current_live_session_and_preserves_history_title(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        original = await store.get_or_create(123)
+        await store.record_session_usage(123, original, title_hint="History Thread")
+        forked = await store.fork_history_session(123, original.session_id)
+        current = await store.peek(123)
+        history = await store.list_history(123)
+        return original, forked, current, history
+
+    original, forked, current, history = asyncio.run(scenario())
+
+    assert original.closed is True
+    assert forked is current
+    assert forked.fork_calls == [original.session_id]
+    assert forked.session_id == f"fork-{original.session_id}"
+    assert [entry.session_id for entry in history] == [forked.session_id, original.session_id]
+    assert history[0].title == "History Thread"
+
+
+def test_fork_history_session_rejects_session_from_other_workspace(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    first_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-a",
+        history_store=history_store,
+    )
+    second_store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace-b",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        first = await first_store.get_or_create(123)
+        await first_store.record_session_usage(123, first, title_hint="first")
+        with pytest.raises(KeyError):
+            await second_store.fork_history_session(123, first.session_id)
+
+    asyncio.run(scenario())
+
+
+def test_fork_provider_session_imports_forked_external_session_into_local_history(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        session = await store.fork_provider_session(
+            123,
+            "desktop-session",
+            title_hint="Desktop Flow",
+        )
+        history = await store.list_history(123)
+        return session, history
+
+    session, history = asyncio.run(scenario())
+
+    assert session.fork_calls == ["desktop-session"]
+    assert session.session_id == "fork-desktop-session"
+    assert [entry.session_id for entry in history] == ["fork-desktop-session"]
+    assert history[0].title == "Desktop Flow"
+
+
+def test_fork_live_session_replaces_current_live_session_with_provider_fork(tmp_path: Path):
+    history_store = SessionHistoryStore(tmp_path / "session-history.json")
+    factory = FakeSessionFactory()
+    store = SessionStore(
+        session_factory=factory,
+        idle_timeout_minutes=30,
+        provider="codex",
+        workspace_dir="F:/workspace",
+        history_store=history_store,
+    )
+
+    async def scenario():
+        original = await store.get_or_create(123)
+        original.session_title = "Active Thread"
+        forked = await store.fork_live_session(123)
+        current = await store.peek(123)
+        history = await store.list_history(123)
+        return original, forked, current, history
+
+    original, forked, current, history = asyncio.run(scenario())
+
+    assert original.closed is True
+    assert forked is current
+    assert forked.fork_calls == ["session-123-2"]
+    assert forked.session_id == "fork-session-123-2"
+    assert [entry.session_id for entry in history] == ["fork-session-123-2"]
+    assert history[0].title == "Active Thread"

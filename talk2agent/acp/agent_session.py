@@ -17,9 +17,14 @@ from acp import (
     spawn_agent_process,
     text_block,
 )
+from acp.schema import ClientCapabilities, FileSystemCapability
 
 from talk2agent.acp.bot_client import BotClient
 from talk2agent.acp.permission import AutoApprovePermissionPolicy
+from talk2agent.acp.tool_activity import ToolActivitySummary, summarize_tool_update
+
+
+RECENT_TOOL_ACTIVITY_LIMIT = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,9 +47,25 @@ class AgentSessionCapabilities:
     can_load: bool
     can_list: bool
     can_resume: bool
+    can_fork: bool
     supports_image_prompt: bool
     supports_audio_prompt: bool
     supports_embedded_context_prompt: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SessionPlanEntry:
+    content: str
+    status: str
+    priority: str
+
+
+@dataclass(frozen=True, slots=True)
+class SessionUsageSnapshot:
+    used: int
+    size: int
+    cost_amount: float | None = None
+    cost_currency: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +120,10 @@ class SessionListingNotSupportedError(RuntimeError):
     pass
 
 
+class SessionForkingNotSupportedError(RuntimeError):
+    pass
+
+
 class AgentSession:
     def __init__(
         self,
@@ -125,6 +150,7 @@ class AgentSession:
         self._client = BotClient(
             on_update=self._handle_update,
             permission_policy=self._permission_policy,
+            workspace_dir=self.cwd,
         )
         self._lifecycle_lock = asyncio.Lock()
         self._startup_lock = asyncio.Lock()
@@ -136,6 +162,7 @@ class AgentSession:
             can_load=False,
             can_list=False,
             can_resume=False,
+            can_fork=False,
             supports_image_prompt=False,
             supports_audio_prompt=False,
             supports_embedded_context_prompt=False,
@@ -144,6 +171,11 @@ class AgentSession:
         self._mode_selection: SessionSelection | None = None
         self._available_commands: tuple[SessionCommand, ...] = ()
         self._available_commands_event = asyncio.Event()
+        self._session_title: str | None = None
+        self._session_updated_at: str | None = None
+        self._plan_entries: tuple[SessionPlanEntry, ...] = ()
+        self._usage: SessionUsageSnapshot | None = None
+        self._recent_tool_activities: tuple[ToolActivitySummary, ...] = ()
 
     @property
     def capabilities(self) -> AgentSessionCapabilities:
@@ -152,6 +184,26 @@ class AgentSession:
     @property
     def available_commands(self) -> tuple[SessionCommand, ...]:
         return self._available_commands
+
+    @property
+    def session_title(self) -> str | None:
+        return self._session_title
+
+    @property
+    def session_updated_at(self) -> str | None:
+        return self._session_updated_at
+
+    @property
+    def plan_entries(self) -> tuple[SessionPlanEntry, ...]:
+        return self._plan_entries
+
+    @property
+    def usage(self) -> SessionUsageSnapshot | None:
+        return self._usage
+
+    @property
+    def recent_tool_activities(self) -> tuple[ToolActivitySummary, ...]:
+        return self._recent_tool_activities
 
     def get_selection(self, kind: str) -> SessionSelection | None:
         if kind == "model":
@@ -185,6 +237,30 @@ class AgentSession:
                         "session listing not supported by current provider"
                     )
                 return await self._conn.list_sessions(cursor=cursor, cwd=self.cwd)
+
+    async def fork_session(self, session_id: str):
+        async with self._lifecycle_lock:
+            async with self._startup_lock:
+                await self._ensure_connected_unlocked()
+                if not self._capabilities.can_fork:
+                    raise SessionForkingNotSupportedError(
+                        "session forking not supported by current provider"
+                    )
+                response = await self._conn.fork_session(
+                    cwd=self.cwd,
+                    session_id=session_id,
+                    mcp_servers=self.mcp_servers,
+                )
+                self._apply_session_state(response.session_id, response)
+            self.last_used_at = time.monotonic()
+
+    async def cancel_turn(self) -> bool:
+        async with self._startup_lock:
+            if self._conn is None or self.session_id is None:
+                return False
+            await self._conn.cancel(session_id=self.session_id)
+        self.last_used_at = time.monotonic()
+        return True
 
     async def load_session(self, session_id: str, *, prefer_resume: bool = True):
         async with self._lifecycle_lock:
@@ -282,6 +358,14 @@ class AgentSession:
                     getattr(update, "availableCommands", None),
                 )
             )
+        elif session_update == "session_info_update":
+            self._apply_session_info_update(update)
+        elif session_update == "plan":
+            self._apply_plan_entries(getattr(update, "entries", None))
+        elif session_update == "usage_update":
+            self._apply_usage_update(update)
+
+        self._remember_tool_activity(update)
 
         if self._active_sink is None:
             return
@@ -290,6 +374,18 @@ class AgentSession:
     async def close(self):
         async with self._lifecycle_lock:
             await self._close_locked()
+
+    async def read_terminal_output(self, terminal_id: str):
+        async with self._startup_lock:
+            if self.session_id is None:
+                return None
+            try:
+                return await self._client.terminal_output(
+                    session_id=self.session_id,
+                    terminal_id=terminal_id,
+                )
+            except KeyError:
+                return None
 
     async def _close_locked(self):
         async with self._startup_lock:
@@ -309,7 +405,15 @@ class AgentSession:
         self._mode_selection = None
         self._available_commands = ()
         self._available_commands_event = asyncio.Event()
+        self._session_title = None
+        self._session_updated_at = None
+        self._plan_entries = ()
+        self._usage = None
+        self._recent_tool_activities = ()
 
+        close_client = getattr(self._client, "close", None)
+        if close_client is not None:
+            await close_client()
         await context_manager.__aexit__(None, None, None)
 
     async def reset(self):
@@ -332,7 +436,16 @@ class AgentSession:
 
         try:
             conn, process = await context_manager.__aenter__()
-            initialize_response = await conn.initialize(protocol_version=PROTOCOL_VERSION)
+            initialize_response = await conn.initialize(
+                protocol_version=PROTOCOL_VERSION,
+                client_capabilities=ClientCapabilities(
+                    fs=FileSystemCapability(
+                        read_text_file=True,
+                        write_text_file=True,
+                    ),
+                    terminal=True,
+                ),
+            )
         except Exception:
             await context_manager.__aexit__(None, None, None)
             raise
@@ -381,6 +494,8 @@ class AgentSession:
             and getattr(session_capabilities, "list", None) is not None,
             can_resume=session_capabilities is not None
             and getattr(session_capabilities, "resume", None) is not None,
+            can_fork=session_capabilities is not None
+            and getattr(session_capabilities, "fork", None) is not None,
             supports_image_prompt=bool(getattr(prompt_capabilities, "image", False)),
             supports_audio_prompt=bool(getattr(prompt_capabilities, "audio", False)),
             supports_embedded_context_prompt=bool(
@@ -390,6 +505,11 @@ class AgentSession:
 
     def _apply_session_state(self, session_id: str, response: Any) -> None:
         self.session_id = session_id
+        self._session_title = None
+        self._session_updated_at = None
+        self._plan_entries = ()
+        self._usage = None
+        self._recent_tool_activities = ()
         config_options = getattr(response, "config_options", None)
         self._apply_config_options(config_options)
         if config_options is not None:
@@ -397,6 +517,62 @@ class AgentSession:
 
         self._model_selection = self._selection_from_models(getattr(response, "models", None))
         self._mode_selection = self._selection_from_modes(getattr(response, "modes", None))
+
+    def _apply_session_info_update(self, update: Any) -> None:
+        title = getattr(update, "title", None)
+        if title is not None:
+            normalized_title = str(title).strip()
+            self._session_title = normalized_title or None
+
+        updated_at = getattr(update, "updated_at", getattr(update, "updatedAt", None))
+        if updated_at is not None:
+            normalized_updated_at = str(updated_at).strip()
+            self._session_updated_at = normalized_updated_at or None
+
+    def _apply_plan_entries(self, raw_entries: Any) -> None:
+        entries: list[SessionPlanEntry] = []
+        if raw_entries is not None:
+            for raw_entry in raw_entries:
+                content = str(getattr(raw_entry, "content", "")).strip()
+                if not content:
+                    continue
+                entries.append(
+                    SessionPlanEntry(
+                        content=content,
+                        status=str(getattr(raw_entry, "status", "pending")),
+                        priority=str(getattr(raw_entry, "priority", "medium")),
+                    )
+                )
+        self._plan_entries = tuple(entries)
+
+    def _apply_usage_update(self, update: Any) -> None:
+        used = getattr(update, "used", None)
+        size = getattr(update, "size", None)
+        if used is None or size is None:
+            return
+
+        cost = getattr(update, "cost", None)
+        amount = getattr(cost, "amount", None)
+        currency = getattr(cost, "currency", None)
+        self._usage = SessionUsageSnapshot(
+            used=int(used),
+            size=int(size),
+            cost_amount=None if amount is None else float(amount),
+            cost_currency=None if currency is None else str(currency),
+        )
+
+    def _remember_tool_activity(self, update: Any) -> None:
+        summary = summarize_tool_update(update)
+        if summary is None:
+            return
+
+        items = [summary]
+        items.extend(
+            existing
+            for existing in self._recent_tool_activities
+            if existing.tool_call_id != summary.tool_call_id
+        )
+        self._recent_tool_activities = tuple(items[:RECENT_TOOL_ACTIVITY_LIMIT])
 
     def _apply_available_commands(self, raw_commands: Any) -> None:
         commands: list[SessionCommand] = []

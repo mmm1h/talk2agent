@@ -9,6 +9,7 @@ from pathlib import Path
 from telegram.error import InvalidToken
 
 from talk2agent.acp.agent_session import AgentSession, SessionListingNotSupportedError
+from talk2agent.acp.mcp_servers import build_workspace_mcp_servers
 from talk2agent.bots.telegram_bot import build_telegram_application
 from talk2agent.config import AppConfig
 from talk2agent.provider_runtime import (
@@ -44,6 +45,7 @@ class ProviderCapabilitySummary:
     supports_image_prompt: bool = False
     supports_audio_prompt: bool = False
     supports_embedded_context_prompt: bool = False
+    can_fork_sessions: bool = False
     can_list_sessions: bool = False
     can_resume_sessions: bool = False
     error: str | None = None
@@ -82,10 +84,11 @@ class AppServices:
 
     async def discover_agent_commands(self, timeout_seconds: float = 2.0):
         state = await self.snapshot_runtime_state()
+        workspace = self.config.agent.resolve_workspace(state.workspace_id)
         session = _build_agent_session(
             self.config,
             state.provider,
-            state.workspace_path,
+            workspace.path,
         )
         try:
             await session.ensure_started()
@@ -100,10 +103,11 @@ class AppServices:
 
     async def list_provider_sessions(self, cursor: str | None = None) -> ProviderSessionPage:
         state = await self.snapshot_runtime_state()
+        workspace = self.config.agent.resolve_workspace(state.workspace_id)
         session = _build_agent_session(
             self.config,
             state.provider,
-            state.workspace_path,
+            workspace.path,
         )
         try:
             response = await session.list_sessions(cursor=cursor)
@@ -134,14 +138,14 @@ class AppServices:
         workspace_id: str | None = None,
     ) -> ProviderCapabilitySummary:
         state = await self.snapshot_runtime_state()
-        workspace_path = state.workspace_path
+        workspace = self.config.agent.resolve_workspace(state.workspace_id)
         if workspace_id is not None:
-            workspace_path = self.config.agent.resolve_workspace(workspace_id).path
+            workspace = self.config.agent.resolve_workspace(workspace_id)
 
         session = _build_agent_session(
             self.config,
             provider,
-            workspace_path,
+            workspace.path,
         )
         try:
             await session.ensure_started()
@@ -152,6 +156,7 @@ class AppServices:
                 supports_image_prompt=capabilities.supports_image_prompt,
                 supports_audio_prompt=capabilities.supports_audio_prompt,
                 supports_embedded_context_prompt=capabilities.supports_embedded_context_prompt,
+                can_fork_sessions=capabilities.can_fork,
                 can_list_sessions=capabilities.can_list,
                 can_resume_sessions=capabilities.can_resume,
             )
@@ -244,10 +249,12 @@ class AppServices:
 
 def _build_agent_session(config: AppConfig, provider: str, workspace_dir: str) -> AgentSession:
     profile = resolve_provider_profile(provider)
+    workspace = config.agent.resolve_workspace_by_path(workspace_dir)
     return AgentSession(
         command=profile.command,
         args=profile.args,
         cwd=workspace_dir,
+        mcp_servers=build_workspace_mcp_servers(workspace),
     )
 
 

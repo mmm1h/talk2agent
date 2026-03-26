@@ -20,6 +20,7 @@
 - `Fork Last Turn` 语义是“在当前 Workspace 作用域内，先创建一个新的 session，再把上一条真正发给 ACP 的请求重放到新 session 中”；旧 session 仍通过本地 history 保留，用户在手机端即可直接分叉工作线；如果用户刚切到另一个 agent，只要 workspace 没变，也可以直接把上一回合分叉到新 agent 上。
 - 当当前 Workspace 下存在可重放的上一轮请求时，`Switch Agent` 菜单会为每个目标 provider 暴露一键 `Retry on ...` / `Fork on ...` 入口；它们先执行全局 Provider 切换，再立即在目标 provider 上重试或分叉上一轮。
 - 当当前 Workspace 下存在可重放的上一轮请求时，`Session History` 和管理员可见的 `Provider Sessions` 视图也会暴露一键 `Run+Retry` 入口；它们先接管目标 session，再立即把上一轮请求重放进这个 session。
+- `Session History` 不只保留列表切换；手机端应能先打开单个 history entry 的详情页，检查 session id、cwd、创建/更新时间与当前附着状态，再决定是否切换或分叉。
 - Session history 删除只删 `talk2agent` 本地记录，不尝试硬删除 Provider 侧原始 session。
 - `Session History` 只显示“当前 Provider + 当前 Workspace + 当前 Telegram 用户 + 当前 bot 自己记录过”的会话。
 - `Session History` 里的 `Run+Retry` 只在当前 Workspace 下存在可重放上一轮时显示；它不改变 replay 的作用域，只是压缩“切 session -> 再点 Retry Last Turn”的手机端操作。
@@ -28,6 +29,7 @@
 - 由 `New Session`、`Restart Agent` 或 `Model / Mode` 首次拉起的本地 live session，也会立即写入本地 history，避免用户刚创建会话却在 `Session History` 里看不到它。
 - `Model / Mode` 切换成功后，也应立刻刷新当前 session 的本地 history 时间戳，并同步刷新当前用户的 Telegram slash command 菜单，避免命令集随配置变化后仍停留在旧状态。
 - 当当前 Workspace 下存在可重放的上一轮请求时，`Model / Mode` 视图也会为非当前选项暴露一键 `...+Retry` 入口；它先更新当前 session 的 model 或 mode，再立即重放上一轮请求。
+- `Model / Mode` 视图里的每个选项还应支持单独打开详情页，查看 label、value、description、当前是否生效以及对应 config option，再决定是否切换；如果入口来自 `Bot Status`，详情页返回链也要保留到状态页。
 - 如果用户在 `Session History` 里删除的是当前 `[current]` live session，bot 也要同步清理该 session 绑定的旧 callback token、待输入文本动作、agent command alias 和 media group 缓冲，并把该用户的 Telegram slash command 菜单刷新回当前 Provider 的默认发现结果；`Context Bundle` 与 `Bundle Chat` 保持不变。
 - 如果某次普通文本、命令或附件回合因为 provider / session 异常而导致 bot 主动失效当前 live session，bot 也要同步清理该 session 绑定的旧 callback token、待输入文本动作、agent command alias 和 media group 缓冲，并把该用户的 Telegram slash command 菜单刷新回当前 Provider 的默认发现结果；`Context Bundle` 与 `Bundle Chat` 保持不变。
 - 上述 session 异常失效后的失败消息要直接给出恢复入口：普通用户至少能一跳进入 `Retry Last Turn`、`Fork Last Turn`、`New Session`、`Session History`、`Model / Mode`；管理员还应额外得到 `Switch Agent` 和 `Switch Workspace`。
@@ -100,8 +102,8 @@
 - Provider 切换并立即 `Retry Last Turn` / `Fork Last Turn`
 - Model / Mode 切换并立即 `Retry Last Turn`
 - Workspace 切换
-- Session history 分页 / 运行 / 删除
-- Model / Mode 选项列表
+- Session history 分页 / 单项详情 / 运行 / 删除
+- Model / Mode 选项列表 / 单项详情
 
 callback data 不直接携带长 `session_id`；bot 进程内部用短 token 做临时映射。
 Telegram 命令菜单通过 `setMyCommands` 按允许用户逐个同步，并在 bot 内维护 alias -> 原始 agent command 的映射。

@@ -6,9 +6,12 @@ import pytest
 from telegram.error import InvalidToken
 
 from talk2agent.app import build_services
+from talk2agent.acp.mcp_servers import build_workspace_mcp_servers
 from talk2agent.config import (
     AgentConfig,
     AppConfig,
+    McpServerConfig,
+    NameValueConfig,
     PermissionsConfig,
     RuntimeConfig,
     TelegramConfig,
@@ -32,11 +35,13 @@ def make_config(tmp_path: Path, provider: str = "gemini") -> AppConfig:
                     id="default",
                     label="Default Workspace",
                     path=str(tmp_path),
+                    mcp_servers=[],
                 ),
                 WorkspaceConfig(
                     id="alt",
                     label="Alt Workspace",
                     path=str(tmp_path / "alt"),
+                    mcp_servers=[],
                 ),
             ],
         ),
@@ -360,6 +365,7 @@ def test_discover_provider_capabilities_returns_prompt_and_session_support(tmp_p
             supports_image_prompt=True,
             supports_audio_prompt=False,
             supports_embedded_context_prompt=True,
+            can_fork=True,
             can_list=True,
             can_resume=False,
         )
@@ -382,6 +388,7 @@ def test_discover_provider_capabilities_returns_prompt_and_session_support(tmp_p
     assert summary.supports_image_prompt is True
     assert summary.supports_audio_prompt is False
     assert summary.supports_embedded_context_prompt is True
+    assert summary.can_fork_sessions is True
     assert summary.can_list_sessions is True
     assert summary.can_resume_sessions is False
     assert summary.error is None
@@ -407,6 +414,67 @@ def test_discover_provider_capabilities_reports_unavailable_provider(tmp_path: P
     assert summary.provider == "codex"
     assert summary.available is False
     assert summary.error == "command missing"
+
+
+def test_build_agent_session_attaches_workspace_mcp_servers(tmp_path: Path):
+    from talk2agent.app import _build_agent_session
+
+    config = make_config(tmp_path, provider="codex")
+    config.agent.workspaces[0].mcp_servers = [
+        McpServerConfig(
+            name="local-docs",
+            transport="stdio",
+            command="uvx",
+            args=["docs-mcp"],
+            env=[NameValueConfig(name="API_KEY", value="secret")],
+        ),
+        McpServerConfig(
+            name="remote-search",
+            transport="http",
+            url="https://example.com/mcp",
+            headers=[NameValueConfig(name="Authorization", value="Bearer token")],
+        ),
+    ]
+
+    session = _build_agent_session(config, "codex", str(tmp_path))
+
+    assert len(session.mcp_servers) == 2
+    assert session.mcp_servers[0].name == "local-docs"
+    assert session.mcp_servers[0].command == "uvx"
+    assert session.mcp_servers[0].args == ["docs-mcp"]
+    assert [(item.name, item.value) for item in session.mcp_servers[0].env] == [
+        ("API_KEY", "secret")
+    ]
+    assert session.mcp_servers[1].name == "remote-search"
+    assert session.mcp_servers[1].url == "https://example.com/mcp"
+    assert [(item.name, item.value) for item in session.mcp_servers[1].headers] == [
+        ("Authorization", "Bearer token")
+    ]
+
+
+def test_build_workspace_mcp_servers_supports_sse_headers(tmp_path: Path):
+    workspace = WorkspaceConfig(
+        id="default",
+        label="Default Workspace",
+        path=str(tmp_path),
+        mcp_servers=[
+            McpServerConfig(
+                name="events",
+                transport="sse",
+                url="https://example.com/sse",
+                headers=[NameValueConfig(name="X-Workspace", value="repo-a")],
+            )
+        ],
+    )
+
+    servers = build_workspace_mcp_servers(workspace)
+
+    assert len(servers) == 1
+    assert servers[0].name == "events"
+    assert servers[0].url == "https://example.com/sse"
+    assert [(item.name, item.value) for item in servers[0].headers] == [
+        ("X-Workspace", "repo-a")
+    ]
 
 
 def test_run_app_closes_active_store_on_shutdown(monkeypatch):

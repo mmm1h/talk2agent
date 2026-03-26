@@ -46,6 +46,7 @@ from talk2agent.workspace_git import read_workspace_git_diff_preview, read_works
 from talk2agent.workspace_files import (
     list_workspace_entries,
     read_workspace_file_preview,
+    resolve_workspace_path,
     search_workspace_text,
 )
 
@@ -87,6 +88,18 @@ STATUS_COMMAND_BUTTONS_PER_ROW = 2
 STATUS_SELECTION_QUICK_LIMIT = 2
 STATUS_SELECTION_BUTTONS_PER_ROW = 2
 STATUS_RECENT_SESSION_PREVIEW_LIMIT = 2
+STATUS_PLAN_PREVIEW_LIMIT = 3
+STATUS_TOOL_ACTIVITY_PREVIEW_LIMIT = 3
+PLAN_PAGE_SIZE = 6
+LAST_TURN_PAGE_SIZE = 5
+LAST_TURN_TEXT_SNIPPET_LIMIT = 120
+LAST_TURN_TEXT_DETAIL_LIMIT = 3000
+LAST_TURN_CONTEXT_PREVIEW_LIMIT = 3
+TOOL_ACTIVITY_PAGE_SIZE = 5
+TOOL_ACTIVITY_PATH_BUTTON_LIMIT = 3
+TOOL_ACTIVITY_TERMINAL_PREVIEW_LIMIT = 2
+TOOL_ACTIVITY_OUTPUT_PREVIEW_LIMIT = 600
+WORKSPACE_RUNTIME_SERVER_PREVIEW_LIMIT = 8
 _TEXT_DOCUMENT_SUFFIXES = {
     ".c",
     ".cfg",
@@ -143,6 +156,7 @@ class _PendingTextAction:
 class _HistoryViewState:
     entries: list[Any]
     active_session_id: str | None
+    active_session_can_fork: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +165,7 @@ class _ProviderSessionsViewState:
     next_cursor: str | None
     supported: bool
     active_session_id: str | None
+    active_session_can_fork: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +235,8 @@ class _ActiveContextBundleChat:
 class _LastRequestText:
     workspace_id: str
     text: str
+    provider: str | None = None
+    source_summary: str | None = None
 
 
 @dataclass(slots=True)
@@ -227,8 +244,30 @@ class _MediaGroupBuffer:
     messages: list[Any]
     task: asyncio.Task | None = None
 
+@dataclass(slots=True)
+class _ActiveTurn:
+    provider: str
+    workspace_id: str
+    title_hint: str
+    task: asyncio.Task
+    started_at: float
+    session: Any | None = None
+    stop_requested: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolActivityTerminalPreview:
+    terminal_id: str
+    status_label: str
+    output: str | None
+    truncated: bool = False
+
 
 class AttachmentPromptError(ValueError):
+    pass
+
+
+class _ModelModeSessionCreationError(RuntimeError):
     pass
 
 
@@ -251,6 +290,7 @@ class TelegramUiState:
         self._last_turns: dict[int, _ReplayTurn] = {}
         self._last_request_texts: dict[int, _LastRequestText] = {}
         self._media_groups: dict[tuple[int, str], _MediaGroupBuffer] = {}
+        self._active_turns: dict[int, _ActiveTurn] = {}
 
     def create(self, user_id: int, action: str, **payload: Any) -> str:
         self._prune()
@@ -294,6 +334,87 @@ class TelegramUiState:
         self._prune()
         return self._pending_text_actions.pop(user_id, None)
 
+    def start_active_turn(
+        self,
+        user_id: int,
+        *,
+        provider: str,
+        workspace_id: str,
+        title_hint: str,
+        task: asyncio.Task,
+    ) -> _ActiveTurn:
+        self._prune()
+        active_turn = _ActiveTurn(
+            provider=provider,
+            workspace_id=workspace_id,
+            title_hint=title_hint,
+            task=task,
+            started_at=self._clock(),
+        )
+        self._active_turns[user_id] = active_turn
+        return active_turn
+
+    def get_active_turn(
+        self,
+        user_id: int,
+        *,
+        provider: str | None = None,
+        workspace_id: str | None = None,
+    ) -> _ActiveTurn | None:
+        self._prune()
+        active_turn = self._active_turns.get(user_id)
+        if active_turn is None:
+            return None
+        if provider is not None and active_turn.provider != provider:
+            return None
+        if workspace_id is not None and active_turn.workspace_id != workspace_id:
+            return None
+        return active_turn
+
+    def bind_active_turn_session(
+        self,
+        user_id: int,
+        *,
+        task: asyncio.Task | None,
+        session: Any,
+    ) -> None:
+        self._prune()
+        active_turn = self._active_turns.get(user_id)
+        if active_turn is None:
+            return
+        if task is not None and active_turn.task is not task:
+            return
+        active_turn.session = session
+
+    def mark_active_turn_stop_requested(
+        self,
+        user_id: int,
+        *,
+        task: asyncio.Task | None = None,
+    ) -> bool:
+        self._prune()
+        active_turn = self._active_turns.get(user_id)
+        if active_turn is None:
+            return False
+        if task is not None and active_turn.task is not task:
+            return False
+        active_turn.stop_requested = True
+        return True
+
+    def clear_active_turn(
+        self,
+        user_id: int,
+        *,
+        task: asyncio.Task | None = None,
+    ) -> _ActiveTurn | None:
+        self._prune()
+        active_turn = self._active_turns.get(user_id)
+        if active_turn is None:
+            return None
+        if task is not None and active_turn.task is not task:
+            return None
+        return self._active_turns.pop(user_id, None)
+
     def set_last_turn(
         self,
         user_id: int,
@@ -320,6 +441,9 @@ class TelegramUiState:
         user_id: int,
         workspace_id: str,
         text: str,
+        *,
+        provider: str | None = None,
+        source_summary: str | None = None,
     ) -> None:
         normalized_text = text.strip()
         if not normalized_text:
@@ -328,18 +452,30 @@ class TelegramUiState:
         self._last_request_texts[user_id] = _LastRequestText(
             workspace_id=workspace_id,
             text=normalized_text,
+            provider=provider,
+            source_summary=source_summary,
         )
+
+    def get_last_request(
+        self,
+        user_id: int,
+        workspace_id: str,
+    ) -> _LastRequestText | None:
+        last_request_text = self._last_request_texts.get(user_id)
+        if last_request_text is None:
+            return None
+        if last_request_text.workspace_id != workspace_id:
+            self._last_request_texts.pop(user_id, None)
+            return None
+        return last_request_text
 
     def get_last_request_text(
         self,
         user_id: int,
         workspace_id: str,
     ) -> str | None:
-        last_request_text = self._last_request_texts.get(user_id)
+        last_request_text = self.get_last_request(user_id, workspace_id)
         if last_request_text is None:
-            return None
-        if last_request_text.workspace_id != workspace_id:
-            self._last_request_texts.pop(user_id, None)
             return None
         return last_request_text.text
 
@@ -525,6 +661,13 @@ class TelegramUiState:
         ]
         for user_id in expired_user_ids:
             self._pending_text_actions.pop(user_id, None)
+        completed_turn_user_ids = [
+            user_id
+            for user_id, active_turn in self._active_turns.items()
+            if active_turn.task.done()
+        ]
+        for user_id in completed_turn_user_ids:
+            self._active_turns.pop(user_id, None)
 
 
 def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
@@ -832,7 +975,6 @@ async def handle_text(
             return
 
     state = await services.snapshot_runtime_state()
-    ui_state.set_last_request_text(user_id, state.workspace_id, text)
     if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
         bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
         if bundle is None or not bundle.items:
@@ -845,6 +987,13 @@ async def handle_text(
             )
             return
 
+        ui_state.set_last_request_text(
+            user_id,
+            state.workspace_id,
+            text,
+            provider=state.provider,
+            source_summary=_last_request_bundle_chat_source_summary(len(bundle.items)),
+        )
         await _run_agent_prompt_turn_on_message(
             update.message,
             user_id,
@@ -856,6 +1005,13 @@ async def handle_text(
         )
         return
 
+    ui_state.set_last_request_text(
+        user_id,
+        state.workspace_id,
+        text,
+        provider=state.provider,
+        source_summary=_last_request_plain_text_source_summary(),
+    )
     await _run_agent_text_turn(
         update,
         services,
@@ -979,7 +1135,8 @@ async def handle_debug_status(
                 f",docs={'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}"
             )
             session_caps = (
-                f"list={'yes' if getattr(capabilities, 'can_list', False) else 'no'}"
+                f"fork={'yes' if getattr(capabilities, 'can_fork', False) else 'no'}"
+                f",list={'yes' if getattr(capabilities, 'can_list', False) else 'no'}"
                 f",resume={'yes' if getattr(capabilities, 'can_resume', False) else 'no'}"
             )
             capability_suffix = f" prompt_caps={prompt_caps} session_caps={session_caps}"
@@ -1088,6 +1245,358 @@ async def _show_runtime_status_on_message(
     await message.edit_text(text, reply_markup=markup)
 
 
+async def _show_session_info_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, session, history_entries, _ = await _load_runtime_status_view_state(
+        services,
+        user_id,
+    )
+    text, markup = _build_session_info_view(
+        provider=state.provider,
+        workspace_id=state.workspace_id,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        session=session,
+        session_title=_current_session_history_title(session, history_entries),
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_usage_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, session, history_entries, _ = await _load_runtime_status_view_state(
+        services,
+        user_id,
+    )
+    text, markup = _build_usage_view(
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        session=session,
+        session_title=_current_session_history_title(session, history_entries),
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_last_request_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    text, markup = _build_last_request_view(
+        last_request=ui_state.get_last_request(user_id, state.workspace_id),
+        current_provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_workspace_runtime_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    workspace = services.config.agent.resolve_workspace(state.workspace_id)
+    text, markup = _build_workspace_runtime_view(
+        provider=state.provider,
+        workspace=workspace,
+        workspace_path=state.workspace_path,
+        user_id=user_id,
+        ui_state=ui_state,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_workspace_runtime_server_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    server_index: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    workspace = services.config.agent.resolve_workspace(state.workspace_id)
+    mcp_servers = tuple(getattr(workspace, "mcp_servers", ()) or ())
+    if server_index < 0 or server_index >= len(mcp_servers):
+        await _show_workspace_runtime_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            back_target=back_target,
+            notice="MCP server is no longer available in this workspace runtime.",
+        )
+        return
+    text, markup = _build_workspace_runtime_server_view(
+        provider=state.provider,
+        workspace=workspace,
+        workspace_path=state.workspace_path,
+        user_id=user_id,
+        ui_state=ui_state,
+        server=mcp_servers[server_index],
+        server_index=server_index,
+        server_count=len(mcp_servers),
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_last_turn_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    replay_turn = ui_state.get_last_turn(user_id, state.provider, state.workspace_id)
+    text, markup = _build_last_turn_view(
+        replay_turn=replay_turn,
+        current_provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_last_turn_item_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    item_index: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    replay_turn = ui_state.get_last_turn(user_id, state.provider, state.workspace_id)
+    prompt_items = _replay_prompt_items(replay_turn)
+    if replay_turn is None or item_index < 0 or item_index >= len(prompt_items):
+        await _show_last_turn_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            page=page,
+            back_target=back_target,
+            notice="Selected replay item is no longer available.",
+        )
+        return
+
+    text, markup = _build_last_turn_item_view(
+        replay_turn=replay_turn,
+        current_provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        item=prompt_items[item_index],
+        item_index=item_index,
+        total_count=len(prompt_items),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_plan_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, session, _, _ = await _load_runtime_status_view_state(
+        services,
+        user_id,
+    )
+    text, markup = _build_plan_view(
+        entries=_plan_items(session),
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        session_id=None if session is None else getattr(session, "session_id", None),
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_plan_detail_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    plan_index: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, session, _, _ = await _load_runtime_status_view_state(
+        services,
+        user_id,
+    )
+    entries = _plan_items(session)
+    if plan_index < 0 or plan_index >= len(entries):
+        await _show_plan_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            page=page,
+            back_target=back_target,
+            notice="Selected plan entry is no longer available.",
+        )
+        return
+
+    text, markup = _build_plan_detail_view(
+        entry=entries[plan_index],
+        plan_index=plan_index,
+        total_count=len(entries),
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_tool_activity_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, session, _, _ = await _load_runtime_status_view_state(
+        services,
+        user_id,
+    )
+    text, markup = _build_tool_activity_view(
+        activities=_tool_activity_items(session),
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        session_id=None if session is None else getattr(session, "session_id", None),
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_tool_activity_detail_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    activity_index: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, session, _, git_status = await _load_runtime_status_view_state(
+        services,
+        user_id,
+    )
+    activities = _tool_activity_items(session)
+    if activity_index < 0 or activity_index >= len(activities):
+        await _show_tool_activity_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            page=page,
+            back_target=back_target,
+            notice="Selected tool activity is no longer available.",
+        )
+        return
+
+    activity = activities[activity_index]
+    openable_paths = _tool_activity_openable_paths(state.workspace_path, activity)
+    change_targets = _tool_activity_change_targets(git_status, openable_paths)
+    terminal_previews = await _load_tool_activity_terminal_previews(session, activity)
+    text, markup = _build_tool_activity_detail_view(
+        activity=activity,
+        activity_index=activity_index,
+        total_count=len(activities),
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        openable_paths=openable_paths,
+        change_targets=change_targets,
+        terminal_previews=terminal_previews,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
 def _pending_text_action_label(pending_text_action: _PendingTextAction | None) -> str:
     if pending_text_action is None:
         return "none"
@@ -1146,6 +1655,28 @@ def _status_text_snippet(text: str | None, *, limit: int = STATUS_TEXT_SNIPPET_L
     return normalized[: limit - 3] + "..."
 
 
+def _turn_busy_notice(active_turn: _ActiveTurn | None) -> str:
+    if active_turn is None:
+        return "Another request is already running. Open Bot Status to stop it or wait for it to finish."
+    title = _status_text_snippet(active_turn.title_hint) or "current request"
+    return (
+        f"Another request is already running ({title}). "
+        "Open Bot Status to stop it or wait for it to finish."
+    )
+
+
+def _status_active_turn_lines(active_turn: _ActiveTurn | None) -> list[str]:
+    if active_turn is None:
+        return ["Turn: idle"]
+
+    details = [_status_text_snippet(active_turn.title_hint) or "current request"]
+    session_id = None if active_turn.session is None else getattr(active_turn.session, "session_id", None)
+    if session_id:
+        details.append(session_id)
+    status = "stop requested" if active_turn.stop_requested else "running"
+    return [f"Turn: {status} ({', '.join(details)})"]
+
+
 def _status_item_count_summary(count: int) -> str | None:
     if count <= 0:
         return None
@@ -1165,7 +1696,437 @@ def _current_session_history_title(session, history_entries) -> str | None:
     for entry in history_entries:
         if entry.session_id == session.session_id and entry.title:
             return _status_text_snippet(entry.title)
+    native_title = getattr(session, "session_title", None)
+    if native_title:
+        return _status_text_snippet(native_title)
     return None
+
+
+def _status_usage_summary(session) -> str | None:
+    if session is None:
+        return None
+    usage = getattr(session, "usage", None)
+    if usage is None:
+        return None
+
+    parts = [f"used={usage.used}", f"size={usage.size}"]
+    amount = getattr(usage, "cost_amount", None)
+    currency = getattr(usage, "cost_currency", None)
+    if amount is not None and currency:
+        parts.append(f"cost={amount:.2f} {currency}")
+    elif amount is not None:
+        parts.append(f"cost={amount:.2f}")
+    return " ".join(parts)
+
+
+def _usage_cost_label(usage) -> str:
+    amount = getattr(usage, "cost_amount", None)
+    currency = getattr(usage, "cost_currency", None)
+    if amount is None:
+        return "unavailable"
+    if currency:
+        return f"{amount:.2f} {currency}"
+    return f"{amount:.2f}"
+
+
+def _usage_remaining(usage) -> int | None:
+    used = getattr(usage, "used", None)
+    size = getattr(usage, "size", None)
+    if used is None or size is None:
+        return None
+    return int(size) - int(used)
+
+
+def _usage_utilization_percent(usage) -> float | None:
+    used = getattr(usage, "used", None)
+    size = getattr(usage, "size", None)
+    if used is None or size is None:
+        return None
+    size_value = int(size)
+    if size_value <= 0:
+        return None
+    return (int(used) / size_value) * 100
+
+
+def _last_request_plain_text_source_summary() -> str:
+    return "plain text"
+
+
+def _last_request_bundle_chat_source_summary(item_count: int) -> str:
+    return _status_summary_with_details(
+        "bundle chat",
+        _status_item_count_summary(item_count),
+    )
+
+
+def _last_request_workspace_file_source_summary(relative_path: str) -> str:
+    return _status_summary_with_details(
+        "workspace file request",
+        _status_text_snippet(relative_path, limit=120) or relative_path,
+    )
+
+
+def _last_request_workspace_change_source_summary(relative_path: str) -> str:
+    return _status_summary_with_details(
+        "workspace change request",
+        _status_text_snippet(relative_path, limit=120) or relative_path,
+    )
+
+
+def _last_request_context_items_source_summary(context_label: str, item_count: int) -> str:
+    return _status_summary_with_details(
+        "selected context request",
+        _status_text_snippet(context_label, limit=120) or context_label,
+        _status_item_count_summary(item_count),
+    )
+
+
+def _last_request_context_bundle_source_summary(item_count: int) -> str:
+    return _status_summary_with_details(
+        "context bundle request",
+        _status_item_count_summary(item_count),
+    )
+
+
+def _last_request_source_summary(last_request: _LastRequestText | None) -> str:
+    if last_request is None:
+        return _last_request_plain_text_source_summary()
+    source_summary = getattr(last_request, "source_summary", None)
+    if source_summary:
+        return source_summary
+    return _last_request_plain_text_source_summary()
+
+
+def _workspace_runtime_server_target(server) -> str | None:
+    if getattr(server, "transport", None) == "stdio":
+        command = _status_text_snippet(getattr(server, "command", None), limit=80)
+        args = tuple(getattr(server, "args", ()) or ())
+        if command is None:
+            return None
+        if not args:
+            return command
+        joined_args = " ".join(str(arg) for arg in args[:3])
+        if len(args) > 3:
+            joined_args += " ..."
+        return _status_text_snippet(f"{command} {joined_args}", limit=120)
+    url = getattr(server, "url", None)
+    return _status_text_snippet(None if url is None else str(url), limit=120)
+
+
+def _workspace_runtime_server_summary(server) -> str:
+    transport = _status_text_snippet(getattr(server, "transport", None), limit=24) or "unknown"
+    name = _status_text_snippet(getattr(server, "name", None), limit=60) or "server"
+    detail_parts: list[str] = []
+    target = _workspace_runtime_server_target(server)
+    if target is not None:
+        detail_parts.append(target)
+    env_count = len(tuple(getattr(server, "env", ()) or ()))
+    header_count = len(tuple(getattr(server, "headers", ()) or ()))
+    if env_count > 0:
+        detail_parts.append(f"env: {env_count}")
+    if header_count > 0:
+        detail_parts.append(f"headers: {header_count}")
+    return _status_summary_with_details(f"[{transport}] {name}", *detail_parts)
+
+
+def _status_plan_preview_lines(session, *, limit: int = STATUS_PLAN_PREVIEW_LIMIT) -> list[str]:
+    if session is None:
+        return []
+    entries = tuple(getattr(session, "plan_entries", ()) or ())
+    if not entries:
+        return []
+
+    lines = [f"Agent plan: {len(entries)} item{'s' if len(entries) != 1 else ''}", "Plan preview:"]
+    visible_entries = entries[:limit]
+    for index, entry in enumerate(visible_entries, start=1):
+        content = _status_text_snippet(getattr(entry, "content", "")) or "[empty]"
+        status = getattr(entry, "status", "pending")
+        if status == "completed":
+            prefix = "[x]"
+        elif status == "in_progress":
+            prefix = "[>]"
+        else:
+            prefix = "[ ]"
+        lines.append(f"{index}. {prefix} {content}")
+    remaining = len(entries) - len(visible_entries)
+    if remaining > 0:
+        lines.append(f"... {remaining} more item{'s' if remaining != 1 else ''}")
+    return lines
+
+
+def _plan_items(session) -> tuple[Any, ...]:
+    if session is None:
+        return ()
+    return tuple(getattr(session, "plan_entries", ()) or ())
+
+
+def _plan_status_prefix(status: str) -> str:
+    normalized = status.strip().lower()
+    if normalized == "completed":
+        return "[x]"
+    if normalized == "in_progress":
+        return "[>]"
+    if normalized == "pending":
+        return "[ ]"
+    if normalized == "failed":
+        return "[!]"
+    return "[?]"
+
+
+def _selection_summary_line(label: str, selection) -> str | None:
+    if selection is None:
+        return None
+    current_label = _current_choice_label(selection)
+    choice_count = len(tuple(getattr(selection, "choices", ()) or ()))
+    return f"{label}: {current_label} ({choice_count} choice{'s' if choice_count != 1 else ''})"
+
+
+def _replay_prompt_items(replay_turn: _ReplayTurn | None) -> tuple[Any, ...]:
+    if replay_turn is None:
+        return ()
+    return tuple(getattr(replay_turn, "prompt_items", ()) or ())
+
+
+def _replay_provider_display_name(provider: str) -> str:
+    try:
+        return resolve_provider_profile(provider).display_name
+    except Exception:
+        return provider
+
+
+def _last_turn_item_kind_label(item: Any) -> str:
+    if isinstance(item, PromptText):
+        return "text"
+    if isinstance(item, PromptImage):
+        return "image"
+    if isinstance(item, PromptAudio):
+        return "audio"
+    if isinstance(item, PromptTextResource):
+        return "text resource"
+    if isinstance(item, PromptBlobResource):
+        return "blob resource"
+    return type(item).__name__
+
+
+def _last_turn_item_primary_label(item: Any) -> str:
+    if isinstance(item, PromptText):
+        return _status_text_snippet(item.text, limit=LAST_TURN_TEXT_SNIPPET_LIMIT) or "[empty]"
+    if isinstance(item, PromptTextResource):
+        return _status_text_snippet(item.uri, limit=LAST_TURN_TEXT_SNIPPET_LIMIT) or "resource"
+    uri = _status_text_snippet(getattr(item, "uri", None), limit=LAST_TURN_TEXT_SNIPPET_LIMIT)
+    if uri is not None:
+        return uri
+    mime_type = _status_text_snippet(getattr(item, "mime_type", None), limit=LAST_TURN_TEXT_SNIPPET_LIMIT)
+    if mime_type is not None:
+        return mime_type
+    return _last_turn_item_kind_label(item)
+
+
+def _last_turn_item_summary(item: Any) -> str:
+    kind = _last_turn_item_kind_label(item)
+    details: list[str | None] = []
+    if not isinstance(item, PromptText):
+        details.append(_status_text_snippet(getattr(item, "mime_type", None)))
+    if isinstance(item, PromptTextResource):
+        details.append(_status_text_snippet(item.text, limit=LAST_TURN_TEXT_SNIPPET_LIMIT))
+    return _status_summary_with_details(
+        f"[{kind}] {_last_turn_item_primary_label(item)}",
+        *details,
+    )
+
+
+def _last_turn_payload_size_bytes(item: Any) -> int | None:
+    try:
+        if isinstance(item, PromptText):
+            return len(item.text.encode("utf-8"))
+        if isinstance(item, PromptTextResource):
+            return len(item.text.encode("utf-8"))
+        if isinstance(item, PromptImage):
+            return len(base64.b64decode(item.data))
+        if isinstance(item, PromptAudio):
+            return len(base64.b64decode(item.data))
+        if isinstance(item, PromptBlobResource):
+            return len(base64.b64decode(item.blob))
+    except Exception:
+        return None
+    return None
+
+
+def _last_turn_render_text_detail(
+    text: str,
+    *,
+    limit: int = LAST_TURN_TEXT_DETAIL_LIMIT,
+) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    if limit <= 3:
+        return text[:limit], True
+    return text[: limit - 3] + "...", True
+
+
+def _last_turn_context_preview_lines(
+    items: tuple[_ContextBundleItem, ...],
+    *,
+    limit: int = LAST_TURN_CONTEXT_PREVIEW_LIMIT,
+) -> list[str]:
+    if not items:
+        return []
+    lines = ["Saved context preview:"]
+    visible_items = items[:limit]
+    for index, item in enumerate(visible_items, start=1):
+        lines.append(f"{index}. {_context_bundle_item_label(item)}")
+    remaining = len(items) - len(visible_items)
+    if remaining > 0:
+        lines.append(f"... {remaining} more item{'s' if remaining != 1 else ''}")
+    return lines
+
+
+def _status_tool_activity_preview_lines(
+    session,
+    *,
+    limit: int = STATUS_TOOL_ACTIVITY_PREVIEW_LIMIT,
+) -> list[str]:
+    if session is None:
+        return []
+    activities = tuple(getattr(session, "recent_tool_activities", ()) or ())
+    if not activities:
+        return []
+
+    lines = [f"Recent tools: {len(activities)}", "Tool preview:"]
+    visible_activities = activities[:limit]
+    for index, activity in enumerate(visible_activities, start=1):
+        title = _status_text_snippet(getattr(activity, "title", None)) or getattr(
+            activity, "tool_call_id", "tool"
+        )
+        status = str(getattr(activity, "status", "pending"))
+        summary = f"[{status}] {title}"
+        detail_parts = []
+        kind = _status_text_snippet(getattr(activity, "kind", None))
+        if kind is not None:
+            detail_parts.append(kind)
+        for detail in tuple(getattr(activity, "details", ()) or ())[:2]:
+            detail_snippet = _status_text_snippet(detail)
+            if detail_snippet is not None:
+                detail_parts.append(detail_snippet)
+        lines.append(f"{index}. {_status_summary_with_details(summary, *detail_parts)}")
+
+    remaining = len(activities) - len(visible_activities)
+    if remaining > 0:
+        lines.append(f"... {remaining} more item{'s' if remaining != 1 else ''}")
+    return lines
+
+
+def _tool_activity_items(session) -> tuple[Any, ...]:
+    if session is None:
+        return ()
+    return tuple(getattr(session, "recent_tool_activities", ()) or ())
+
+
+def _tool_activity_path_ref_to_path(path_ref: str) -> str:
+    match = re.match(r"^(.*?):(\d+)(?::(\d+))?$", path_ref)
+    if match is None:
+        return path_ref
+    return match.group(1)
+
+
+def _tool_activity_openable_paths(workspace_path: str, activity) -> tuple[str, ...]:
+    seen: set[str] = set()
+    resolved_paths: list[str] = []
+    raw_paths = tuple(getattr(activity, "paths", ()) or ())
+    raw_path_refs = tuple(getattr(activity, "path_refs", ()) or ())
+    for candidate in (*raw_paths, *(_tool_activity_path_ref_to_path(item) for item in raw_path_refs)):
+        if not candidate:
+            continue
+        try:
+            resolved = resolve_workspace_path(workspace_path, candidate)
+            relative_path = resolved.relative_to(resolve_workspace_path(workspace_path)).as_posix()
+        except Exception:
+            continue
+        if relative_path in seen:
+            continue
+        seen.add(relative_path)
+        resolved_paths.append(relative_path)
+    return tuple(resolved_paths)
+
+
+def _tool_activity_change_targets(git_status, relative_paths: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    if git_status is None or not getattr(git_status, "is_git_repo", False):
+        return ()
+    status_by_path = {
+        entry.relative_path: entry.status_code
+        for entry in getattr(git_status, "entries", ())
+    }
+    targets: list[tuple[str, str]] = []
+    for relative_path in relative_paths:
+        status_code = status_by_path.get(relative_path)
+        if status_code is None:
+            continue
+        targets.append((relative_path, status_code))
+    return tuple(targets)
+
+
+def _tool_activity_output_snippet(
+    text: str | None,
+    *,
+    limit: int = TOOL_ACTIVITY_OUTPUT_PREVIEW_LIMIT,
+) -> str | None:
+    if text is None:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if len(stripped) <= limit:
+        return stripped
+    if limit <= 4:
+        return stripped[-limit:]
+    return "...\n" + stripped[-(limit - 4) :]
+
+
+def _tool_activity_exit_status_label(exit_status) -> str:
+    if exit_status is None:
+        return "running"
+    signal_name = getattr(exit_status, "signal", None)
+    if signal_name:
+        return f"signal={signal_name}"
+    exit_code = getattr(exit_status, "exit_code", getattr(exit_status, "exitCode", None))
+    if exit_code is None:
+        return "completed"
+    return f"exit={exit_code}"
+
+
+async def _load_tool_activity_terminal_previews(session, activity) -> tuple[_ToolActivityTerminalPreview, ...]:
+    read_terminal_output = getattr(session, "read_terminal_output", None)
+    terminal_ids = tuple(getattr(activity, "terminal_ids", ()) or ())
+    if not callable(read_terminal_output) or not terminal_ids:
+        return ()
+
+    previews: list[_ToolActivityTerminalPreview] = []
+    for terminal_id in terminal_ids[:TOOL_ACTIVITY_TERMINAL_PREVIEW_LIMIT]:
+        try:
+            terminal_output = await read_terminal_output(terminal_id)
+        except Exception:
+            terminal_output = None
+        if terminal_output is None:
+            previews.append(
+                _ToolActivityTerminalPreview(
+                    terminal_id=terminal_id,
+                    status_label="unavailable",
+                    output=None,
+                    truncated=False,
+                )
+            )
+            continue
+        previews.append(
+            _ToolActivityTerminalPreview(
+                terminal_id=terminal_id,
+                status_label=_tool_activity_exit_status_label(
+                    getattr(terminal_output, "exit_status", getattr(terminal_output, "exitStatus", None))
+                ),
+                output=_tool_activity_output_snippet(getattr(terminal_output, "output", None)),
+                truncated=bool(getattr(terminal_output, "truncated", False)),
+            )
+        )
+    return tuple(previews)
 
 
 def _status_context_bundle_preview_lines(
@@ -1585,6 +2546,12 @@ async def _handle_pending_text_action(
             await _reply_request_failed(update, services)
             return True
 
+        can_fork = await _resolve_runtime_session_fork_support(
+            services,
+            state=state,
+            active_session_id=history_state.active_session_id,
+            active_session_can_fork=history_state.active_session_can_fork,
+        )
         history_text, history_markup = _build_history_view(
             entries=history_state.entries,
             provider=state.provider,
@@ -1594,6 +2561,7 @@ async def _handle_pending_text_action(
             page=page,
             ui_state=ui_state,
             active_session_id=history_state.active_session_id,
+            can_fork=can_fork,
             notice="Renamed session.",
             show_provider_sessions=update.effective_user.id == services.admin_user_id,
             back_target=str(pending_text_action.payload.get("back_target", "none")),
@@ -2512,6 +3480,8 @@ def _format_provider_capability_summary(profile, summary, *, is_current: bool) -
         sessions.append("list")
     if getattr(summary, "can_resume_sessions", False):
         sessions.append("resume")
+    if getattr(summary, "can_fork_sessions", False):
+        sessions.append("fork")
     session_text = "none" if not sessions else "/".join(sessions)
     current = " [current]" if is_current else ""
     return (
@@ -2627,7 +3597,13 @@ async def _run_workspace_file_request_on_message(
     on_turn_failure=None,
 ) -> None:
     state = await services.snapshot_runtime_state()
-    ui_state.set_last_request_text(user_id, state.workspace_id, request_text)
+    ui_state.set_last_request_text(
+        user_id,
+        state.workspace_id,
+        request_text,
+        provider=state.provider,
+        source_summary=_last_request_workspace_file_source_summary(relative_path),
+    )
     await _run_agent_text_turn_on_message(
         message,
         user_id,
@@ -2656,7 +3632,13 @@ async def _run_workspace_change_request_on_message(
     on_turn_failure=None,
 ) -> None:
     state = await services.snapshot_runtime_state()
-    ui_state.set_last_request_text(user_id, state.workspace_id, request_text)
+    ui_state.set_last_request_text(
+        user_id,
+        state.workspace_id,
+        request_text,
+        provider=state.provider,
+        source_summary=_last_request_workspace_change_source_summary(relative_path),
+    )
     await _run_agent_text_turn_on_message(
         message,
         user_id,
@@ -2685,7 +3667,16 @@ async def _run_context_items_request_on_message(
     on_turn_failure=None,
 ) -> None:
     state = await services.snapshot_runtime_state()
-    ui_state.set_last_request_text(user_id, state.workspace_id, request_text)
+    ui_state.set_last_request_text(
+        user_id,
+        state.workspace_id,
+        request_text,
+        provider=state.provider,
+        source_summary=_last_request_context_items_source_summary(
+            context_label,
+            len(items),
+        ),
+    )
     await _run_agent_text_turn_on_message(
         message,
         user_id,
@@ -2717,7 +3708,13 @@ async def _run_context_bundle_request_on_message(
     on_turn_failure=None,
 ) -> None:
     state = await services.snapshot_runtime_state()
-    ui_state.set_last_request_text(user_id, state.workspace_id, request_text)
+    ui_state.set_last_request_text(
+        user_id,
+        state.workspace_id,
+        request_text,
+        provider=state.provider,
+        source_summary=_last_request_context_bundle_source_summary(len(items)),
+    )
     await _run_agent_text_turn_on_message(
         message,
         user_id,
@@ -2864,6 +3861,78 @@ async def _run_agent_session_turn_on_message(
     on_prepare_failure=None,
     on_turn_failure=None,
 ) -> None:
+    active_turn = ui_state.get_active_turn(user_id)
+    if active_turn is not None:
+        await _reply_with_menu(
+            message,
+            services,
+            user_id,
+            _turn_busy_notice(active_turn),
+        )
+        return
+
+    create_task = None if application is None else getattr(application, "create_task", None)
+    if callable(create_task):
+        runtime_state = await services.snapshot_runtime_state()
+        task: asyncio.Task | None = None
+
+        async def _run_in_background() -> None:
+            try:
+                await _execute_agent_session_turn_on_message(
+                    message,
+                    user_id,
+                    services,
+                    ui_state,
+                    title_hint=title_hint,
+                    application=application,
+                    turn_runner=turn_runner,
+                    after_success=after_success,
+                    after_turn_success=after_turn_success,
+                    on_prepare_failure=on_prepare_failure,
+                    on_turn_failure=on_turn_failure,
+                )
+            finally:
+                ui_state.clear_active_turn(user_id, task=task)
+
+        task = create_task(_run_in_background())
+        ui_state.start_active_turn(
+            user_id,
+            provider=runtime_state.provider,
+            workspace_id=runtime_state.workspace_id,
+            title_hint=title_hint,
+            task=task,
+        )
+        return
+
+    await _execute_agent_session_turn_on_message(
+        message,
+        user_id,
+        services,
+        ui_state,
+        title_hint=title_hint,
+        application=application,
+        turn_runner=turn_runner,
+        after_success=after_success,
+        after_turn_success=after_turn_success,
+        on_prepare_failure=on_prepare_failure,
+        on_turn_failure=on_turn_failure,
+    )
+
+
+async def _execute_agent_session_turn_on_message(
+    message,
+    user_id: int,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    title_hint: str,
+    application,
+    turn_runner,
+    after_success=None,
+    after_turn_success=None,
+    on_prepare_failure=None,
+    on_turn_failure=None,
+) -> None:
     try:
         state, session = await _with_active_store(
             services,
@@ -2885,6 +3954,12 @@ async def _run_agent_session_turn_on_message(
             reply_markup=_main_menu_markup(user_id, services),
         )
         return
+
+    ui_state.bind_active_turn_session(
+        user_id,
+        task=asyncio.current_task(),
+        session=session,
+    )
 
     await _run_agent_session_turn_with_prepared_session_on_message(
         message,
@@ -2926,6 +4001,10 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
     await stream.start()
     try:
         response = await turn_runner(session, stream, state)
+    except asyncio.CancelledError:
+        await stream.finish(stop_reason="cancelled")
+        await _invoke_turn_failure_callback(on_turn_failure)
+        return
     except UnsupportedPromptContentError as exc:
         await stream.fail(_unsupported_prompt_content_message(state.provider, exc))
         await _invoke_turn_failure_callback(on_turn_failure)
@@ -3177,12 +4256,42 @@ async def _prepare_turn_session(store, user_id: int, now: float):
     return await store.get_or_create(user_id)
 
 
+def _session_can_fork(session) -> bool:
+    if session is None:
+        return False
+    capabilities = getattr(session, "capabilities", None)
+    return bool(getattr(capabilities, "can_fork", False))
+
+
+async def _resolve_runtime_session_fork_support(
+    services,
+    *,
+    state,
+    active_session_id: str | None,
+    active_session_can_fork: bool,
+) -> bool:
+    if active_session_id is not None:
+        return active_session_can_fork
+    try:
+        summary = await services.discover_provider_capabilities(
+            state.provider,
+            workspace_id=state.workspace_id,
+        )
+    except Exception:
+        return False
+    return bool(
+        getattr(summary, "available", False)
+        and getattr(summary, "can_fork_sessions", False)
+    )
+
+
 async def _load_history_view_state(store, user_id: int) -> _HistoryViewState:
     active_session = await store.peek(user_id)
     entries = await store.list_history(user_id)
     return _HistoryViewState(
         entries=entries,
         active_session_id=None if active_session is None else active_session.session_id,
+        active_session_can_fork=_session_can_fork(active_session),
     )
 
 
@@ -3202,6 +4311,7 @@ async def _load_provider_sessions_view_state(
         next_cursor=provider_page.next_cursor,
         supported=provider_page.supported,
         active_session_id=None if active_session is None else active_session.session_id,
+        active_session_can_fork=_session_can_fork(active_session),
     )
 
 
@@ -3285,6 +4395,46 @@ async def _show_agent_commands_menu_from_callback(
     state, command_state = await _load_command_center_state(services, user_id)
     text, markup = _build_agent_commands_view(
         commands=command_state.commands,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        session_id=command_state.session_id,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_agent_command_detail_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    page: int,
+    command_index: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, command_state = await _load_command_center_state(services, user_id)
+    commands = command_state.commands
+    if command_index < 0 or command_index >= len(commands):
+        await _show_agent_commands_menu_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            page=page,
+            back_target=back_target,
+            notice="Agent command is no longer available.",
+        )
+        return
+    text, markup = _build_agent_command_detail_view(
+        command=commands[command_index],
+        command_index=command_index,
+        total_count=len(commands),
         provider=state.provider,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
@@ -4244,6 +5394,116 @@ async def _show_workspace_change_preview_from_callback(
     await _edit_query_message(query, text, reply_markup=markup)
 
 
+async def _show_tool_activity_file_preview_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    relative_path: str,
+    page: int,
+    activity_index: int,
+    back_target: str = "none",
+) -> None:
+    state = await services.snapshot_runtime_state()
+    preview = read_workspace_file_preview(state.workspace_path, relative_path)
+    last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
+    text, markup = _build_workspace_file_preview_view(
+        preview=preview,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        last_request_text=last_request_text,
+        back_label="Back to Tool Activity",
+        back_action="tool_activity_open",
+        back_payload={
+            "page": page,
+            "activity_index": activity_index,
+            "back_target": back_target,
+        },
+        ask_payload={
+            "relative_path": preview.relative_path,
+            "source": "tool_activity",
+            "page": page,
+            "activity_index": activity_index,
+            "back_target": back_target,
+        },
+        quick_ask_payload={
+            "relative_path": preview.relative_path,
+            "source": "tool_activity",
+            "page": page,
+            "activity_index": activity_index,
+            "back_target": back_target,
+        },
+        secondary_button_label="Add File to Context",
+        secondary_button_action="workspace_file_add_context",
+        secondary_button_payload={"relative_path": preview.relative_path},
+        supplemental_buttons=(),
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_tool_activity_change_preview_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    relative_path: str,
+    status_code: str,
+    page: int,
+    activity_index: int,
+    back_target: str = "none",
+) -> None:
+    state = await services.snapshot_runtime_state()
+    diff_preview = read_workspace_git_diff_preview(
+        state.workspace_path,
+        relative_path,
+        status_code=status_code,
+    )
+    last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
+    text, markup = _build_workspace_change_preview_view(
+        diff_preview=diff_preview,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        last_request_text=last_request_text,
+        back_label="Back to Tool Activity",
+        back_action="tool_activity_open",
+        back_payload={
+            "page": page,
+            "activity_index": activity_index,
+            "back_target": back_target,
+        },
+        ask_payload={
+            "relative_path": relative_path,
+            "status_code": status_code,
+            "source": "tool_activity",
+            "page": page,
+            "activity_index": activity_index,
+            "back_target": back_target,
+        },
+        quick_ask_payload={
+            "relative_path": relative_path,
+            "status_code": status_code,
+            "source": "tool_activity",
+            "page": page,
+            "activity_index": activity_index,
+            "back_target": back_target,
+        },
+        secondary_button_label="Add Change to Context",
+        secondary_button_action="workspace_change_add_context",
+        secondary_button_payload={
+            "relative_path": diff_preview.relative_path,
+            "status_code": diff_preview.status_code,
+        },
+        supplemental_buttons=(),
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
 async def _show_context_bundle_file_preview_from_callback(
     query,
     services,
@@ -4860,6 +6120,65 @@ async def _restart_agent_from_callback(
     await _edit_query_message(query, success_text)
 
 
+async def _fork_live_session_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    application,
+    back_target: str = "none",
+) -> None:
+    try:
+        state, session = await _with_active_store(
+            services,
+            lambda store: store.fork_live_session(user_id),
+        )
+    except Exception:
+        if back_target == "status":
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice="Failed to fork session.",
+            )
+            return
+        await _edit_query_message(query, "Failed to fork session.")
+        return
+
+    try:
+        await state.session_store.record_session_usage(
+            user_id,
+            session,
+            title_hint=None,
+        )
+    except Exception:
+        pass
+    ui_state.invalidate_session_bound_interactions()
+    await _sync_agent_commands_for_session(
+        application,
+        ui_state,
+        user_id,
+        session,
+    )
+
+    success_text = (
+        f"Forked session: {session.session_id}\n"
+        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    )
+    if back_target == "status":
+        await _show_runtime_status_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            notice=success_text,
+        )
+        return
+    await _edit_query_message(query, success_text)
+
+
 async def _show_switch_agent_menu(update: Update, services, ui_state: TelegramUiState) -> None:
     if update.message is None:
         return
@@ -4940,6 +6259,12 @@ async def _show_session_history(
         await _reply_request_failed(update, services)
         return
 
+    can_fork = await _resolve_runtime_session_fork_support(
+        services,
+        state=state,
+        active_session_id=history_state.active_session_id,
+        active_session_can_fork=history_state.active_session_can_fork,
+    )
     text, markup = _build_history_view(
         entries=history_state.entries,
         provider=state.provider,
@@ -4949,6 +6274,7 @@ async def _show_session_history(
         page=page,
         ui_state=ui_state,
         active_session_id=history_state.active_session_id,
+        can_fork=can_fork,
         show_provider_sessions=update.effective_user.id == services.admin_user_id,
     )
     await update.message.reply_text(text, reply_markup=markup)
@@ -4968,6 +6294,12 @@ async def _show_session_history_from_callback(
         services,
         lambda store: _load_history_view_state(store, user_id),
     )
+    can_fork = await _resolve_runtime_session_fork_support(
+        services,
+        state=state,
+        active_session_id=history_state.active_session_id,
+        active_session_can_fork=history_state.active_session_can_fork,
+    )
     text, markup = _build_history_view(
         entries=history_state.entries,
         provider=state.provider,
@@ -4977,9 +6309,62 @@ async def _show_session_history_from_callback(
         page=page,
         ui_state=ui_state,
         active_session_id=history_state.active_session_id,
+        can_fork=can_fork,
         notice=notice,
         show_provider_sessions=user_id == services.admin_user_id,
         back_target=back_target,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_history_entry_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    session_id: str,
+    page: int,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, history_state = await _with_active_store(
+        services,
+        lambda store: _load_history_view_state(store, user_id),
+    )
+    entry = next(
+        (candidate for candidate in history_state.entries if candidate.session_id == session_id),
+        None,
+    )
+    if entry is None:
+        await _show_session_history_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            page=page,
+            back_target=back_target,
+            notice="Session no longer exists in local history.",
+        )
+        return
+    can_fork = await _resolve_runtime_session_fork_support(
+        services,
+        state=state,
+        active_session_id=history_state.active_session_id,
+        active_session_can_fork=history_state.active_session_can_fork,
+    )
+    text, markup = _build_history_entry_view(
+        entry=entry,
+        provider=state.provider,
+        workspace_id=state.workspace_id,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        page=page,
+        ui_state=ui_state,
+        active_session_id=history_state.active_session_id,
+        can_fork=can_fork,
+        back_target=back_target,
+        notice=notice,
     )
     await _edit_query_message(query, text, reply_markup=markup)
 
@@ -5002,6 +6387,12 @@ async def _show_provider_sessions_from_callback(
         user_id,
         cursor=cursor,
     )
+    can_fork = await _resolve_runtime_session_fork_support(
+        services,
+        state=state,
+        active_session_id=provider_state.active_session_id,
+        active_session_can_fork=provider_state.active_session_can_fork,
+    )
     text, markup = _build_provider_sessions_view(
         entries=provider_state.entries,
         next_cursor=provider_state.next_cursor,
@@ -5012,6 +6403,69 @@ async def _show_provider_sessions_from_callback(
         user_id=user_id,
         ui_state=ui_state,
         active_session_id=provider_state.active_session_id,
+        can_fork=can_fork,
+        cursor=cursor,
+        previous_cursors=previous_cursors,
+        history_page=history_page,
+        back_target=back_target,
+        history_back_target=history_back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_provider_session_detail_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    session_id: str,
+    cursor: str | None,
+    previous_cursors: tuple[str | None, ...],
+    history_page: int,
+    back_target: str = "history",
+    history_back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state, provider_state = await _load_provider_sessions_view_state(
+        services,
+        user_id,
+        cursor=cursor,
+    )
+    entry = next(
+        (candidate for candidate in provider_state.entries if candidate.session_id == session_id),
+        None,
+    )
+    if entry is None:
+        await _show_provider_sessions_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            cursor=cursor,
+            previous_cursors=previous_cursors,
+            history_page=history_page,
+            back_target=back_target,
+            history_back_target=history_back_target,
+            notice="Provider session no longer exists on this page.",
+        )
+        return
+    can_fork = await _resolve_runtime_session_fork_support(
+        services,
+        state=state,
+        active_session_id=provider_state.active_session_id,
+        active_session_can_fork=provider_state.active_session_can_fork,
+    )
+    text, markup = _build_provider_session_detail_view(
+        entry=entry,
+        provider=state.provider,
+        workspace_id=state.workspace_id,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        active_session_id=provider_state.active_session_id,
+        can_fork=can_fork,
         cursor=cursor,
         previous_cursors=previous_cursors,
         history_page=history_page,
@@ -5305,12 +6759,25 @@ async def _show_model_mode_menu_from_callback(
     back_target: str = "none",
     notice: str | None = None,
 ) -> None:
-    created_session = False
     try:
-        state, session = await _with_active_store(
+        state, session, model_selection, mode_selection, created_session = await _load_model_mode_callback_state(
             services,
-            lambda store: store.peek(user_id),
+            ui_state,
+            user_id=user_id,
+            application=application,
         )
+    except _ModelModeSessionCreationError:
+        if back_target == "status":
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice="session creation failed",
+            )
+            return
+        await _edit_query_message(query, "session creation failed")
+        return
     except Exception:
         if back_target == "status":
             await _show_runtime_status_from_callback(
@@ -5323,61 +6790,6 @@ async def _show_model_mode_menu_from_callback(
             return
         raise
 
-    if session is None:
-        try:
-            state, session = await _with_active_store(
-                services,
-                lambda store: _prepare_turn_session(
-                    store,
-                    user_id,
-                    time.monotonic(),
-                ),
-            )
-        except Exception:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=user_id,
-                    notice="session creation failed",
-                )
-                return
-            raise
-        created_session = True
-
-    try:
-        await session.ensure_started()
-    except Exception:
-        if back_target == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice="session creation failed",
-            )
-            return
-        raise
-
-    if created_session:
-        try:
-            await state.session_store.record_session_usage(
-                user_id,
-                session,
-                title_hint=None,
-            )
-        except Exception:
-            pass
-        await _sync_agent_commands_for_session(
-            application,
-            ui_state,
-            user_id,
-            session,
-        )
-
-    model_selection = session.get_selection("model")
-    mode_selection = session.get_selection("mode")
     if model_selection is None and mode_selection is None:
         buttons: list[list[InlineKeyboardButton]] = []
         _append_back_to_status_button(
@@ -5412,6 +6824,155 @@ async def _show_model_mode_menu_from_callback(
             if created_session
             else None
         ),
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _load_model_mode_callback_state(
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    application,
+):
+    created_session = False
+    state, session = await _with_active_store(
+        services,
+        lambda store: store.peek(user_id),
+    )
+    if session is None:
+        try:
+            state, session = await _with_active_store(
+                services,
+                lambda store: _prepare_turn_session(
+                    store,
+                    user_id,
+                    time.monotonic(),
+                ),
+            )
+        except Exception as exc:
+            raise _ModelModeSessionCreationError() from exc
+        created_session = True
+
+    try:
+        await session.ensure_started()
+    except Exception as exc:
+        raise _ModelModeSessionCreationError() from exc
+
+    if created_session:
+        try:
+            await state.session_store.record_session_usage(
+                user_id,
+                session,
+                title_hint=None,
+            )
+        except Exception:
+            pass
+        await _sync_agent_commands_for_session(
+            application,
+            ui_state,
+            user_id,
+            session,
+        )
+
+    return (
+        state,
+        session,
+        session.get_selection("model"),
+        session.get_selection("mode"),
+        created_session,
+    )
+
+
+async def _show_selection_detail_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    kind: str,
+    value: str,
+    application,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    try:
+        state, session, model_selection, mode_selection, _created_session = await _load_model_mode_callback_state(
+            services,
+            ui_state,
+            user_id=user_id,
+            application=application,
+        )
+    except _ModelModeSessionCreationError:
+        if back_target == "status":
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice="session creation failed",
+            )
+            return
+        await _edit_query_message(query, "session creation failed")
+        return
+    except Exception:
+        if back_target == "status":
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice="Failed to load model / mode controls.",
+            )
+            return
+        raise
+
+    selection = model_selection if kind == "model" else mode_selection if kind == "mode" else None
+    if selection is None:
+        await _show_model_mode_menu_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            application=application,
+            back_target=back_target,
+            notice=f"{_selection_kind_label(kind)} selection is no longer available.",
+        )
+        return
+
+    choice_index = next(
+        (index for index, choice in enumerate(selection.choices) if choice.value == value),
+        -1,
+    )
+    if choice_index < 0:
+        await _show_model_mode_menu_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            application=application,
+            back_target=back_target,
+            notice=f"{_selection_kind_label(kind)} choice is no longer available.",
+        )
+        return
+
+    text, markup = _build_selection_detail_view(
+        session_id=session.session_id,
+        selection=selection,
+        choice=selection.choices[choice_index],
+        choice_index=choice_index,
+        provider=state.provider,
+        workspace_label=_workspace_label(services, state.workspace_id),
+        user_id=user_id,
+        ui_state=ui_state,
+        can_retry_last_turn=ui_state.get_last_turn(
+            user_id,
+            state.provider,
+            state.workspace_id,
+        )
+        is not None,
+        back_target=back_target,
+        notice=notice,
     )
     await _edit_query_message(query, text, reply_markup=markup)
 
@@ -5825,6 +7386,112 @@ async def _switch_history_session_from_callback(
     await _edit_query_message(query, success_text)
 
 
+async def _fork_history_session_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    session_id: str,
+    application,
+    replay_after_fork: bool = False,
+    page: int = 0,
+    back_target: str = "none",
+) -> None:
+    await query.answer()
+    await _edit_query_message(query, "Forking session...")
+    try:
+        state, session = await asyncio.wait_for(
+            _with_active_store(
+                services,
+                lambda store: store.fork_history_session(user_id, session_id),
+            ),
+            CALLBACK_OPERATION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        if back_target == "status":
+            try:
+                await _show_runtime_status_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    notice="Failed to fork session.",
+                )
+                return
+            except Exception:
+                pass
+        try:
+            await _show_session_history_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=page,
+                back_target=back_target,
+                notice="Failed to fork session.",
+            )
+            return
+        except Exception:
+            pass
+        await _edit_query_message(query, "Failed to fork session.")
+        return
+
+    try:
+        await state.session_store.record_session_usage(
+            user_id,
+            session,
+            title_hint=None,
+        )
+    except Exception:
+        pass
+    ui_state.invalidate_session_bound_interactions()
+    await _sync_agent_commands_for_session(
+        application,
+        ui_state,
+        user_id,
+        session,
+    )
+    success_text = (
+        f"Forked session {session.session_id} from {session_id} on "
+        f"{resolve_provider_profile(state.provider).display_name} in "
+        f"{_workspace_label(services, state.workspace_id)}. "
+        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    )
+    if replay_after_fork:
+        await _edit_query_message(
+            query,
+            f"{success_text}\nRetrying last turn in this session...",
+        )
+        if query.message is not None:
+            await _retry_last_turn(
+                _message_update_from_callback(query),
+                services,
+                ui_state,
+                application=application,
+            )
+        success_text = f"{success_text}\nRetried last turn in this session."
+
+    if back_target == "status":
+        await _show_runtime_status_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            notice=success_text,
+        )
+        return
+    await _show_session_history_from_callback(
+        query,
+        services,
+        ui_state,
+        user_id=user_id,
+        page=page,
+        back_target=back_target,
+        notice=success_text,
+    )
+
+
 async def _switch_provider_session_from_callback(
     query,
     services,
@@ -5906,6 +7573,109 @@ async def _switch_provider_session_from_callback(
             )
             return
         return
+    if back_target == "status":
+        await _show_runtime_status_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            notice=success_text,
+        )
+        return
+    await _show_provider_sessions_from_callback(
+        query,
+        services,
+        ui_state,
+        user_id=user_id,
+        cursor=payload.get("cursor"),
+        previous_cursors=tuple(payload.get("previous_cursors", ())),
+        history_page=int(payload.get("history_page", 0)),
+        back_target=back_target,
+        history_back_target=history_back_target,
+        notice=success_text,
+    )
+
+
+async def _fork_provider_session_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    payload: dict[str, Any],
+    application,
+    replay_after_fork: bool = False,
+) -> None:
+    if query.from_user is None or query.from_user.id != services.admin_user_id:
+        await query.answer("Unauthorized user.", show_alert=True)
+        return
+    await query.answer()
+    await _edit_query_message(query, "Forking provider session...")
+    back_target = str(payload.get("back_target", "history"))
+    history_back_target = str(payload.get("history_back_target", "none"))
+    try:
+        state, session = await asyncio.wait_for(
+            _with_active_store(
+                services,
+                lambda store: store.fork_provider_session(
+                    user_id,
+                    payload["session_id"],
+                    title_hint=payload.get("title"),
+                ),
+            ),
+            CALLBACK_OPERATION_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        try:
+            await _show_provider_sessions_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                cursor=payload.get("cursor"),
+                previous_cursors=tuple(payload.get("previous_cursors", ())),
+                history_page=int(payload.get("history_page", 0)),
+                back_target=back_target,
+                history_back_target=history_back_target,
+                notice="Failed to fork provider session.",
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to fork provider session.")
+        return
+
+    try:
+        await state.session_store.record_session_usage(
+            user_id,
+            session,
+            title_hint=payload.get("title"),
+        )
+    except Exception:
+        pass
+    ui_state.invalidate_session_bound_interactions()
+    await _sync_agent_commands_for_session(
+        application,
+        ui_state,
+        user_id,
+        session,
+    )
+    success_text = (
+        f"Forked provider session {payload['session_id']} into {session.session_id}. "
+        "Old bot buttons and pending inputs tied to the previous session were cleared."
+    )
+    if replay_after_fork:
+        await _edit_query_message(
+            query,
+            f"{success_text}\nRetrying last turn in this session...",
+        )
+        if query.message is not None:
+            await _retry_last_turn(
+                _message_update_from_callback(query),
+                services,
+                ui_state,
+                application=application,
+            )
+        success_text = f"{success_text}\nRetried last turn in this session."
+
     if back_target == "status":
         await _show_runtime_status_from_callback(
             query,
@@ -6332,6 +8102,7 @@ async def _dispatch_callback_action(
     if action == "runtime_status_open":
         await query.answer()
         target = str(payload.get("target", ""))
+        back_target = str(payload.get("back_target", "status"))
         ui_state.clear_pending_text_action(user_id)
         try:
             if target == "history":
@@ -6341,7 +8112,7 @@ async def _dispatch_callback_action(
                     ui_state,
                     user_id=user_id,
                     page=0,
-                    back_target="status",
+                    back_target=back_target,
                 )
                 return
             if target == "commands":
@@ -6351,7 +8122,73 @@ async def _dispatch_callback_action(
                     ui_state,
                     user_id=user_id,
                     page=0,
-                    back_target="status",
+                    back_target=back_target,
+                )
+                return
+            if target == "session_info":
+                await _show_session_info_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    back_target=back_target,
+                )
+                return
+            if target == "usage":
+                await _show_usage_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    back_target=back_target,
+                )
+                return
+            if target == "last_request":
+                await _show_last_request_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    back_target=back_target,
+                )
+                return
+            if target == "workspace_runtime":
+                await _show_workspace_runtime_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    back_target=back_target,
+                )
+                return
+            if target == "last_turn":
+                await _show_last_turn_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=0,
+                    back_target=back_target,
+                )
+                return
+            if target == "plan":
+                await _show_plan_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=0,
+                    back_target=back_target,
+                )
+                return
+            if target == "tools":
+                await _show_tool_activity_from_callback(
+                    query,
+                    services,
+                    ui_state,
+                    user_id=user_id,
+                    page=0,
+                    back_target=back_target,
                 )
                 return
             if target == "provider_sessions":
@@ -6366,8 +8203,8 @@ async def _dispatch_callback_action(
                     cursor=None,
                     previous_cursors=(),
                     history_page=0,
-                    back_target="status",
-                    history_back_target="status",
+                    back_target=back_target,
+                    history_back_target=back_target,
                 )
                 return
             if target == "files":
@@ -6378,11 +8215,11 @@ async def _dispatch_callback_action(
                     user_id=user_id,
                     relative_path="",
                     page=0,
-                    back_target="status",
+                    back_target=back_target,
                 )
                 return
             if target == "search":
-                pending_payload: dict[str, Any] = {"back_target": "status"}
+                pending_payload: dict[str, Any] = {"back_target": back_target}
                 if query.message is not None:
                     pending_payload["source_message"] = query.message
                 ui_state.set_pending_text_action(
@@ -6414,7 +8251,7 @@ async def _dispatch_callback_action(
                     ui_state,
                     user_id=user_id,
                     page=0,
-                    back_target="status",
+                    back_target=back_target,
                 )
                 return
             if target == "bundle":
@@ -6424,12 +8261,155 @@ async def _dispatch_callback_action(
                     ui_state,
                     user_id=user_id,
                     page=0,
-                    back_target="status",
+                    back_target=back_target,
                 )
                 return
         except Exception:
             await _edit_query_message(query, "Failed to open the selected view.")
             return
+        return
+
+    if action == "last_turn_page":
+        await query.answer()
+        try:
+            await _show_last_turn_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load the last turn.")
+        return
+
+    if action == "last_turn_open":
+        await query.answer()
+        try:
+            await _show_last_turn_item_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                item_index=int(payload.get("item_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load the replay item.")
+        return
+
+    if action == "plan_page":
+        await query.answer()
+        try:
+            await _show_plan_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load agent plan.")
+        return
+
+    if action == "plan_open":
+        await query.answer()
+        try:
+            await _show_plan_detail_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                plan_index=int(payload.get("plan_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load agent plan.")
+        return
+
+    if action == "tool_activity_page":
+        await query.answer()
+        try:
+            await _show_tool_activity_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load tool activity.")
+        return
+
+    if action == "tool_activity_open":
+        await query.answer()
+        try:
+            await _show_tool_activity_detail_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                activity_index=int(payload.get("activity_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load tool activity.")
+        return
+
+    if action == "tool_activity_open_file":
+        await query.answer()
+        try:
+            await _show_tool_activity_file_preview_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                relative_path=str(payload["relative_path"]),
+                page=int(payload.get("page", 0)),
+                activity_index=int(payload.get("activity_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load the related file.")
+        return
+
+    if action == "tool_activity_open_change":
+        await query.answer()
+        try:
+            await _show_tool_activity_change_preview_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                relative_path=str(payload["relative_path"]),
+                status_code=str(payload["status_code"]),
+                page=int(payload.get("page", 0)),
+                activity_index=int(payload.get("activity_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load the related change.")
+        return
+
+    if action == "workspace_runtime_open_server":
+        await query.answer()
+        try:
+            await _show_workspace_runtime_server_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                server_index=int(payload.get("server_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load MCP server details.")
         return
 
     if action == "runtime_status_control":
@@ -6886,6 +8866,16 @@ async def _dispatch_callback_action(
                 back_target="status",
             )
             return
+        if target == "fork_session":
+            await _fork_live_session_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                application=application,
+                back_target="status",
+            )
+            return
         if target == "model_mode":
             try:
                 await _show_model_mode_menu_from_callback(
@@ -6924,6 +8914,41 @@ async def _dispatch_callback_action(
                 await _edit_query_message(query, "Failed to load switch workspace menu.")
             return
         await query.answer("Unknown action.", show_alert=True)
+        return
+
+    if action == "runtime_status_stop_turn":
+        await query.answer()
+        try:
+            state = await services.snapshot_runtime_state()
+            active_turn = ui_state.get_active_turn(
+                user_id,
+                provider=state.provider,
+                workspace_id=state.workspace_id,
+            )
+            if active_turn is None:
+                notice = "No active turn to stop."
+            else:
+                ui_state.mark_active_turn_stop_requested(
+                    user_id,
+                    task=active_turn.task,
+                )
+                cancel_turn = None if active_turn.session is None else getattr(active_turn.session, "cancel_turn", None)
+                if callable(cancel_turn):
+                    cancelled = await cancel_turn()
+                    if not cancelled:
+                        active_turn.task.cancel()
+                else:
+                    active_turn.task.cancel()
+                notice = "Stop requested for the current turn."
+            await _show_runtime_status_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                notice=notice,
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to stop the current turn.")
         return
 
     if action == "runtime_status_cancel_pending":
@@ -7099,6 +9124,12 @@ async def _dispatch_callback_action(
             services,
             lambda store: _load_history_view_state(store, user_id),
         )
+        can_fork = await _resolve_runtime_session_fork_support(
+            services,
+            state=state,
+            active_session_id=history_state.active_session_id,
+            active_session_can_fork=history_state.active_session_can_fork,
+        )
         text, markup = _build_history_view(
             entries=history_state.entries,
             provider=state.provider,
@@ -7108,10 +9139,27 @@ async def _dispatch_callback_action(
             page=int(payload["page"]),
             ui_state=ui_state,
             active_session_id=history_state.active_session_id,
+            can_fork=can_fork,
             show_provider_sessions=user_id == services.admin_user_id,
             back_target=str(payload.get("back_target", "none")),
         )
         await _edit_query_message(query, text, reply_markup=markup)
+        return
+
+    if action == "history_open":
+        await query.answer()
+        try:
+            await _show_history_entry_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                session_id=str(payload["session_id"]),
+                page=int(payload.get("page", 0)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load session history entry.")
         return
 
     if action == "history_provider_sessions":
@@ -7162,6 +9210,33 @@ async def _dispatch_callback_action(
         )
         return
 
+    if action == "history_fork":
+        await _fork_history_session_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            session_id=payload["session_id"],
+            application=application,
+            page=int(payload.get("page", 0)),
+            back_target=str(payload.get("back_target", "none")),
+        )
+        return
+
+    if action == "history_fork_retry_last_turn":
+        await _fork_history_session_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            session_id=payload["session_id"],
+            application=application,
+            replay_after_fork=True,
+            page=int(payload.get("page", 0)),
+            back_target=str(payload.get("back_target", "none")),
+        )
+        return
+
     if action == "history_delete":
         await query.answer()
         await _edit_query_message(query, "Deleting session...")
@@ -7203,6 +9278,12 @@ async def _dispatch_callback_action(
             )
         else:
             notice = "Failed to delete session."
+        can_fork = await _resolve_runtime_session_fork_support(
+            services,
+            state=state,
+            active_session_id=history_state.active_session_id,
+            active_session_can_fork=history_state.active_session_can_fork,
+        )
         text, markup = _build_history_view(
             entries=history_state.entries,
             provider=state.provider,
@@ -7212,6 +9293,7 @@ async def _dispatch_callback_action(
             page=int(payload.get("page", 0)),
             ui_state=ui_state,
             active_session_id=history_state.active_session_id,
+            can_fork=can_fork,
             notice=notice,
             show_provider_sessions=user_id == services.admin_user_id,
             back_target=str(payload.get("back_target", "none")),
@@ -7259,6 +9341,12 @@ async def _dispatch_callback_action(
             services,
             lambda store: _load_history_view_state(store, user_id),
         )
+        can_fork = await _resolve_runtime_session_fork_support(
+            services,
+            state=state,
+            active_session_id=history_state.active_session_id,
+            active_session_can_fork=history_state.active_session_can_fork,
+        )
         text, markup = _build_history_view(
             entries=history_state.entries,
             provider=state.provider,
@@ -7268,6 +9356,7 @@ async def _dispatch_callback_action(
             page=int(payload.get("page", 0)),
             ui_state=ui_state,
             active_session_id=history_state.active_session_id,
+            can_fork=can_fork,
             notice="Rename cancelled.",
             show_provider_sessions=user_id == services.admin_user_id,
             back_target=str(payload.get("back_target", "none")),
@@ -7296,6 +9385,28 @@ async def _dispatch_callback_action(
             await _edit_query_message(query, "Failed to load provider sessions.")
         return
 
+    if action == "provider_session_open":
+        if query.from_user is None or query.from_user.id != services.admin_user_id:
+            await query.answer("Unauthorized user.", show_alert=True)
+            return
+        await query.answer()
+        try:
+            await _show_provider_session_detail_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                session_id=str(payload["session_id"]),
+                cursor=payload.get("cursor"),
+                previous_cursors=tuple(payload.get("previous_cursors", ())),
+                history_page=int(payload.get("history_page", 0)),
+                back_target=str(payload.get("back_target", "history")),
+                history_back_target=str(payload.get("history_back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load provider session.")
+        return
+
     if action == "provider_session_run":
         await _switch_provider_session_from_callback(
             query,
@@ -7319,6 +9430,29 @@ async def _dispatch_callback_action(
         )
         return
 
+    if action == "provider_session_fork":
+        await _fork_provider_session_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            payload=payload,
+            application=application,
+        )
+        return
+
+    if action == "provider_session_fork_retry_last_turn":
+        await _fork_provider_session_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            payload=payload,
+            application=application,
+            replay_after_fork=True,
+        )
+        return
+
     if action == "agent_commands_page":
         await query.answer()
         await _show_agent_commands_menu_from_callback(
@@ -7329,6 +9463,22 @@ async def _dispatch_callback_action(
             page=int(payload["page"]),
             back_target=str(payload.get("back_target", "none")),
         )
+        return
+
+    if action == "agent_command_open":
+        await query.answer()
+        try:
+            await _show_agent_command_detail_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                page=int(payload.get("page", 0)),
+                command_index=int(payload.get("command_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load agent command.")
         return
 
     if action == "agent_command_use":
@@ -7397,6 +9547,38 @@ async def _dispatch_callback_action(
             back_target=str(payload.get("back_target", "none")),
             notice="Command input cancelled.",
         )
+        return
+
+    if action == "model_mode_page":
+        await query.answer()
+        try:
+            await _show_model_mode_menu_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                application=application,
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load model / mode controls.")
+        return
+
+    if action == "selection_open":
+        await query.answer()
+        try:
+            await _show_selection_detail_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                kind=str(payload["kind"]),
+                value=str(payload["value"]),
+                application=application,
+                back_target=str(payload.get("back_target", "none")),
+            )
+        except Exception:
+            await _edit_query_message(query, "Failed to load selection details.")
         return
 
     if action == "workspace_page":
@@ -8412,6 +10594,19 @@ async def _dispatch_callback_action(
     if action == "workspace_change_ask_cancel":
         await query.answer()
         ui_state.clear_pending_text_action(user_id)
+        if payload.get("source") == "tool_activity":
+            await _show_tool_activity_change_preview_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                relative_path=payload["relative_path"],
+                status_code=payload["status_code"],
+                page=int(payload.get("page", 0)),
+                activity_index=int(payload.get("activity_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+            return
         if payload.get("source") == "bundle":
             source_restore_action, source_restore_payload, source_back_label = _callback_source_restore_values(payload)
             await _show_context_bundle_change_preview_from_callback(
@@ -8795,6 +10990,18 @@ async def _dispatch_callback_action(
     if action == "workspace_file_ask_cancel":
         await query.answer()
         ui_state.clear_pending_text_action(user_id)
+        if payload.get("source") == "tool_activity":
+            await _show_tool_activity_file_preview_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                relative_path=payload["relative_path"],
+                page=int(payload.get("page", 0)),
+                activity_index=int(payload.get("activity_index", -1)),
+                back_target=str(payload.get("back_target", "none")),
+            )
+            return
         if payload.get("source") == "search":
             await _show_workspace_search_file_preview_from_callback(
                 query,
@@ -8891,6 +11098,11 @@ def _build_runtime_status_view(
     notice: str | None = None,
 ):
     lines = []
+    active_turn = ui_state.get_active_turn(
+        user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
     if notice:
         lines.append(notice)
     lines.append(
@@ -8905,6 +11117,7 @@ def _build_runtime_status_view(
         lines.append(f"Session: {session.session_id or 'pending'}")
         if session_title is not None:
             lines.append(f"Session title: {session_title}")
+    lines.extend(_status_active_turn_lines(active_turn))
 
     get_selection = None if session is None else getattr(session, "get_selection", None)
     if callable(get_selection):
@@ -8920,6 +11133,13 @@ def _build_runtime_status_view(
             lines.append(f"Model: {_current_choice_label(model_selection)}")
         if mode_selection is not None:
             lines.append(f"Mode: {_current_choice_label(mode_selection)}")
+    usage_summary = _status_usage_summary(session)
+    if usage_summary is not None:
+        lines.append(f"Usage: {usage_summary}")
+    lines.extend(_status_plan_preview_lines(session))
+    plan_count = len(_plan_items(session))
+    lines.extend(_status_tool_activity_preview_lines(session))
+    tool_activity_count = len(_tool_activity_items(session))
 
     lines.append(
         f"Pending input: {_pending_text_action_label(ui_state.get_pending_text_action(user_id))}"
@@ -8943,7 +11163,8 @@ def _build_runtime_status_view(
     else:
         replay_snippet = _status_text_snippet(last_turn.title_hint) or "untitled turn"
         lines.append(f"Last turn replay: available ({replay_snippet})")
-    last_request_text = ui_state.get_last_request_text(user_id, workspace_id)
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_request_text = None if last_request is None else last_request.text
     if last_request_text is None:
         lines.append("Last request text: none")
     else:
@@ -8979,6 +11200,7 @@ def _build_runtime_status_view(
             )
             lines.append(
                 "Session control: "
+                f"fork={'yes' if getattr(capabilities, 'can_fork', False) else 'no'},"
                 f"list={'yes' if getattr(capabilities, 'can_list', False) else 'no'},"
                 f"resume={'yes' if getattr(capabilities, 'can_resume', False) else 'no'}"
             )
@@ -9014,6 +11236,10 @@ def _build_runtime_status_view(
         )
     )
     control_buttons = []
+    if active_turn is not None:
+        control_buttons.append(
+            _callback_button(ui_state, user_id, "Stop Turn", "runtime_status_stop_turn")
+        )
     if ui_state.get_pending_text_action(user_id) is not None:
         control_buttons.append(
             _callback_button(ui_state, user_id, "Cancel Pending Input", "runtime_status_cancel_pending")
@@ -9047,6 +11273,22 @@ def _build_runtime_status_view(
             ),
         ]
     )
+    if (
+        session is not None
+        and getattr(session, "session_id", None) is not None
+        and bool(getattr(getattr(session, "capabilities", None), "can_fork", False))
+    ):
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Fork Session",
+                    "runtime_status_control",
+                    target="fork_session",
+                )
+            ]
+        )
     if last_turn_available:
         buttons.append(
             [
@@ -9066,8 +11308,26 @@ def _build_runtime_status_view(
                 ),
             ]
         )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Last Turn",
+                    "runtime_status_open",
+                    target="last_turn",
+                )
+            ]
+        )
     buttons.append(
         [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Session Info",
+                "runtime_status_open",
+                target="session_info",
+            ),
             _callback_button(
                 ui_state,
                 user_id,
@@ -9077,6 +11337,41 @@ def _build_runtime_status_view(
             )
         ]
     )
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Workspace Runtime",
+                "runtime_status_open",
+                target="workspace_runtime",
+            )
+        ]
+    )
+    if usage_summary is not None:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Usage",
+                    "runtime_status_open",
+                    target="usage",
+                )
+            ]
+        )
+    if last_request is not None:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Last Request",
+                    "runtime_status_open",
+                    target="last_request",
+                )
+            ]
+        )
     if is_admin:
         buttons.append(
             [
@@ -9113,6 +11408,30 @@ def _build_runtime_status_view(
                 user_id=user_id,
                 commands=tuple(getattr(session, "available_commands", ()) or ()),
             )
+        )
+    if plan_count > 0:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Agent Plan",
+                    "runtime_status_open",
+                    target="plan",
+                )
+            ]
+        )
+    if tool_activity_count > 0:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Tool Activity",
+                    "runtime_status_open",
+                    target="tools",
+                )
+            ]
         )
     if bundle_count > 0:
         bundle_buttons = [
@@ -9213,6 +11532,7 @@ def _build_history_view(
     page: int,
     ui_state: TelegramUiState,
     active_session_id: str | None = None,
+    can_fork: bool = False,
     notice: str | None = None,
     show_provider_sessions: bool = False,
     back_target: str = "none",
@@ -9269,6 +11589,11 @@ def _build_history_view(
             label = f"{label} [current]"
         lines.append(f"{start + offset}. {label}")
         lines.append(f"updated={entry.updated_at}")
+        history_entry_payload = _history_entry_callback_payload(
+            entry=entry,
+            page=page,
+            back_target=back_target,
+        )
         buttons.append(
             [
                 _callback_button(
@@ -9279,11 +11604,7 @@ def _build_history_view(
                     **(
                         {"notice": "Already using this session."}
                         if is_current
-                        else {
-                            "session_id": entry.session_id,
-                            "page": page,
-                            "back_target": back_target,
-                        }
+                        else history_entry_payload
                     ),
                 ),
                 _callback_button(
@@ -9291,36 +11612,62 @@ def _build_history_view(
                     user_id,
                     f"Rename {start + offset}",
                     "history_rename",
-                    session_id=entry.session_id,
+                    **history_entry_payload,
                     title=entry.title or entry.session_id,
-                    page=page,
-                    back_target=back_target,
                 ),
                 _callback_button(
                     ui_state,
                     user_id,
                     f"Delete {start + offset}",
                     "history_delete",
-                    session_id=entry.session_id,
-                    page=page,
-                    back_target=back_target,
+                    **history_entry_payload,
                 ),
             ]
         )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open {start + offset}",
+                    "history_open",
+                    **history_entry_payload,
+                ),
+            ]
+        )
+        action_buttons = []
         if can_retry_last_turn and not is_current:
-            buttons.append(
-                [
-                    _callback_button(
-                        ui_state,
-                        user_id,
-                        f"Run+Retry {start + offset}",
-                        "history_run_retry_last_turn",
-                        session_id=entry.session_id,
-                        page=page,
-                        back_target=back_target,
-                    )
-                ]
+            action_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Run+Retry {start + offset}",
+                    "history_run_retry_last_turn",
+                    **history_entry_payload,
+                )
             )
+        if can_fork:
+            action_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Fork {start + offset}",
+                    "history_fork",
+                    **history_entry_payload,
+                )
+            )
+        if can_fork and can_retry_last_turn:
+            action_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Fork+Retry {start + offset}",
+                    "history_fork_retry_last_turn",
+                    **history_entry_payload,
+                )
+            )
+        if action_buttons:
+            buttons.append(action_buttons)
 
     if page_count > 1:
         nav = []
@@ -9381,6 +11728,126 @@ def _build_history_view(
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
+def _history_entry_callback_payload(
+    *,
+    entry,
+    page: int,
+    back_target: str,
+) -> dict[str, Any]:
+    return {
+        "session_id": entry.session_id,
+        "page": page,
+        "back_target": back_target,
+    }
+
+
+def _build_history_entry_view(
+    *,
+    entry,
+    provider: str,
+    workspace_id: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    active_session_id: str | None,
+    can_fork: bool,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Session history entry for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Title: {_status_text_snippet(entry.title, limit=120) or '[untitled]'}")
+    lines.append(f"Session: {entry.session_id}")
+    lines.append(
+        f"Current runtime session: {'yes' if entry.session_id == active_session_id else 'no'}"
+    )
+    lines.append(f"Cwd: {entry.cwd}")
+    lines.append(f"Created: {entry.created_at}")
+    lines.append(f"Updated: {entry.updated_at}")
+
+    history_entry_payload = _history_entry_callback_payload(
+        entry=entry,
+        page=page,
+        back_target=back_target,
+    )
+    is_current = entry.session_id == active_session_id
+    can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "history_open",
+                **history_entry_payload,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to History",
+                "history_page",
+                page=page,
+                back_target=back_target,
+            ),
+        ],
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Current Session" if is_current else "Run Session",
+                "noop" if is_current else "history_run",
+                **(
+                    {"notice": "Already using this session."}
+                    if is_current
+                    else history_entry_payload
+                ),
+            )
+        ],
+    ]
+    action_buttons = []
+    if can_retry_last_turn and not is_current:
+        action_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Run+Retry Session",
+                "history_run_retry_last_turn",
+                **history_entry_payload,
+            )
+        )
+    if can_fork:
+        action_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork Session",
+                "history_fork",
+                **history_entry_payload,
+            )
+        )
+    if can_fork and can_retry_last_turn:
+        action_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork+Retry Session",
+                "history_fork_retry_last_turn",
+                **history_entry_payload,
+            )
+        )
+    if action_buttons:
+        buttons.append(action_buttons)
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
 def _build_provider_sessions_view(
     *,
     entries,
@@ -9392,6 +11859,7 @@ def _build_provider_sessions_view(
     user_id: int,
     ui_state: TelegramUiState,
     active_session_id: str | None,
+    can_fork: bool,
     cursor: str | None,
     previous_cursors: tuple[str | None, ...],
     history_page: int,
@@ -9426,8 +11894,23 @@ def _build_provider_sessions_view(
             lines.append(f"session={entry.session_id}")
             if entry.updated_at:
                 lines.append(f"updated={entry.updated_at}")
+            provider_session_payload = _provider_session_callback_payload(
+                entry=entry,
+                cursor=cursor,
+                previous_cursors=previous_cursors,
+                history_page=history_page,
+                back_target=back_target,
+                history_back_target=history_back_target,
+            )
             buttons.append(
                 [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"Open {index}",
+                        "provider_session_open",
+                        **provider_session_payload,
+                    ),
                     _callback_button(
                         ui_state,
                         user_id,
@@ -9436,35 +11919,44 @@ def _build_provider_sessions_view(
                         **(
                             {"notice": "Already using this session."}
                             if is_current
-                            else {
-                                "session_id": entry.session_id,
-                                "title": entry.title,
-                                "cursor": cursor,
-                                "previous_cursors": previous_cursors,
-                                "history_page": history_page,
-                                "back_target": back_target,
-                                "history_back_target": history_back_target,
-                            }
+                            else provider_session_payload
                         ),
                     )
                 ]
             )
+            action_buttons = []
             if can_retry_last_turn and not is_current:
-                buttons[-1].append(
+                action_buttons.append(
                     _callback_button(
                         ui_state,
                         user_id,
                         f"Run+Retry {index}",
                         "provider_session_run_retry_last_turn",
-                        session_id=entry.session_id,
-                        title=entry.title,
-                        cursor=cursor,
-                        previous_cursors=previous_cursors,
-                        history_page=history_page,
-                        back_target=back_target,
-                        history_back_target=history_back_target,
+                        **provider_session_payload,
                     )
                 )
+            if can_fork:
+                action_buttons.append(
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"Fork {index}",
+                        "provider_session_fork",
+                        **provider_session_payload,
+                    )
+                )
+            if can_fork and can_retry_last_turn:
+                action_buttons.append(
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"Fork+Retry {index}",
+                        "provider_session_fork_retry_last_turn",
+                        **provider_session_payload,
+                    )
+                )
+            if action_buttons:
+                buttons.append(action_buttons)
 
     nav = []
     if previous_cursors:
@@ -9521,6 +12013,1244 @@ def _build_provider_sessions_view(
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
+def _build_session_info_view(
+    *,
+    provider: str,
+    workspace_id: str,
+    workspace_label: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    session,
+    session_title: str | None,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Session info for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+
+    buttons: list[list[InlineKeyboardButton]] = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "runtime_status_open",
+                target="session_info",
+                back_target=back_target,
+            )
+        ]
+    ]
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Workspace Runtime",
+                "runtime_status_open",
+                target="workspace_runtime",
+                back_target="session_info",
+            )
+        ]
+    )
+
+    if session is None:
+        lines.append("No live session. A session will start on the first request.")
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+    session_id = getattr(session, "session_id", None)
+    lines.append(f"Session: {session_id or 'pending'}")
+    if session_title is not None:
+        lines.append(f"Title: {session_title}")
+
+    session_updated_at = _status_text_snippet(getattr(session, "session_updated_at", None), limit=120)
+    if session_updated_at is not None:
+        lines.append(f"Updated: {session_updated_at}")
+
+    get_selection = getattr(session, "get_selection", None)
+    model_selection = None
+    mode_selection = None
+    if callable(get_selection):
+        try:
+            model_selection = get_selection("model")
+        except Exception:
+            model_selection = None
+        try:
+            mode_selection = get_selection("mode")
+        except Exception:
+            mode_selection = None
+
+    model_line = _selection_summary_line("Model", model_selection)
+    if model_line is not None:
+        lines.append(model_line)
+    mode_line = _selection_summary_line("Mode", mode_selection)
+    if mode_line is not None:
+        lines.append(mode_line)
+
+    capabilities = getattr(session, "capabilities", None)
+    if capabilities is not None:
+        lines.append("Prompt capabilities:")
+        lines.append(
+            "image="
+            f"{'yes' if getattr(capabilities, 'supports_image_prompt', False) else 'no'}, "
+            "audio="
+            f"{'yes' if getattr(capabilities, 'supports_audio_prompt', False) else 'no'}, "
+            "embedded_context="
+            f"{'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}"
+        )
+        lines.append("Session capabilities:")
+        lines.append(
+            "load="
+            f"{'yes' if getattr(capabilities, 'can_load', False) else 'no'}, "
+            "fork="
+            f"{'yes' if getattr(capabilities, 'can_fork', False) else 'no'}, "
+            "list="
+            f"{'yes' if getattr(capabilities, 'can_list', False) else 'no'}, "
+            "resume="
+            f"{'yes' if getattr(capabilities, 'can_resume', False) else 'no'}"
+        )
+
+    usage_summary = _status_usage_summary(session)
+    lines.append(f"Usage: {usage_summary or 'none'}")
+    lines.append(f"Cached commands: {len(tuple(getattr(session, 'available_commands', ()) or ()))}")
+    lines.append(f"Cached plan items: {len(_plan_items(session))}")
+    lines.append(f"Cached tool activities: {len(_tool_activity_items(session))}")
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+
+    if usage_summary is not None:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Usage",
+                    "runtime_status_open",
+                    target="usage",
+                    back_target="session_info",
+                )
+            ]
+        )
+
+    quick_buttons: list[InlineKeyboardButton] = []
+    if last_request is not None:
+        quick_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Last Request",
+                "runtime_status_open",
+                target="last_request",
+                back_target="session_info",
+            )
+        )
+    if tuple(getattr(session, "available_commands", ()) or ()):
+        quick_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Agent Commands",
+                "runtime_status_open",
+                target="commands",
+                back_target="session_info",
+            )
+        )
+    if _plan_items(session):
+        quick_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Agent Plan",
+                "runtime_status_open",
+                target="plan",
+                back_target="session_info",
+            )
+        )
+    if _tool_activity_items(session):
+        quick_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Tool Activity",
+                "runtime_status_open",
+                target="tools",
+                back_target="session_info",
+            )
+        )
+    if ui_state.get_last_turn(user_id, provider, workspace_id) is not None:
+        quick_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Last Turn",
+                "runtime_status_open",
+                target="last_turn",
+                back_target="session_info",
+            )
+        )
+    if quick_buttons:
+        buttons.append(quick_buttons)
+
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_usage_view(
+    *,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    session,
+    session_title: str | None,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Usage for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if session is None:
+        lines.append("No live session. A session will start on the first request.")
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        markup = None if not buttons else InlineKeyboardMarkup(buttons)
+        return "\n".join(lines), markup
+
+    session_id = getattr(session, "session_id", None)
+    lines.append(f"Session: {session_id or 'pending'}")
+    if session_title is not None:
+        lines.append(f"Title: {session_title}")
+
+    session_updated_at = _status_text_snippet(getattr(session, "session_updated_at", None), limit=120)
+    if session_updated_at is not None:
+        lines.append(f"Updated: {session_updated_at}")
+
+    usage = getattr(session, "usage", None)
+    if usage is None:
+        lines.append("Snapshot: none")
+        lines.append("No cached usage snapshot for this live session.")
+        lines.append("This view only shows the latest ACP usage_update already cached by the bot.")
+    else:
+        lines.append("Snapshot: cached ACP usage_update")
+        lines.append(f"Used: {usage.used}")
+        lines.append(f"Window size: {usage.size}")
+        remaining = _usage_remaining(usage)
+        if remaining is not None:
+            lines.append(f"Remaining: {remaining}")
+        utilization = _usage_utilization_percent(usage)
+        if utilization is not None:
+            lines.append(f"Utilization: {utilization:.1f}%")
+        lines.append(f"Cost: {_usage_cost_label(usage)}")
+
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_last_request_view(
+    *,
+    last_request: _LastRequestText | None,
+    current_provider: str,
+    workspace_label: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Last request for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
+    )
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if last_request is None:
+        lines.append("No request text is cached for this workspace.")
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        markup = None if not buttons else InlineKeyboardMarkup(buttons)
+        return "\n".join(lines), markup
+
+    recorded_provider = last_request.provider or current_provider
+    lines.append(f"Recorded provider: {_replay_provider_display_name(recorded_provider)}")
+    lines.append(f"Recorded workspace: {last_request.workspace_id}")
+    lines.append(f"Source: {_last_request_source_summary(last_request)}")
+    lines.append(
+        f"Text length: {len(last_request.text)} character{'s' if len(last_request.text) != 1 else ''}"
+    )
+    content, truncated = _last_turn_render_text_detail(last_request.text)
+    lines.append("Request text:")
+    lines.append(content or "[empty]")
+    if truncated:
+        lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
+
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_workspace_runtime_view(
+    *,
+    provider: str,
+    workspace,
+    workspace_path: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    workspace_label = _status_text_snippet(getattr(workspace, "label", None), limit=120) or "Workspace"
+    lines.append(
+        f"Workspace runtime for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Workspace ID: {getattr(workspace, 'id', 'unknown')}")
+    lines.append(f"Path: {workspace_path}")
+    lines.append("ACP client tools:")
+    lines.append("filesystem=yes (workspace-scoped text read/write)")
+    lines.append("terminal=yes (workspace-scoped process bridge)")
+
+    mcp_servers = tuple(getattr(workspace, "mcp_servers", ()) or ())
+    if not mcp_servers:
+        lines.append("Configured MCP servers: none")
+        lines.append("Sessions in this runtime use only the bot client filesystem/terminal bridges.")
+    else:
+        lines.append(f"Configured MCP servers: {len(mcp_servers)}")
+        visible_servers = mcp_servers[:WORKSPACE_RUNTIME_SERVER_PREVIEW_LIMIT]
+        for index, server in enumerate(visible_servers, start=1):
+            lines.append(f"{index}. {_workspace_runtime_server_summary(server)}")
+        remaining = len(mcp_servers) - len(visible_servers)
+        if remaining > 0:
+            lines.append(f"... {remaining} more server{'s' if remaining != 1 else ''}")
+        lines.append("New, loaded, resumed, and forked sessions inherit this MCP server set.")
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if mcp_servers:
+        visible_servers = mcp_servers[:WORKSPACE_RUNTIME_SERVER_PREVIEW_LIMIT]
+        for index, _server in enumerate(visible_servers, start=1):
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"Open {index}",
+                        "workspace_runtime_open_server",
+                        server_index=index - 1,
+                        back_target=back_target,
+                    )
+                ]
+            )
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_workspace_runtime_server_view(
+    *,
+    provider: str,
+    workspace,
+    workspace_path: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    server,
+    server_index: int,
+    server_count: int,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    workspace_label = _status_text_snippet(getattr(workspace, "label", None), limit=120) or "Workspace"
+    lines.append(
+        f"Workspace runtime for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Workspace ID: {getattr(workspace, 'id', 'unknown')}")
+    lines.append(f"Path: {workspace_path}")
+    lines.append(f"MCP server: {server_index + 1}/{server_count}")
+    lines.append(f"Name: {_status_text_snippet(getattr(server, 'name', None), limit=120) or 'server'}")
+    transport = _status_text_snippet(getattr(server, "transport", None), limit=40) or "unknown"
+    lines.append(f"Transport: {transport}")
+
+    if transport == "stdio":
+        lines.append(f"Command: {_status_text_snippet(getattr(server, 'command', None), limit=200) or '[missing]'}")
+        args = tuple(getattr(server, "args", ()) or ())
+        if not args:
+            lines.append("Args: none")
+        else:
+            lines.append(f"Args: {len(args)}")
+            for index, arg in enumerate(args, start=1):
+                lines.append(f"{index}. {_status_text_snippet(str(arg), limit=200) or '[empty]'}")
+    else:
+        lines.append(f"URL: {_status_text_snippet(getattr(server, 'url', None), limit=200) or '[missing]'}")
+
+    env_items = tuple(getattr(server, "env", ()) or ())
+    header_items = tuple(getattr(server, "headers", ()) or ())
+    lines.append(f"Env vars: {len(env_items)}")
+    if env_items:
+        lines.append("Env keys:")
+        for item in env_items:
+            lines.append(_status_text_snippet(getattr(item, "name", None), limit=120) or "[empty]")
+    lines.append(f"Headers: {len(header_items)}")
+    if header_items:
+        lines.append("Header keys:")
+        for item in header_items:
+            lines.append(_status_text_snippet(getattr(item, "name", None), limit=120) or "[empty]")
+
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "workspace_runtime_open_server",
+                server_index=server_index,
+                back_target=back_target,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Workspace Runtime",
+                "runtime_status_open",
+                target="workspace_runtime",
+                back_target=back_target,
+            ),
+        ]
+    ]
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_last_turn_view(
+    *,
+    replay_turn: _ReplayTurn | None,
+    current_provider: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
+    )
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if replay_turn is None:
+        lines.append("No replayable turn is cached.")
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        markup = None if not buttons else InlineKeyboardMarkup(buttons)
+        return "\n".join(lines), markup
+
+    lines.append(f"Recorded provider: {_replay_provider_display_name(replay_turn.provider)}")
+    lines.append(f"Recorded workspace: {replay_turn.workspace_id}")
+    lines.append(f"Title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
+
+    prompt_items = _replay_prompt_items(replay_turn)
+    lines.append(f"Prompt items: {len(prompt_items)}")
+    saved_context_items = tuple(getattr(replay_turn, "saved_context_items", ()) or ())
+    lines.append(f"Saved context items: {len(saved_context_items)}")
+    lines.extend(_last_turn_context_preview_lines(saved_context_items))
+
+    if not prompt_items:
+        lines.append("No replay payload items are available.")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Retry Last Turn",
+                    "runtime_status_control",
+                    target="retry_last_turn",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Fork Last Turn",
+                    "runtime_status_control",
+                    target="fork_last_turn",
+                ),
+            ]
+        )
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+    page_count = max(1, (len(prompt_items) + LAST_TURN_PAGE_SIZE - 1) // LAST_TURN_PAGE_SIZE)
+    page = min(max(page, 0), page_count - 1)
+    start = page * LAST_TURN_PAGE_SIZE
+    visible_items = prompt_items[start : start + LAST_TURN_PAGE_SIZE]
+
+    if page_count > 1:
+        lines.append(f"Page: {page + 1}/{page_count}")
+
+    for offset, item in enumerate(visible_items, start=1):
+        index = start + offset
+        lines.append(f"{index}. {_last_turn_item_summary(item)}")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open {index}",
+                    "last_turn_open",
+                    page=page,
+                    item_index=index - 1,
+                    back_target=back_target,
+                )
+            ]
+        )
+
+    if page_count > 1:
+        nav = []
+        if page > 0:
+            nav.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Prev",
+                    "last_turn_page",
+                    page=page - 1,
+                    back_target=back_target,
+                )
+            )
+        if page < page_count - 1:
+            nav.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Next",
+                    "last_turn_page",
+                    page=page + 1,
+                    back_target=back_target,
+                )
+            )
+        if nav:
+            buttons.append(nav)
+
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Retry Last Turn",
+                "runtime_status_control",
+                target="retry_last_turn",
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork Last Turn",
+                "runtime_status_control",
+                target="fork_last_turn",
+            ),
+        ]
+    )
+
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_last_turn_item_view(
+    *,
+    replay_turn: _ReplayTurn,
+    current_provider: str,
+    workspace_label: str,
+    item,
+    item_index: int,
+    total_count: int,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Item: {item_index + 1}/{total_count}")
+    lines.append(f"Recorded provider: {_replay_provider_display_name(replay_turn.provider)}")
+    lines.append(f"Recorded workspace: {replay_turn.workspace_id}")
+    lines.append(f"Replay title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
+    lines.append(f"Kind: {_last_turn_item_kind_label(item)}")
+
+    uri = getattr(item, "uri", None)
+    if uri:
+        lines.append(f"URI: {uri}")
+    mime_type = getattr(item, "mime_type", None)
+    if mime_type:
+        lines.append(f"MIME type: {mime_type}")
+    payload_size = _last_turn_payload_size_bytes(item)
+    if payload_size is not None:
+        lines.append(f"Payload size: {payload_size} byte{'s' if payload_size != 1 else ''}")
+
+    if isinstance(item, PromptText):
+        content, truncated = _last_turn_render_text_detail(item.text)
+        lines.append("Content:")
+        lines.append(content or "[empty]")
+        if truncated:
+            lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
+    elif isinstance(item, PromptTextResource):
+        content, truncated = _last_turn_render_text_detail(item.text)
+        lines.append("Resource content:")
+        lines.append(content or "[empty]")
+        if truncated:
+            lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
+
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "last_turn_open",
+                page=page,
+                item_index=item_index,
+                back_target=back_target,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Last Turn",
+                "last_turn_page",
+                page=page,
+                back_target=back_target,
+            ),
+        ],
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Retry Last Turn",
+                "runtime_status_control",
+                target="retry_last_turn",
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork Last Turn",
+                "runtime_status_control",
+                target="fork_last_turn",
+            ),
+        ],
+    ]
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_plan_view(
+    *,
+    entries,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    session_id: str | None,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Agent plan for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Session: {session_id or 'none'}")
+
+    buttons = []
+    if not entries:
+        lines.append("No cached agent plan.")
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        markup = None if not buttons else InlineKeyboardMarkup(buttons)
+        return "\n".join(lines), markup
+
+    page_count = max(1, (len(entries) + PLAN_PAGE_SIZE - 1) // PLAN_PAGE_SIZE)
+    page = min(max(page, 0), page_count - 1)
+    start = page * PLAN_PAGE_SIZE
+    visible_entries = entries[start : start + PLAN_PAGE_SIZE]
+
+    lines.append(f"Plan items: {len(entries)}")
+    if page_count > 1:
+        lines.append(f"Page: {page + 1}/{page_count}")
+
+    for offset, entry in enumerate(visible_entries, start=1):
+        index = start + offset
+        status = str(getattr(entry, "status", "pending"))
+        content = _status_text_snippet(getattr(entry, "content", None), limit=120) or "[empty]"
+        priority = _status_text_snippet(getattr(entry, "priority", None))
+        summary = f"{_plan_status_prefix(status)} {content}"
+        detail = None if priority is None else f"priority: {priority}"
+        lines.append(f"{index}. {_status_summary_with_details(summary, detail)}")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open {index}",
+                    "plan_open",
+                    page=page,
+                    plan_index=index - 1,
+                    back_target=back_target,
+                )
+            ]
+        )
+
+    if page_count > 1:
+        nav = []
+        if page > 0:
+            nav.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Prev",
+                    "plan_page",
+                    page=page - 1,
+                    back_target=back_target,
+                )
+            )
+        if page < page_count - 1:
+            nav.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Next",
+                    "plan_page",
+                    page=page + 1,
+                    back_target=back_target,
+                )
+            )
+        if nav:
+            buttons.append(nav)
+
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_plan_detail_view(
+    *,
+    entry,
+    plan_index: int,
+    total_count: int,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Agent plan for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Item: {plan_index + 1}/{total_count}")
+    lines.append(f"Status: {getattr(entry, 'status', 'pending')}")
+    priority = _status_text_snippet(getattr(entry, "priority", None))
+    if priority is not None:
+        lines.append(f"Priority: {priority}")
+    lines.append("Content:")
+    content = getattr(entry, "content", None)
+    if content is None:
+        lines.append("[empty]")
+    else:
+        rendered = str(content)
+        lines.append(rendered if rendered.strip() else "[empty]")
+
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "plan_open",
+                page=page,
+                plan_index=plan_index,
+                back_target=back_target,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Agent Plan",
+                "plan_page",
+                page=page,
+                back_target=back_target,
+            ),
+        ]
+    ]
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_tool_activity_view(
+    *,
+    activities,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    session_id: str | None,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Tool activity for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Session: {session_id or 'none'}")
+
+    buttons = []
+    if not activities:
+        lines.append("No recent tool activity.")
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+        markup = None if not buttons else InlineKeyboardMarkup(buttons)
+        return "\n".join(lines), markup
+
+    page_count = max(1, (len(activities) + TOOL_ACTIVITY_PAGE_SIZE - 1) // TOOL_ACTIVITY_PAGE_SIZE)
+    page = min(max(page, 0), page_count - 1)
+    start = page * TOOL_ACTIVITY_PAGE_SIZE
+    visible_activities = activities[start : start + TOOL_ACTIVITY_PAGE_SIZE]
+
+    lines.append(f"Recent tools: {len(activities)}")
+    if page_count > 1:
+        lines.append(f"Page: {page + 1}/{page_count}")
+
+    for offset, activity in enumerate(visible_activities, start=1):
+        index = start + offset
+        title = _status_text_snippet(getattr(activity, "title", None)) or getattr(
+            activity, "tool_call_id", "tool"
+        )
+        status = str(getattr(activity, "status", "pending"))
+        summary = f"[{status}] {title}"
+        detail_parts = []
+        kind = _status_text_snippet(getattr(activity, "kind", None))
+        if kind is not None:
+            detail_parts.append(kind)
+        for detail in tuple(getattr(activity, "details", ()) or ())[:2]:
+            detail_snippet = _status_text_snippet(detail)
+            if detail_snippet is not None:
+                detail_parts.append(detail_snippet)
+        lines.append(f"{index}. {_status_summary_with_details(summary, *detail_parts)}")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open {index}",
+                    "tool_activity_open",
+                    page=page,
+                    activity_index=index - 1,
+                    back_target=back_target,
+                )
+            ]
+        )
+
+    if page_count > 1:
+        nav = []
+        if page > 0:
+            nav.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Prev",
+                    "tool_activity_page",
+                    page=page - 1,
+                    back_target=back_target,
+                )
+            )
+        if page < page_count - 1:
+            nav.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Next",
+                    "tool_activity_page",
+                    page=page + 1,
+                    back_target=back_target,
+                )
+            )
+        if nav:
+            buttons.append(nav)
+
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_tool_activity_detail_view(
+    *,
+    activity,
+    activity_index: int,
+    total_count: int,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    openable_paths: tuple[str, ...],
+    change_targets: tuple[tuple[str, str], ...],
+    terminal_previews: tuple[_ToolActivityTerminalPreview, ...],
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Tool activity for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Item: {activity_index + 1}/{total_count}")
+    lines.append(
+        f"Title: {_status_text_snippet(getattr(activity, 'title', None)) or getattr(activity, 'tool_call_id', 'tool')}"
+    )
+    lines.append(f"Status: {getattr(activity, 'status', 'pending')}")
+    kind = _status_text_snippet(getattr(activity, "kind", None))
+    if kind is not None:
+        lines.append(f"Kind: {kind}")
+    lines.append(f"Tool call: {getattr(activity, 'tool_call_id', 'tool')}")
+
+    details = tuple(getattr(activity, "details", ()) or ())
+    if details:
+        lines.append("Details:")
+        for index, detail in enumerate(details, start=1):
+            lines.append(f"{index}. {detail}")
+
+    content_types = tuple(getattr(activity, "content_types", ()) or ())
+    if content_types:
+        lines.append(f"Content: {', '.join(content_types)}")
+
+    path_refs = tuple(getattr(activity, "path_refs", ()) or ())
+    if path_refs:
+        lines.append("Paths:")
+        visible_refs = path_refs[:TOOL_ACTIVITY_PATH_BUTTON_LIMIT]
+        for index, path_ref in enumerate(visible_refs, start=1):
+            lines.append(f"{index}. {path_ref}")
+        remaining_refs = len(path_refs) - len(visible_refs)
+        if remaining_refs > 0:
+            lines.append(f"... {remaining_refs} more path{'s' if remaining_refs != 1 else ''}")
+
+    terminal_ids = tuple(getattr(activity, "terminal_ids", ()) or ())
+    if terminal_ids:
+        lines.append("Terminal preview:")
+        if not terminal_previews:
+            lines.append("1. Output unavailable.")
+        else:
+            for index, preview in enumerate(terminal_previews, start=1):
+                lines.append(f"{index}. {preview.terminal_id} [{preview.status_label}]")
+                if preview.output is None:
+                    lines.append("output: [no output]")
+                else:
+                    output = preview.output
+                    if preview.truncated:
+                        output = f"{output}\n[output truncated]"
+                    lines.append(f"output:\n{output}")
+            remaining_terminals = len(terminal_ids) - len(terminal_previews)
+            if remaining_terminals > 0:
+                lines.append(
+                    f"... {remaining_terminals} more terminal{'s' if remaining_terminals != 1 else ''}"
+                )
+
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "tool_activity_open",
+                page=page,
+                activity_index=activity_index,
+                back_target=back_target,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Tool Activity",
+                "tool_activity_page",
+                page=page,
+                back_target=back_target,
+            ),
+        ]
+    ]
+
+    for index, relative_path in enumerate(openable_paths[:TOOL_ACTIVITY_PATH_BUTTON_LIMIT], start=1):
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open File {index}",
+                    "tool_activity_open_file",
+                    relative_path=relative_path,
+                    page=page,
+                    activity_index=activity_index,
+                    back_target=back_target,
+                )
+            ]
+        )
+
+    for index, (relative_path, status_code) in enumerate(
+        change_targets[:TOOL_ACTIVITY_PATH_BUTTON_LIMIT],
+        start=1,
+    ):
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open Change {index}",
+                    "tool_activity_open_change",
+                    relative_path=relative_path,
+                    status_code=status_code,
+                    page=page,
+                    activity_index=activity_index,
+                    back_target=back_target,
+                )
+            ]
+        )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _provider_session_callback_payload(
+    *,
+    entry,
+    cursor: str | None,
+    previous_cursors: tuple[str | None, ...],
+    history_page: int,
+    back_target: str,
+    history_back_target: str,
+) -> dict[str, Any]:
+    return {
+        "session_id": entry.session_id,
+        "title": entry.title,
+        "cursor": cursor,
+        "previous_cursors": previous_cursors,
+        "history_page": history_page,
+        "back_target": back_target,
+        "history_back_target": history_back_target,
+    }
+
+
+def _build_provider_session_detail_view(
+    *,
+    entry,
+    provider: str,
+    workspace_id: str,
+    workspace_label: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    active_session_id: str | None,
+    can_fork: bool,
+    cursor: str | None,
+    previous_cursors: tuple[str | None, ...],
+    history_page: int,
+    back_target: str,
+    history_back_target: str,
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Provider session for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Title: {_status_text_snippet(entry.title, limit=120) or '[untitled]'}")
+    lines.append(f"Session: {entry.session_id}")
+    lines.append(
+        f"Current runtime session: {'yes' if entry.session_id == active_session_id else 'no'}"
+    )
+    lines.append(f"Workspace-relative cwd: {entry.cwd_label}")
+    lines.append(f"Provider cwd: {entry.cwd}")
+    lines.append(f"Updated: {entry.updated_at or 'unknown'}")
+
+    provider_session_payload = _provider_session_callback_payload(
+        entry=entry,
+        cursor=cursor,
+        previous_cursors=previous_cursors,
+        history_page=history_page,
+        back_target=back_target,
+        history_back_target=history_back_target,
+    )
+    is_current = entry.session_id == active_session_id
+    can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "provider_session_open",
+                **provider_session_payload,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Provider Sessions",
+                "provider_sessions_page",
+                cursor=cursor,
+                previous_cursors=previous_cursors,
+                history_page=history_page,
+                back_target=back_target,
+                history_back_target=history_back_target,
+            ),
+        ],
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Current Session" if is_current else "Run Session",
+                "noop" if is_current else "provider_session_run",
+                **(
+                    {"notice": "Already using this session."}
+                    if is_current
+                    else provider_session_payload
+                ),
+            )
+        ],
+    ]
+    action_buttons = []
+    if can_retry_last_turn and not is_current:
+        action_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Run+Retry Session",
+                "provider_session_run_retry_last_turn",
+                **provider_session_payload,
+            )
+        )
+    if can_fork:
+        action_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork Session",
+                "provider_session_fork",
+                **provider_session_payload,
+            )
+        )
+    if can_fork and can_retry_last_turn:
+        action_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork+Retry Session",
+                "provider_session_fork_retry_last_turn",
+                **provider_session_payload,
+            )
+        )
+    if action_buttons:
+        buttons.append(action_buttons)
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
 def _build_agent_commands_view(
     *,
     commands,
@@ -9545,17 +13275,12 @@ def _build_agent_commands_view(
     buttons = []
     if not commands:
         lines.append("No agent commands available.")
-        if back_target == "status":
-            buttons.append(
-                [
-                    _callback_button(
-                        ui_state,
-                        user_id,
-                        "Back to Bot Status",
-                        "runtime_status_page",
-                    )
-                ]
-            )
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
@@ -9572,6 +13297,12 @@ def _build_agent_commands_view(
             lines.append(description)
         if command.hint:
             lines.append(f"args: {command.hint}")
+        command_payload = _agent_command_callback_payload(
+            command=command,
+            page=page,
+            command_index=index - 1,
+            back_target=back_target,
+        )
         buttons.append(
             [
                 _callback_button(
@@ -9579,9 +13310,15 @@ def _build_agent_commands_view(
                     user_id,
                     f"{'Args' if command.hint else 'Run'} {index}",
                     "agent_command_use",
-                    command_name=command.name,
-                    hint=command.hint,
+                    **command_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open {index}",
+                    "agent_command_open",
                     page=page,
+                    command_index=index - 1,
                     back_target=back_target,
                 )
             ]
@@ -9614,17 +13351,106 @@ def _build_agent_commands_view(
         if nav:
             buttons.append(nav)
 
-    if back_target == "status":
-        buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Back to Bot Status",
-                    "runtime_status_page",
-                )
-            ]
-        )
+    _append_back_to_status_button(
+        buttons,
+        ui_state=ui_state,
+        user_id=user_id,
+        back_target=back_target,
+    )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _agent_command_callback_payload(
+    *,
+    command,
+    page: int,
+    command_index: int,
+    back_target: str,
+) -> dict[str, Any]:
+    return {
+        "command_name": command.name,
+        "hint": command.hint,
+        "page": page,
+        "command_index": command_index,
+        "back_target": back_target,
+    }
+
+
+def _build_agent_command_detail_view(
+    *,
+    command,
+    command_index: int,
+    total_count: int,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    page: int,
+    ui_state: TelegramUiState,
+    session_id: str | None,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    lines.append(
+        f"Agent command for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Command: {command_index + 1}/{total_count}")
+    lines.append(f"Session: {session_id or 'none (will start on first command)'}")
+    lines.append(f"Name: {_agent_command_name(command.name)}")
+    description = (command.description or "").strip()
+    if description:
+        lines.append("Description:")
+        lines.append(description)
+    else:
+        lines.append("Description: none")
+    if command.hint:
+        lines.append(f"Args hint: {command.hint}")
+        lines.append(f"Example: {_agent_command_name(command.name)} <args>")
+    else:
+        lines.append("Args hint: none")
+        lines.append(f"Example: {_agent_command_name(command.name)}")
+
+    command_payload = _agent_command_callback_payload(
+        command=command,
+        page=page,
+        command_index=command_index,
+        back_target=back_target,
+    )
+    action_label = "Enter Args" if command.hint else "Run Command"
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "agent_command_open",
+                page=page,
+                command_index=command_index,
+                back_target=back_target,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Agent Commands",
+                "agent_commands_page",
+                page=page,
+                back_target=back_target,
+            ),
+        ],
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                action_label,
+                "agent_command_use",
+                **command_payload,
+            )
+        ],
+    ]
 
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
@@ -9642,6 +13468,15 @@ def _append_back_to_status_button(
             user_id,
             "Back to Bot Status",
             "runtime_status_page",
+        )
+    elif back_target == "session_info":
+        button = _callback_button(
+            ui_state,
+            user_id,
+            "Back to Session Info",
+            "runtime_status_open",
+            target="session_info",
+            back_target="status",
         )
     elif back_target == "workspace_changes_follow_up":
         button = _callback_button(
@@ -10697,7 +14532,12 @@ def _selection_buttons(
     back_target: str = "none",
 ):
     buttons = []
-    for choice in selection.choices:
+    for choice_index, choice in enumerate(selection.choices, start=1):
+        selection_payload = _selection_choice_payload(
+            selection=selection,
+            choice=choice,
+            back_target=back_target,
+        )
         if choice.value == selection.current_value:
             buttons.append(
                 [
@@ -10710,32 +14550,153 @@ def _selection_buttons(
                     )
                 ]
             )
-            continue
-        row = [
-            _callback_button(
-                ui_state,
-                user_id,
-                f"{prefix}: {choice.label}",
-                "set_selection",
-                kind=selection.kind,
-                value=choice.value,
-                back_target=back_target,
-            )
-        ]
-        if can_retry_last_turn:
-            row.append(
+        else:
+            row = [
                 _callback_button(
                     ui_state,
                     user_id,
-                    f"{prefix}+Retry: {choice.label}",
-                    "set_selection_retry_last_turn",
-                    kind=selection.kind,
-                    value=choice.value,
-                    back_target=back_target,
+                    f"{prefix}: {choice.label}",
+                    "set_selection",
+                    **selection_payload,
                 )
-            )
-        buttons.append(row)
+            ]
+            if can_retry_last_turn:
+                row.append(
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"{prefix}+Retry: {choice.label}",
+                        "set_selection_retry_last_turn",
+                        **selection_payload,
+                    )
+                )
+            buttons.append(row)
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Open {prefix} {choice_index}",
+                    "selection_open",
+                    **selection_payload,
+                )
+            ]
+        )
     return buttons
+
+
+def _selection_choice_payload(
+    *,
+    selection,
+    choice,
+    back_target: str,
+) -> dict[str, Any]:
+    return {
+        "kind": selection.kind,
+        "value": choice.value,
+        "back_target": back_target,
+    }
+
+
+def _selection_kind_label(kind: str) -> str:
+    if kind == "model":
+        return "Model"
+    if kind == "mode":
+        return "Mode"
+    return kind.title()
+
+
+def _build_selection_detail_view(
+    *,
+    session_id: str | None,
+    selection,
+    choice,
+    choice_index: int,
+    provider: str,
+    workspace_label: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    can_retry_last_turn: bool,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    lines = []
+    if notice:
+        lines.append(notice)
+
+    kind_label = _selection_kind_label(selection.kind)
+    is_current = choice.value == selection.current_value
+    lines.append(
+        f"{kind_label} choice for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+    )
+    lines.append(f"Session: {session_id or 'pending'}")
+    lines.append(f"Choice: {choice_index + 1}/{len(selection.choices)}")
+    lines.append(f"Current selection: {_current_choice_label(selection)}")
+    lines.append(f"This choice is current: {'yes' if is_current else 'no'}")
+    lines.append(f"Label: {choice.label}")
+    lines.append(f"Value: {choice.value}")
+    if selection.config_id:
+        lines.append(f"Config option: {selection.config_id}")
+    description = _status_text_snippet(getattr(choice, "description", None), limit=400)
+    if description is None:
+        lines.append("Description: none")
+    else:
+        lines.append("Description:")
+        lines.append(description)
+    lines.append(f"Action: tap Use {kind_label} to switch to this choice.")
+    if can_retry_last_turn and not is_current:
+        lines.append("Retry shortcut: available for this choice.")
+
+    selection_payload = _selection_choice_payload(
+        selection=selection,
+        choice=choice,
+        back_target=back_target,
+    )
+    buttons = [
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Refresh",
+                "selection_open",
+                **selection_payload,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Model / Mode",
+                "model_mode_page",
+                back_target=back_target,
+            ),
+        ],
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                f"Current {kind_label}" if is_current else f"Use {kind_label}",
+                "noop" if is_current else "set_selection",
+                **(
+                    {"notice": f"Already using {choice.label}."}
+                    if is_current
+                    else selection_payload
+                ),
+            )
+        ],
+    ]
+    if can_retry_last_turn and not is_current:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Use {kind_label} + Retry",
+                    "set_selection_retry_last_turn",
+                    **selection_payload,
+                )
+            ]
+        )
+
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
 def _current_choice_label(selection) -> str:

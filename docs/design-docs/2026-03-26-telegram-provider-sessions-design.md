@@ -47,10 +47,30 @@
   - 相对 cwd
   - `updated_at`
 - 操作：
+  - `Open N` 打开单个 provider session 的详情页
   - `Run N` 接管该 provider session
   - `Run+Retry N` 接管该 provider session 后立刻重放当前 workspace 的上一轮请求
   - `Prev` / `Next` 按 ACP cursor 翻页
   - `Back to History`
+
+### Provider Session 详情
+
+- 详情页复用当前列表页已经加载出的 provider session 条目，不新增额外 ACP 请求类型。
+- 展示：
+  - title
+  - session_id
+  - 相对 cwd 与 provider 原始 cwd
+  - `updated_at`
+  - 当前 Telegram live session 是否已经附着到该 provider session
+- 操作：
+  - `Run Session`
+  - `Run+Retry Session`
+  - `Fork Session`
+  - `Fork+Retry Session`
+  - `Back to Provider Sessions`
+- 详情页只负责检查与决策；真正的接管/分叉成功后，仍沿用原有返回链路：
+  - 从状态页进入时，成功后回到 `Bot Status`
+  - 从历史页进入时，成功后回到 `Provider Sessions`，再可回 `History`
 
 ## 非目标
 

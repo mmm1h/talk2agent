@@ -43,9 +43,23 @@ Reply keyboard 新增：
   - 当前 session 是否存在
   - 当前页可用命令、描述与 `args:` hint
 - inline button 提供：
+  - `Open N`：打开单个命令详情页
   - `Run N`：用于无参命令
   - `Args N`：用于带 hint 的命令
   - `Prev` / `Next`：用于分页
+
+### 命令详情
+
+- 详情页复用当前列表页已经加载出的 `available_commands`，不新增 ACP request。
+- 展示：
+  - 命令名
+  - 描述
+  - args hint
+  - 当前 session id
+  - 可直接复制心智模型的示例形式，例如 `/command` 或 `/command <args>`
+- inline button 提供：
+  - `Run Command` 或 `Enter Args`
+  - `Back to Agent Commands`
 
 ### 待输入状态
 

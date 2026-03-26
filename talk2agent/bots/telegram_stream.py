@@ -3,19 +3,65 @@ from __future__ import annotations
 import secrets
 import time
 
-from acp.schema import AgentMessageChunk, ToolCallProgress, ToolCallStart
+from acp.schema import AgentMessageChunk, AgentPlanUpdate, ToolCallProgress, ToolCallStart, UsageUpdate
+from talk2agent.acp.tool_activity import render_tool_update_text
+
+
+PLAN_PREVIEW_LIMIT = 5
+
+
+def _normalize_inline_text(text):
+    return " ".join(str(text).split())
+
+
+def _plan_entry_prefix(status):
+    if status == "completed":
+        return "[x]"
+    if status == "in_progress":
+        return "[>]"
+    return "[ ]"
+
+
+def render_usage_text(update):
+    if not isinstance(update, UsageUpdate):
+        return None
+
+    parts = [f"used={update.used}", f"size={update.size}"]
+    cost = getattr(update, "cost", None)
+    amount = getattr(cost, "amount", None)
+    currency = getattr(cost, "currency", None)
+    if amount is not None and currency:
+        parts.append(f"cost={amount:.2f} {currency}")
+    elif amount is not None:
+        parts.append(f"cost={amount:.2f}")
+    return f"[usage] {' '.join(parts)}"
 
 
 def render_update_text(update):
     if isinstance(update, AgentMessageChunk):
         return getattr(update.content, "text", None)
 
-    if isinstance(update, ToolCallStart):
-        return f"\n[tool] {update.title}\n"
+    if isinstance(update, AgentPlanUpdate):
+        entries = tuple(getattr(update, "entries", ()) or ())
+        if not entries:
+            return "\n[plan] empty\n"
 
-    if isinstance(update, ToolCallProgress) and update.status == "completed":
-        title = update.title or update.toolCallId
-        return f"[tool completed] {title}\n"
+        lines = ["\n[plan]\n"]
+        for index, entry in enumerate(entries[:PLAN_PREVIEW_LIMIT], start=1):
+            content = _normalize_inline_text(getattr(entry, "content", ""))
+            if not content:
+                continue
+            lines.append(
+                f"{index}. {_plan_entry_prefix(getattr(entry, 'status', 'pending'))} {content}\n"
+            )
+        remaining = len(entries) - PLAN_PREVIEW_LIMIT
+        if remaining > 0:
+            lines.append(f"... {remaining} more\n")
+        return "".join(lines)
+
+    tool_text = render_tool_update_text(update)
+    if tool_text is not None:
+        return tool_text
 
     return None
 
@@ -50,11 +96,17 @@ class TelegramTurnStream:
         self._last_draft_text = None
         self._draft_started = False
         self._draft_enabled = True
+        self._usage_footer = None
 
     async def start(self):
         await self._send_draft("Thinking...")
 
     async def on_update(self, update):
+        usage_footer = render_usage_text(update)
+        if usage_footer is not None:
+            self._usage_footer = usage_footer
+            return
+
         fragment = render_update_text(update)
         if not fragment:
             return
@@ -67,8 +119,17 @@ class TelegramTurnStream:
 
     async def finish(self, stop_reason):
         text = self._full_text()
+        if self._usage_footer:
+            if text:
+                separator = "" if text.endswith("\n") else "\n"
+                text = f"{text}{separator}{self._usage_footer}"
+            else:
+                text = self._usage_footer
         if text == "":
-            text = f"[empty response] stop_reason={stop_reason}"
+            if stop_reason == "cancelled":
+                text = "Turn cancelled."
+            else:
+                text = f"[empty response] stop_reason={stop_reason}"
 
         chunks = split_telegram_text(text, limit=self._text_limit)
         for chunk in chunks:

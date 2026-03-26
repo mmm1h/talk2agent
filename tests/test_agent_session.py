@@ -3,7 +3,20 @@ import time
 from types import SimpleNamespace
 
 from acp import text_block
-from acp.schema import AgentMessageChunk, AvailableCommand, AvailableCommandsUpdate, UnstructuredCommandInput
+from acp.schema import (
+    AgentMessageChunk,
+    AgentPlanUpdate,
+    AvailableCommand,
+    AvailableCommandsUpdate,
+    Cost,
+    PlanEntry,
+    SessionInfoUpdate,
+    ToolCallLocation,
+    ToolCallProgress,
+    ToolCallStart,
+    UnstructuredCommandInput,
+    UsageUpdate,
+)
 import pytest
 
 
@@ -49,17 +62,21 @@ class FakeConnection:
         self._session_ids = list(session_ids)
         self._prompt_hooks = [] if prompt_hooks is None else list(prompt_hooks)
         self.initialize_calls = []
+        self.initialize_client_capabilities = []
         self.new_session_calls = []
+        self.fork_session_calls = []
         self.resume_session_calls = []
         self.load_session_calls = []
         self.list_sessions_calls = []
+        self.cancel_calls = []
         self.set_config_option_calls = []
         self.set_session_model_calls = []
         self.prompt_calls = []
         self.prompt_response = object()
 
-    async def initialize(self, protocol_version):
+    async def initialize(self, protocol_version, client_capabilities=None, client_info=None):
         self.initialize_calls.append(protocol_version)
+        self.initialize_client_capabilities.append(client_capabilities)
         return SimpleNamespace(
             agent_capabilities=SimpleNamespace(
                 load_session=True,
@@ -68,7 +85,7 @@ class FakeConnection:
                     audio=True,
                     embedded_context=True,
                 ),
-                session_capabilities=SimpleNamespace(list={}, resume={}),
+                session_capabilities=SimpleNamespace(fork={}, list={}, resume={}),
             )
         )
 
@@ -80,6 +97,10 @@ class FakeConnection:
         self.resume_session_calls.append((cwd, session_id, mcp_servers))
         return make_new_session_response(session_id)
 
+    async def fork_session(self, cwd, session_id, mcp_servers):
+        self.fork_session_calls.append((cwd, session_id, mcp_servers))
+        return make_new_session_response(f"fork-{session_id}")
+
     async def load_session(self, cwd, session_id, mcp_servers):
         self.load_session_calls.append((cwd, session_id, mcp_servers))
         return make_new_session_response(session_id)
@@ -87,6 +108,9 @@ class FakeConnection:
     async def list_sessions(self, cursor, cwd):
         self.list_sessions_calls.append((cursor, cwd))
         return SimpleNamespace(sessions=[], next_cursor=None)
+
+    async def cancel(self, session_id):
+        self.cancel_calls.append(session_id)
 
     async def set_config_option(self, config_id, session_id, value):
         self.set_config_option_calls.append((config_id, session_id, value))
@@ -136,8 +160,9 @@ class LegacyConnection(FakeConnection):
 
 
 class NonListingConnection(FakeConnection):
-    async def initialize(self, protocol_version):
+    async def initialize(self, protocol_version, client_capabilities=None, client_info=None):
         self.initialize_calls.append(protocol_version)
+        self.initialize_client_capabilities.append(client_capabilities)
         return SimpleNamespace(
             agent_capabilities=SimpleNamespace(
                 load_session=True,
@@ -146,14 +171,32 @@ class NonListingConnection(FakeConnection):
                     audio=True,
                     embedded_context=True,
                 ),
-                session_capabilities=SimpleNamespace(list=None, resume={}),
+                session_capabilities=SimpleNamespace(fork={}, list=None, resume={}),
+            )
+        )
+
+
+class NonForkingConnection(FakeConnection):
+    async def initialize(self, protocol_version, client_capabilities=None, client_info=None):
+        self.initialize_calls.append(protocol_version)
+        self.initialize_client_capabilities.append(client_capabilities)
+        return SimpleNamespace(
+            agent_capabilities=SimpleNamespace(
+                load_session=True,
+                prompt_capabilities=SimpleNamespace(
+                    image=True,
+                    audio=True,
+                    embedded_context=True,
+                ),
+                session_capabilities=SimpleNamespace(fork=None, list={}, resume={}),
             )
         )
 
 
 class TextOnlyConnection(FakeConnection):
-    async def initialize(self, protocol_version):
+    async def initialize(self, protocol_version, client_capabilities=None, client_info=None):
         self.initialize_calls.append(protocol_version)
+        self.initialize_client_capabilities.append(client_capabilities)
         return SimpleNamespace(
             agent_capabilities=SimpleNamespace(
                 load_session=True,
@@ -162,7 +205,7 @@ class TextOnlyConnection(FakeConnection):
                     audio=False,
                     embedded_context=False,
                 ),
-                session_capabilities=SimpleNamespace(list={}, resume={}),
+                session_capabilities=SimpleNamespace(fork={}, list={}, resume={}),
             )
         )
 
@@ -235,12 +278,39 @@ def test_ensure_started_initializes_once():
     assert len(spawn_calls) == 1
     assert session.session_id == "session-1"
     assert session.capabilities.can_resume is True
+    assert session.capabilities.can_fork is True
     assert session.capabilities.supports_image_prompt is True
     assert session.capabilities.supports_audio_prompt is True
     assert session.capabilities.supports_embedded_context_prompt is True
     assert session.get_selection("model").current_value == "gpt-5.4"
     assert "PATH" in spawn_calls[0][3]
     assert contexts[0].connection.new_session_calls == [("F:/workspace", [])]
+
+
+def test_ensure_started_advertises_client_filesystem_capabilities():
+    from talk2agent.acp.agent_session import AgentSession
+
+    context = None
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        nonlocal context
+        client = to_client(object())
+        context = FakeSpawnContext(FakeConnection(client=client, session_ids=["session-1"]))
+        return context
+
+    session = AgentSession(
+        command="claude-agent-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    asyncio.run(session.ensure_started())
+
+    capabilities = context.connection.initialize_client_capabilities[0]
+    assert capabilities.fs.read_text_file is True
+    assert capabilities.fs.write_text_file is True
+    assert capabilities.terminal is True
 
 
 def test_run_turn_routes_updates_to_active_sink_only():
@@ -551,6 +621,92 @@ def test_load_session_prefers_resume_when_available():
     assert session.session_id == "historic-session"
 
 
+def test_fork_session_creates_new_forked_session():
+    from talk2agent.acp.agent_session import AgentSession
+
+    context = None
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        nonlocal context
+        client = to_client(object())
+        context = FakeSpawnContext(FakeConnection(client=client, session_ids=["session-1"]))
+        return context
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    asyncio.run(session.fork_session("historic-session"))
+
+    assert context.connection.fork_session_calls == [("F:/workspace", "historic-session", [])]
+    assert session.session_id == "fork-historic-session"
+
+
+def test_fork_session_raises_when_provider_does_not_support_forking():
+    from talk2agent.acp.agent_session import AgentSession, SessionForkingNotSupportedError
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        client = to_client(object())
+        return FakeSpawnContext(NonForkingConnection(client=client, session_ids=["session-1"]))
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    async def scenario():
+        with pytest.raises(SessionForkingNotSupportedError):
+            await session.fork_session("historic-session")
+
+    asyncio.run(scenario())
+
+
+def test_cancel_turn_notifies_agent_for_current_session():
+    from talk2agent.acp.agent_session import AgentSession
+
+    context = None
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        nonlocal context
+        client = to_client(object())
+        context = FakeSpawnContext(FakeConnection(client=client, session_ids=["session-1"]))
+        return context
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    async def scenario():
+        await session.ensure_started()
+        return await session.cancel_turn()
+
+    cancelled = asyncio.run(scenario())
+
+    assert cancelled is True
+    assert context.connection.cancel_calls == ["session-1"]
+
+
+def test_cancel_turn_returns_false_without_active_session():
+    from talk2agent.acp.agent_session import AgentSession
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=lambda *args, **kwargs: None,
+    )
+
+    assert asyncio.run(session.cancel_turn()) is False
+
+
 def test_list_sessions_raises_when_provider_does_not_support_listing():
     from talk2agent.acp.agent_session import AgentSession, SessionListingNotSupportedError
 
@@ -690,3 +846,235 @@ def test_available_commands_update_is_cached():
     assert len(commands) == 1
     assert commands[0].name == "model"
     assert commands[0].hint == "model id"
+
+
+def test_session_info_plan_and_usage_updates_are_cached():
+    from talk2agent.acp.agent_session import AgentSession
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        client = to_client(object())
+        return FakeSpawnContext(FakeConnection(client=client, session_ids=["session-1"]))
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    async def scenario():
+        await session.ensure_started()
+        await session._handle_update(
+            "session-1",
+            SessionInfoUpdate(
+                sessionUpdate="session_info_update",
+                title="Workspace Refactor",
+                updatedAt="2026-03-26T12:00:00Z",
+            ),
+        )
+        await session._handle_update(
+            "session-1",
+            AgentPlanUpdate(
+                sessionUpdate="plan",
+                entries=[
+                    PlanEntry(
+                        content="Audit the runtime status view",
+                        status="in_progress",
+                        priority="high",
+                    ),
+                    PlanEntry(
+                        content="Update the Telegram bot tests",
+                        status="pending",
+                        priority="medium",
+                    ),
+                ],
+            ),
+        )
+        await session._handle_update(
+            "session-1",
+            UsageUpdate(
+                sessionUpdate="usage_update",
+                used=512,
+                size=4096,
+                cost=Cost(amount=0.42, currency="USD"),
+            ),
+        )
+
+    asyncio.run(scenario())
+
+    assert session.session_title == "Workspace Refactor"
+    assert session.session_updated_at == "2026-03-26T12:00:00Z"
+    assert [entry.content for entry in session.plan_entries] == [
+        "Audit the runtime status view",
+        "Update the Telegram bot tests",
+    ]
+    assert [entry.status for entry in session.plan_entries] == ["in_progress", "pending"]
+    assert session.usage.used == 512
+    assert session.usage.size == 4096
+    assert session.usage.cost_amount == pytest.approx(0.42)
+    assert session.usage.cost_currency == "USD"
+
+
+def test_recent_tool_activity_is_cached_and_latest_status_replaces_previous_entry():
+    from talk2agent.acp.agent_session import AgentSession
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        client = to_client(object())
+        return FakeSpawnContext(FakeConnection(client=client, session_ids=["session-1"]))
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    async def scenario():
+        await session.ensure_started()
+        await session._handle_update(
+            "session-1",
+            ToolCallStart(
+                sessionUpdate="tool_call",
+                toolCallId="tool-1",
+                title="Run tests",
+                kind="execute",
+                status="in_progress",
+                rawInput={"command": "python -m pytest -q"},
+                locations=[ToolCallLocation(path="tests/test_app.py", line=12)],
+            ),
+        )
+        await session._handle_update(
+            "session-1",
+            ToolCallProgress(
+                sessionUpdate="tool_call_update",
+                toolCallId="tool-1",
+                title="Run tests",
+                kind="execute",
+                status="completed",
+                rawInput={"command": "python -m pytest -q"},
+                locations=[ToolCallLocation(path="tests/test_app.py", line=12)],
+            ),
+        )
+
+    asyncio.run(scenario())
+
+    assert len(session.recent_tool_activities) == 1
+    activity = session.recent_tool_activities[0]
+    assert activity.tool_call_id == "tool-1"
+    assert activity.title == "Run tests"
+    assert activity.status == "completed"
+    assert activity.kind == "execute"
+    assert activity.details == (
+        "cmd: python -m pytest -q",
+        "paths: tests/test_app.py:12",
+    )
+
+
+def test_reset_clears_cached_session_metadata():
+    from talk2agent.acp.agent_session import AgentSession
+
+    pending_session_ids = [["session-1"], ["session-2"]]
+
+    def fake_spawn_agent_process(to_client, command, *args, cwd, env):
+        client = to_client(object())
+        return FakeSpawnContext(
+            FakeConnection(client=client, session_ids=pending_session_ids.pop(0))
+        )
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=fake_spawn_agent_process,
+    )
+
+    async def scenario():
+        await session.ensure_started()
+        await session._handle_update(
+            "session-1",
+            SessionInfoUpdate(
+                sessionUpdate="session_info_update",
+                title="Workspace Refactor",
+            ),
+        )
+        await session._handle_update(
+            "session-1",
+            AgentPlanUpdate(
+                sessionUpdate="plan",
+                entries=[
+                    PlanEntry(
+                        content="Audit the runtime status view",
+                        status="in_progress",
+                        priority="high",
+                    )
+                ],
+            ),
+        )
+        await session._handle_update(
+            "session-1",
+            UsageUpdate(
+                sessionUpdate="usage_update",
+                used=512,
+                size=4096,
+            ),
+        )
+        await session._handle_update(
+            "session-1",
+            ToolCallStart(
+                sessionUpdate="tool_call",
+                toolCallId="tool-1",
+                title="Run tests",
+                kind="execute",
+                status="in_progress",
+                rawInput={"command": "python -m pytest -q"},
+            ),
+        )
+        await session.reset()
+
+    asyncio.run(scenario())
+
+    assert session.session_id == "session-2"
+    assert session.session_title is None
+    assert session.session_updated_at is None
+    assert session.plan_entries == ()
+    assert session.usage is None
+    assert session.recent_tool_activities == ()
+
+
+def test_read_terminal_output_delegates_to_client_for_current_session():
+    from talk2agent.acp.agent_session import AgentSession
+
+    calls = []
+    expected = object()
+
+    class FakeClient:
+        async def terminal_output(self, *, session_id, terminal_id):
+            calls.append((session_id, terminal_id))
+            return expected
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=lambda *args, **kwargs: None,
+    )
+    session.session_id = "session-1"
+    session._client = FakeClient()
+
+    output = asyncio.run(session.read_terminal_output("terminal-1"))
+
+    assert output is expected
+    assert calls == [("session-1", "terminal-1")]
+
+
+def test_read_terminal_output_returns_none_without_live_session():
+    from talk2agent.acp.agent_session import AgentSession
+
+    session = AgentSession(
+        command="codex-acp",
+        args=[],
+        cwd="F:/workspace",
+        spawn_agent_process=lambda *args, **kwargs: None,
+    )
+
+    assert asyncio.run(session.read_terminal_output("terminal-1")) is None

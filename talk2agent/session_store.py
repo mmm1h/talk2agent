@@ -111,6 +111,83 @@ class SessionStore:
     async def restart(self, user_id: int):
         return await self.reset(user_id)
 
+    async def fork_live_session(self, user_id: int):
+        user_lock = await self._get_user_lock(user_id)
+        async with user_lock:
+            async with self._lock:
+                if self._retired:
+                    raise RetiredSessionStoreError("session store retired")
+                old_session = self._sessions.get(user_id)
+
+            if old_session is None or old_session.session_id is None:
+                raise KeyError("live session")
+
+            title_hint = getattr(old_session, "session_title", None)
+            session = self._session_factory(user_id)
+            try:
+                await session.fork_session(old_session.session_id)
+            except Exception:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                raise
+
+            try:
+                await old_session.close()
+            except Exception:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                raise
+
+            async with self._lock:
+                if self._retired:
+                    current = self._sessions.get(user_id)
+                    if current is old_session:
+                        self._sessions.pop(user_id, None)
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+                    raise RetiredSessionStoreError("session store retired")
+                self._sessions[user_id] = session
+
+        await self.record_session_usage(user_id, session, title_hint=title_hint)
+        return session
+
+    async def fork_history_session(self, user_id: int, session_id: str):
+        entry = None
+        if self._history_store is not None:
+            entry = await self._history_store.get_entry(
+                self._provider,
+                user_id,
+                session_id,
+                self._workspace_dir,
+            )
+            if entry is None:
+                raise KeyError(session_id)
+
+        return await self._fork_session(
+            user_id,
+            session_id,
+            title_hint=None if entry is None else entry.title,
+        )
+
+    async def fork_provider_session(
+        self,
+        user_id: int,
+        session_id: str,
+        *,
+        title_hint: str | None = None,
+    ):
+        return await self._fork_session(
+            user_id,
+            session_id,
+            title_hint=title_hint,
+        )
+
     async def activate_history_session(self, user_id: int, session_id: str):
         entry = None
         if self._history_store is not None:
@@ -194,11 +271,12 @@ class SessionStore:
     async def record_session_usage(self, user_id: int, session, *, title_hint: str | None = None) -> None:
         if self._history_store is None or session.session_id is None:
             return
+        session_title = getattr(session, "session_title", None)
         await self._history_store.touch_entry(
             self._provider,
             user_id,
             session.session_id,
-            title=_truncate_title(title_hint or ""),
+            title=_truncate_title(session_title or title_hint or ""),
             cwd=self._workspace_dir,
         )
 
@@ -212,6 +290,60 @@ class SessionStore:
                 self._sessions.pop(user_id, None)
 
             await session.close()
+
+    async def _fork_session(
+        self,
+        user_id: int,
+        source_session_id: str,
+        *,
+        title_hint: str | None,
+    ):
+        user_lock = await self._get_user_lock(user_id)
+        async with user_lock:
+            async with self._lock:
+                if self._retired:
+                    raise RetiredSessionStoreError("session store retired")
+                old_session = self._sessions.get(user_id)
+
+            if old_session is not None and old_session.session_id == source_session_id:
+                live_title = getattr(old_session, "session_title", None)
+                if live_title:
+                    title_hint = live_title
+
+            session = self._session_factory(user_id)
+            try:
+                await session.fork_session(source_session_id)
+            except Exception:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
+                raise
+
+            if old_session is not None:
+                try:
+                    await old_session.close()
+                except Exception:
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+                    raise
+
+            async with self._lock:
+                if self._retired:
+                    current = self._sessions.get(user_id)
+                    if current is old_session:
+                        self._sessions.pop(user_id, None)
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+                    raise RetiredSessionStoreError("session store retired")
+                self._sessions[user_id] = session
+
+        await self.record_session_usage(user_id, session, title_hint=title_hint)
+        return session
 
     async def _activate_session(
         self,
