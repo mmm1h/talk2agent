@@ -41,12 +41,15 @@
    额外在 `media_group` 仍处于收集窗口内时分别执行一次，确认 bot 会先提示已丢弃待发送上传，而不是让旧附件继续流入新 session。
 3. 打开 `Session History`，确认可以浏览、切换、分叉、重命名和删除本地历史会话。
    额外在本地历史为空时打开一次，确认空状态会直接给出 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，而不是只显示一句“没有历史”。
+   再确认列表和详情都会明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。
 4. 如果 Provider 支持原生 session 浏览，打开 `Provider Sessions`，确认可以接管或分叉 provider 侧 session。
    再分别制造“当前 agent 不支持 provider session browsing”和“当前页暂时没有任何 provider session”两种空状态，确认视图会解释原因，并保留 `Refresh` 或 `Open Bot Status` 恢复入口，而不是只留一句空文案。
+   同时确认列表和详情都会明确解释 `Run` 是接管 provider session、`Fork` 是基于它开新分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
 5. 验证 `Retry Last Turn` 和 `Fork Last Turn` 会复用上一轮保存的 replay payload。
 6. 对一次普通成功回合，确认最终结果消息本身附带 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
    再点击一次结果消息上的 `Open Bot Status`，确认 bot 会新发一条状态消息，而不是把原答案直接改写掉。
 7. 人为制造一次会话切换、分叉或接管失败，确认提示会给出重试或重新打开对应视图的建议；如果失败发生在 `Session History` 或 `Provider Sessions` 内，bot 应恢复原列表而不是只显示通用失败短语。
+   再制造一次“当前没有可复用 `Last Turn`，但仍有 `Last Request`”的失败态，确认恢复面板会改成 `Run Last Request` / `New Session` / `Open Bot Status`，而不是继续保留 `Retry Last Turn` / `Fork Last Turn` 死入口。
 8. 在 `Session History` 或 `Provider Sessions` 里执行 `Run+Retry` 或 `Fork+Retry` 后，再让上一轮在点击前失效，确认 bot 会在原列表里提示“先发送一条新请求”，而不是误报已经重试成功。
 9. 在 `Retry Last Turn`、`Fork Last Turn`、以及带 `Switch+Retry` / `Fork+Retry` 的状态页快捷入口上，人为让上一轮在点击前失效，确认 bot 会原地恢复当前视图并提示先发送一条新请求，而不是误报“已经重试成功”。
 
@@ -70,6 +73,7 @@
 2. 打开 `Model / Mode`，确认可以查看并切换当前 live session 暴露的选项。
    同时确认页面会先显示当前 setup，并明确说明这次切换作用于当前 live session；主列表还应告诉用户可以直接切换，或先打开某个 choice 查看详情再决定。
    如果当前 session 只暴露 `Model` 或只暴露 `Mode`，再确认页面会直接说明另一半当前不可用，而不是静默少一半按钮。
+   如果当前 session 两者都不暴露，再确认 bot 会把这件事解释成能力空状态，并保留 `Open Bot Status` 或返回按钮，而不是留下一张近乎空白的页面。
    再打开一个 choice 详情，确认页面会明确说明 `Use ...` 与 `Use ... + Retry` 的差别，而不是只给出字段列表。
 3. 在打开 `Model / Mode` 后让当前 live session 失效，再执行一次切换或 `...+Retry`，确认 bot 会提示直接发送文本或附件来重新开始，并保留 `Reopen Model / Mode` 或状态页恢复入口，而不是只剩死路文案。
 4. 从 `Bot Status -> Model / Mode` 进入后执行一次 `...+Retry`，再人为制造 replay 准备失败或 turn 失败，确认 bot 会回到状态页并提示失败，而不是误报“已经重试成功”。

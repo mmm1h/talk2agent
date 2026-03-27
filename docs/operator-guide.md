@@ -48,6 +48,7 @@
   在 `Last Request` 详情页里，如果当前 workspace 还有上一轮可复用 turn，页面也会直接给出 `Retry Last Turn` / `Fork Last Turn`，把“只重跑文本”和“恢复整轮上下文”明确分开。
 - `Bot Status` 导航失败：如果某个只读视图临时打开失败，bot 会保留 `Try Again` 和相应的返回按钮，避免把用户丢出当前流程。
 - 关键失败态：包括通用请求失败、session 拉起/切换/分叉失败、Provider Session 接管失败，以及 Model / Mode 更新失败，都会优先返回可操作的恢复建议，而不是直接暴露内部错误短语。
+  如果当前 workspace 已经没有可复用的 `Last Turn`，失败恢复面板不会继续保留 `Retry Last Turn` / `Fork Last Turn` 这类死入口，而会改成优先给出 `Run Last Request`、`New Session` 和 `Open Bot Status`。
 - `Switch Agent` / `Switch Workspace`：管理员执行的全局切换，会影响所有用户的当前运行时。
   菜单顶部会先强调这是 shared runtime 的全局动作，避免管理员把它误解成只影响自己当前聊天。
   切换前，bot 会先明确说明旧按钮与待输入会被清理，以及 `Context Bundle`、`Last Request`、`Last Turn` 哪些会继续可复用、哪些会留在旧 runtime / 旧 workspace。
@@ -57,16 +58,19 @@
 - `New Session` / `Restart Agent` / `Session History`：管理当前用户的会话生命周期。
   当这些动作会替换当前 live session 时，如果还有待发送附件组，bot 也会先丢弃并明确告知，而不是让旧上传跨 session 漏过去。
   从 `Session History` 里执行 `Run Session` / `Run+Retry` / `Fork+Retry` 时，成功和失败都会回到历史列表并保留当前上下文；如果上一轮已失效，也会明确提示先发新请求，而不是误报“已经重试成功”。
+  `Session History` 列表和详情都会先解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
   如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；而是补上 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，把下一步动作直接放在空状态里。
 - `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，bot 会明确提示先发送一条新请求；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
 - 回合完成快捷操作：当一次 turn 正常结束且没有更具体的 workspace change follow-up 时，最终结果消息本身会附上 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
   这些按钮会从结果继续发起下一步，而不会把刚收到的答案编辑掉。
 - `Provider Sessions`：管理员浏览并接管 Provider 原生保存的 session。
+  列表和详情都会先解释 `Run` 是把当前 bot 重新附着到 provider session、`Fork` 是基于它再开一条 live 分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
   其中 `Run+Retry` / `Fork+Retry` 也会在原列表内完成成功/失败回显，避免管理员在 provider 会话列表和结果页之间来回跳转。
   如果当前 agent 不支持 provider-side session browsing，或当前页暂时没有任何 provider session，bot 会解释这是 provider 能力或当前状态所致，并补上 `Refresh` / `Open Bot Status` 恢复入口，而不是只留一句空文案。
 - `Agent Commands` / `Model / Mode`：使用当前 live session 暴露的能力。
   `Model / Mode` 不再只是按钮列表；页面会先展示当前 setup、说明这是对当前 live session 的原地更新，再列出可选项和“先看详情还是直接切换”的路径，减少手机端误切。
   如果当前 session 只暴露 `Model` 或只暴露 `Mode`，页面会直接说明另一半当前不可用，而不是让用户误以为按钮加载失败。
+  如果当前 session 两者都不暴露，bot 也会把这件事明确解释成能力空状态，并保留 `Open Bot Status` 恢复入口，而不是落成近乎空白的页面。
   进入单个 choice 详情后，bot 会明确说明这次切换的作用范围；如果存在上一轮请求，还会直接解释 `Use ... + Retry` 会在切换后立刻重跑上一轮。
   如果 live session 已失效，bot 会提示直接发送文本或附件来重新开始，并保留 `Reopen Model / Mode` 或返回状态页的恢复入口。
   如果入口来自 `Bot Status`，其中 `...+Retry` 在重放准备失败或执行失败时也会回到状态页并明确提示失败原因，而不是误报已经重放成功。

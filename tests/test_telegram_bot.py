@@ -5246,6 +5246,8 @@ def test_bot_status_can_open_session_history_from_callback():
     assert ui_state.get_pending_text_action(123) is None
     edited_text, edited_markup = history_update.callback_query.message.edit_calls[-1]
     assert edited_text.startswith("Session history for Codex in Default Workspace")
+    assert "Actions: Run keeps working in that saved session." in edited_text
+    assert "Fork creates a new live session branched from it." in edited_text
     assert find_inline_button(edited_markup, "Run 1")
     assert find_inline_button(edited_markup, "Back to Bot Status")
 
@@ -5349,6 +5351,8 @@ def test_bot_status_can_open_provider_sessions_and_back_to_status():
 
     provider_text, provider_markup = callback_message.edit_calls[-1]
     assert provider_text.startswith("Provider sessions for Codex in Default Workspace")
+    assert "Actions: Run attaches this bot to that provider session and keeps working there." in provider_text
+    assert "Fork creates a new live session branched from it." in provider_text
     back_button = find_inline_button(provider_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=callback_message)
@@ -5406,6 +5410,9 @@ def test_bot_status_provider_session_detail_shows_fields_and_actions():
     assert "Workspace-relative cwd: src" in detail_text
     assert "Provider cwd: F:/workspace/src" in detail_text
     assert "Updated: 2026-03-26T00:00:00+00:00" in detail_text
+    assert "Actions: Run attaches this bot to that provider session and keeps working there." in detail_text
+    assert "Fork creates a new live session branched from it." in detail_text
+    assert "Run+Retry / Fork+Retry also replay the previous turn immediately after the switch." in detail_text
     assert find_inline_button(detail_markup, "Refresh")
     assert find_inline_button(detail_markup, "Back to Provider Sessions")
     assert find_inline_button(detail_markup, "Run Session")
@@ -5806,6 +5813,9 @@ def test_bot_status_session_history_detail_shows_fields_and_actions():
     assert "Cwd: F:/workspace" in detail_text
     assert "Created: 2026-03-20T00:00:00+00:00" in detail_text
     assert "Updated: 2026-03-20T00:00:00+00:00" in detail_text
+    assert "Actions: Run keeps working in that saved session." in detail_text
+    assert "Fork creates a new live session branched from it." in detail_text
+    assert "Run+Retry / Fork+Retry also replay the previous turn immediately after the switch." in detail_text
     assert find_inline_button(detail_markup, "Refresh")
     assert find_inline_button(detail_markup, "Back to History")
     assert find_inline_button(detail_markup, "Run Session")
@@ -13478,6 +13488,57 @@ def test_model_mode_view_explains_when_only_one_control_is_available(
     )
 
 
+def test_model_mode_button_explains_when_no_controls_are_available():
+    from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_text
+
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_MODEL_MODE)
+    services, _ = make_services()
+    services.final_session.selections["model"] = None
+    services.final_session.selections["mode"] = None
+
+    run(handle_text(update, None, services, ui_state))
+
+    assert update.message.reply_calls[0] == (
+        "This agent does not expose model or mode controls in the current session. "
+        "Keep chatting normally, restart the agent if you expected new controls, or open Bot "
+        "Status for the rest of the runtime tools."
+    )
+
+
+def test_model_mode_empty_state_from_callback_keeps_status_recovery():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _show_model_mode_menu_from_callback,
+    )
+
+    ui_state = TelegramUiState()
+    callback_message = FakeIncomingMessage("model")
+    callback_update = FakeCallbackUpdate(123, "noop", message=callback_message)
+    services, _ = make_services()
+    services.final_session.selections["model"] = None
+    services.final_session.selections["mode"] = None
+
+    run(
+        _show_model_mode_menu_from_callback(
+            callback_update.callback_query,
+            services,
+            ui_state,
+            user_id=123,
+            application=None,
+            back_target="none",
+        )
+    )
+
+    empty_text, empty_markup = callback_message.edit_calls[-1]
+    assert empty_text == (
+        "This agent does not expose model or mode controls in the current session. "
+        "Keep chatting normally, restart the agent if you expected new controls, or open Bot "
+        "Status for the rest of the runtime tools."
+    )
+    assert find_inline_button(empty_markup, "Open Bot Status")
+
+
 def test_model_mode_button_starts_session_when_none_exists():
     from talk2agent.bots.telegram_bot import BUTTON_MODEL_MODE, TelegramUiState, handle_text
 
@@ -14108,6 +14169,37 @@ def test_failed_text_turn_recovery_can_run_last_request_directly():
     last_request = ui_state.get_last_request(123, "default")
     assert last_request is not None
     assert last_request.source_summary == "last request replay"
+
+
+def test_session_loss_recovery_view_without_replay_turn_hides_dead_end_actions():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _build_session_loss_recovery_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the sync check")
+    services, _ = make_services(provider="codex")
+
+    text, markup = _build_session_loss_recovery_view(
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        services=services,
+        ui_state=ui_state,
+    )
+
+    assert (
+        "Recommended first step: Run Last Request to replay the saved request text, or open "
+        "Bot Status if you want to inspect runtime and history first."
+        in text
+    )
+    assert "Last request: Re-run the sync check" in text
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "Run Last Request" in labels
+    assert "Retry Last Turn" not in labels
+    assert "Fork Last Turn" not in labels
 
 
 def test_failed_text_turn_recovery_fork_replays_last_turn_in_new_session():

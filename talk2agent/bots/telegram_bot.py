@@ -6488,6 +6488,11 @@ def _build_session_loss_recovery_view(
             "Recommended first step: Retry Last Turn to rerun the previous request, or open Bot "
             "Status if you want to inspect runtime and history first."
         )
+    elif last_request is not None:
+        lines.append(
+            "Recommended first step: Run Last Request to replay the saved request text, or open "
+            "Bot Status if you want to inspect runtime and history first."
+        )
     else:
         lines.append(
             "Recommended first step: Open Bot Status to inspect runtime and history, or start a "
@@ -6499,23 +6504,53 @@ def _build_session_loss_recovery_view(
         )
         lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
     text = "\n".join(lines)
-    buttons = [
-        [
+    buttons: list[list[InlineKeyboardButton]] = []
+    primary_buttons = []
+    if last_turn is not None:
+        primary_buttons.append(
             _callback_button(
                 ui_state,
                 user_id,
                 "Retry Last Turn",
                 "recover_retry_last_turn",
-            ),
+            )
+        )
+        primary_buttons.append(
             _callback_button(
                 ui_state,
                 user_id,
                 "New Session",
                 "recover_new_session",
-            ),
-        ],
-    ]
-    if last_request is not None:
+            )
+        )
+    elif last_request is not None:
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Run Last Request",
+                "recover_run_last_request",
+            )
+        )
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "New Session",
+                "recover_new_session",
+            )
+        )
+    else:
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "New Session",
+                "recover_new_session",
+            )
+        )
+    buttons.append(primary_buttons)
+    if last_request is not None and last_turn is not None:
         buttons.append(
             [
                 _callback_button(
@@ -6526,8 +6561,7 @@ def _build_session_loss_recovery_view(
                 )
             ]
         )
-    buttons.extend(
-        [
+    buttons.append(
         [
             _callback_button(
                 ui_state,
@@ -6541,23 +6575,27 @@ def _build_session_loss_recovery_view(
                 "Session History",
                 "recover_session_history",
             ),
-        ],
-        [
+        ]
+    )
+    secondary_buttons = []
+    if last_turn is not None:
+        secondary_buttons.append(
             _callback_button(
                 ui_state,
                 user_id,
                 "Fork Last Turn",
                 "recover_fork_last_turn",
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                "Model / Mode",
-                "recover_model_mode",
-            ),
-        ],
-        ]
+            )
+        )
+    secondary_buttons.append(
+        _callback_button(
+            ui_state,
+            user_id,
+            "Model / Mode",
+            "recover_model_mode",
+        )
     )
+    buttons.append(secondary_buttons)
     if user_id == services.admin_user_id:
         buttons.append(
             [
@@ -6576,6 +6614,31 @@ def _build_session_loss_recovery_view(
             ]
         )
     return text, InlineKeyboardMarkup(buttons)
+
+
+def _session_action_guide_lines(
+    *,
+    run_summary: str,
+    can_fork: bool,
+    can_retry_last_turn: bool,
+) -> list[str]:
+    lines = [f"Actions: Run {run_summary}."]
+    if can_fork:
+        lines.append("Fork creates a new live session branched from it.")
+    if can_retry_last_turn:
+        retry_labels = "Run+Retry / Fork+Retry" if can_fork else "Run+Retry"
+        lines.append(
+            f"{retry_labels} also replay the previous turn immediately after the switch."
+        )
+    return lines
+
+
+def _no_model_mode_controls_text() -> str:
+    return (
+        "This agent does not expose model or mode controls in the current session. "
+        "Keep chatting normally, restart the agent if you expected new controls, or open Bot "
+        "Status for the rest of the runtime tools."
+    )
 
 
 def _completed_turn_reply_markup(
@@ -8285,8 +8348,7 @@ async def _show_model_mode_menu(update: Update, services, ui_state: TelegramUiSt
             update.message,
             services,
             update.effective_user.id,
-            "This agent does not expose model or mode controls in the current session. "
-            "Keep chatting normally, or open Bot Status for the rest of the runtime tools.",
+            _no_model_mode_controls_text(),
         )
         return
 
@@ -8354,7 +8416,7 @@ async def _show_model_mode_menu_from_callback(
 
     if model_selection is None and mode_selection is None:
         buttons: list[list[InlineKeyboardButton]] = []
-        _append_back_to_status_button(
+        _append_status_recovery_button(
             buttons,
             ui_state=ui_state,
             user_id=user_id,
@@ -8363,8 +8425,7 @@ async def _show_model_mode_menu_from_callback(
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         await _edit_query_message(
             query,
-            "This agent does not expose model or mode controls in the current session. "
-            "Keep chatting normally, or open Bot Status for the rest of the runtime tools.",
+            _no_model_mode_controls_text(),
             reply_markup=markup,
         )
         return
@@ -14505,6 +14566,13 @@ def _build_history_view(
     start = page * HISTORY_PAGE_SIZE
     visible_entries = entries[start : start + HISTORY_PAGE_SIZE]
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    lines.extend(
+        _session_action_guide_lines(
+            run_summary="keeps working in that saved session",
+            can_fork=can_fork,
+            can_retry_last_turn=can_retry_last_turn,
+        )
+    )
     for offset, entry in enumerate(visible_entries, start=1):
         is_current = entry.session_id == active_session_id
         label = entry.title or entry.session_id
@@ -14701,6 +14769,13 @@ def _build_history_entry_view(
     )
     is_current = entry.session_id == active_session_id
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    lines.extend(
+        _session_action_guide_lines(
+            run_summary="keeps working in that saved session",
+            can_fork=can_fork,
+            can_retry_last_turn=can_retry_last_turn,
+        )
+    )
 
     buttons = [
         [
@@ -14850,6 +14925,13 @@ def _build_provider_sessions_view(
                 ]
             )
     else:
+        lines.extend(
+            _session_action_guide_lines(
+                run_summary="attaches this bot to that provider session and keeps working there",
+                can_fork=can_fork,
+                can_retry_last_turn=can_retry_last_turn,
+            )
+        )
         for index, entry in enumerate(entries, start=1):
             is_current = entry.session_id == active_session_id
             label = entry.title or entry.session_id
@@ -16185,6 +16267,13 @@ def _build_provider_session_detail_view(
     )
     is_current = entry.session_id == active_session_id
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    lines.extend(
+        _session_action_guide_lines(
+            run_summary="attaches this bot to that provider session and keeps working there",
+            can_fork=can_fork,
+            can_retry_last_turn=can_retry_last_turn,
+        )
+    )
 
     buttons = [
         [
