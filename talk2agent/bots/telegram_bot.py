@@ -5855,6 +5855,8 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
         final_reply_markup = _completed_turn_reply_markup(
             ui_state,
             user_id=user_id,
+            provider=state.provider,
+            workspace_id=state.workspace_id,
         )
 
     await stream.finish(
@@ -7255,39 +7257,65 @@ def _completed_turn_reply_markup(
     ui_state: TelegramUiState,
     *,
     user_id: int,
+    provider: str,
+    workspace_id: str,
 ) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    buttons = [
         [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Retry Last Turn",
+                "recover_retry_last_turn",
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Fork Last Turn",
+                "recover_fork_last_turn",
+            ),
+        ]
+    ]
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    if bundle is not None and bundle.items:
+        label, action = (
+            ("Stop Bundle Chat", "recover_stop_bundle_chat")
+            if ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+            else ("Start Bundle Chat", "recover_start_bundle_chat")
+        )
+        buttons.append(
             [
                 _callback_button(
                     ui_state,
                     user_id,
-                    "Retry Last Turn",
-                    "recover_retry_last_turn",
+                    label,
+                    action,
                 ),
                 _callback_button(
                     ui_state,
                     user_id,
-                    "Fork Last Turn",
-                    "recover_fork_last_turn",
+                    f"Open {BUTTON_CONTEXT_BUNDLE}",
+                    "recover_context_bundle",
                 ),
-            ],
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Open Bot Status",
-                    "recover_runtime_status",
-                ),
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "New Session",
-                    "recover_new_session",
-                ),
-            ],
+            ]
+        )
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Open Bot Status",
+                "recover_runtime_status",
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "New Session",
+                "recover_new_session",
+            ),
         ]
     )
+    return InlineKeyboardMarkup(buttons)
 
 
 def _workspace_changes_follow_up_git_status(before_git_status, after_git_status):
@@ -7806,8 +7834,28 @@ async def _show_context_bundle(update: Update, services, ui_state: TelegramUiSta
         await _reply_request_failed(update, services)
         return
 
+    await _reply_context_bundle_view(
+        update.message,
+        services,
+        ui_state,
+        state=state,
+        user_id=update.effective_user.id,
+    )
+
+
+async def _reply_context_bundle_view(
+    message,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    state,
+    user_id: int,
+    notice: str | None = None,
+    back_target: str = "none",
+) -> None:
+
     bundle = ui_state.get_context_bundle(
-        update.effective_user.id,
+        user_id,
         state.provider,
         state.workspace_id,
     )
@@ -7815,20 +7863,19 @@ async def _show_context_bundle(update: Update, services, ui_state: TelegramUiSta
         bundle=bundle,
         provider=state.provider,
         workspace_label=_workspace_label(services, state.workspace_id),
-        user_id=update.effective_user.id,
+        user_id=user_id,
         page=0,
         ui_state=ui_state,
-        last_request_text=ui_state.get_last_request_text(
-            update.effective_user.id,
-            state.workspace_id,
-        ),
+        last_request_text=ui_state.get_last_request_text(user_id, state.workspace_id),
         bundle_chat_active=ui_state.context_bundle_chat_active(
-            update.effective_user.id,
+            user_id,
             state.provider,
             state.workspace_id,
         ),
+        notice=notice,
+        back_target=back_target,
     )
-    await update.message.reply_text(text, reply_markup=markup)
+    await message.reply_text(text, reply_markup=markup)
 
 
 async def _show_context_bundle_from_callback(
@@ -11194,6 +11241,78 @@ async def _dispatch_callback_action(
             _message_update_from_callback(query),
             services,
             ui_state,
+        )
+        return
+
+    if action == "recover_context_bundle":
+        await query.answer()
+        if query.message is None or query.from_user is None:
+            return
+        try:
+            state = await services.snapshot_runtime_state()
+        except Exception:
+            await _reply_request_failed(_message_update_from_callback(query), services)
+            return
+        await _reply_context_bundle_view(
+            query.message,
+            services,
+            ui_state,
+            state=state,
+            user_id=user_id,
+            back_target="status",
+        )
+        return
+
+    if action == "recover_start_bundle_chat":
+        await query.answer()
+        if query.message is None or query.from_user is None:
+            return
+        try:
+            state = await services.snapshot_runtime_state()
+        except Exception:
+            await _reply_request_failed(_message_update_from_callback(query), services)
+            return
+        bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
+        if bundle is None or not bundle.items:
+            notice = _context_bundle_empty_text()
+        elif ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
+            notice = "Bundle chat is already on."
+        else:
+            ui_state.enable_context_bundle_chat(user_id, state.provider, state.workspace_id)
+            notice = "Bundle chat enabled. New plain text messages will use the current context bundle."
+        await _reply_context_bundle_view(
+            query.message,
+            services,
+            ui_state,
+            state=state,
+            user_id=user_id,
+            notice=notice,
+            back_target="status",
+        )
+        return
+
+    if action == "recover_stop_bundle_chat":
+        await query.answer()
+        if query.message is None or query.from_user is None:
+            return
+        try:
+            state = await services.snapshot_runtime_state()
+        except Exception:
+            await _reply_request_failed(_message_update_from_callback(query), services)
+            return
+        if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
+            ui_state.disable_context_bundle_chat(user_id)
+            notice = "Bundle chat disabled."
+        else:
+            notice = "Bundle chat is already off."
+        await _reply_context_bundle_view(
+            query.message,
+            services,
+            ui_state,
+            state=state,
+            user_id=user_id,
+            notice=notice,
+            back_target="status",
         )
         return
 

@@ -1975,6 +1975,72 @@ def test_successful_turn_result_open_bot_status_replies_without_overwriting_answ
     assert update.message.reply_calls[1].startswith("Bot status for Codex in Default Workspace")
 
 
+def test_successful_turn_result_surfaces_context_bundle_recovery_controls():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _ContextBundleItem, handle_text
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    update = FakeUpdate(user_id=123, text="hello")
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, make_context(application=FakeApplication()), services, ui_state))
+
+    completion_markup = update.message.reply_markups[0]
+    assert completion_markup is not None
+    assert find_inline_button(completion_markup, "Start Bundle Chat")
+    assert find_inline_button(completion_markup, "Open Context Bundle")
+
+
+def test_successful_turn_result_bundle_recovery_controls_reply_without_overwriting_answer():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    assert ui_state.enable_context_bundle_chat(123, "codex", "default") is True
+    update = FakeUpdate(user_id=123, text="hello")
+    services, _ = make_services(provider="codex")
+
+    run(handle_text(update, make_context(application=FakeApplication()), services, ui_state))
+
+    completion_markup = update.message.reply_markups[0]
+    open_bundle_button = find_inline_button(completion_markup, "Open Context Bundle")
+    open_bundle_update = FakeCallbackUpdate(123, open_bundle_button.callback_data, message=update.message)
+    run(handle_callback_query(open_bundle_update, None, services, ui_state))
+
+    assert update.message.edit_calls == []
+    assert update.message.reply_calls[0] == "hello world"
+    assert update.message.reply_calls[1].startswith("Context bundle for Codex in Default Workspace")
+    open_bundle_markup = update.message.reply_markups[1]
+    assert find_inline_button(open_bundle_markup, "Back to Bot Status")
+
+    stop_bundle_button = find_inline_button(completion_markup, "Stop Bundle Chat")
+    stop_bundle_update = FakeCallbackUpdate(123, stop_bundle_button.callback_data, message=update.message)
+    run(handle_callback_query(stop_bundle_update, None, services, ui_state))
+
+    assert ui_state.context_bundle_chat_active(123, "codex", "default") is False
+    assert update.message.reply_calls[2].startswith(
+        "Bundle chat disabled.\nContext bundle for Codex in Default Workspace"
+    )
+    stopped_bundle_markup = update.message.reply_markups[2]
+    assert find_inline_button(stopped_bundle_markup, "Start Bundle Chat")
+    assert find_inline_button(stopped_bundle_markup, "Back to Bot Status")
+
+
 def test_retry_last_turn_button_replays_previous_text_turn():
     from talk2agent.bots.telegram_bot import BUTTON_RETRY_LAST_TURN, TelegramUiState, handle_text
 

@@ -55,7 +55,9 @@
    如果 provider session 列表存在多页，再确认页首会显示当前页加载数量和 `Cursor page`，避免管理员翻页后失去方向感。
 5. 验证 `Retry Last Turn` 和 `Fork Last Turn` 会复用上一轮保存的 replay payload。
 6. 对一次普通成功回合，确认最终结果消息本身附带 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
+   如果当前 workspace 还保留 `Context Bundle`，再确认结果消息会额外附上 `Start / Stop Bundle Chat` 与 `Open Context Bundle`，把“继续沿用上下文”与“退出持续上下文模式”直接放在答案旁边。
    再点击一次结果消息上的 `Open Bot Status`，确认 bot 会新发一条状态消息，而不是把原答案直接改写掉。
+   同时分别点击一次结果消息上的 `Open Context Bundle` 与 `Start / Stop Bundle Chat`，确认它们也会新发恢复消息，而不是把原答案直接改写掉。
 7. 人为制造一次会话切换、分叉或接管失败，确认提示会给出重试或重新打开对应视图的建议；如果失败发生在 `Session History` 或 `Provider Sessions` 内，bot 应恢复原列表而不是只显示通用失败短语。
    再制造一次“当前没有可复用 `Last Turn`，但仍有 `Last Request`”的失败态，确认恢复面板会改成 `Run Last Request` / `New Session` / `Open Bot Status`，而不是继续保留 `Retry Last Turn` / `Fork Last Turn` 死入口。
 8. 在 `Session History` 或 `Provider Sessions` 里执行 `Run+Retry` 或 `Fork+Retry` 后，再让上一轮在点击前失效，确认 bot 会在原列表里提示“先发送一条新请求”，而不是误报已经重试成功。

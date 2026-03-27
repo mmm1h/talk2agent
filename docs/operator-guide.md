@@ -73,6 +73,7 @@
 - `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，主键盘入口不会只回一句死提示，而会直接落到带 notice 的 `Bot Status`，把 `Run Last Request`、`Session History`、`New Session` 等恢复入口一起摆出来；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
   当上一轮最初记录在另一个 Provider 上时，状态页和 `Last Turn` 详情页也会明确提示“本次会在当前 Provider 上重放，必要时会先做附件能力适配”，减少跨 runtime 误解。
 - 回合完成快捷操作：当一次 turn 正常结束且没有更具体的 workspace change follow-up 时，最终结果消息本身会附上 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
+  如果当前 workspace 还保留 `Context Bundle`，结果消息还会直接补上 `Start / Stop Bundle Chat` 和 `Open Context Bundle`，把“继续带着上下文聊”与“先停掉这个持续模式”都放在答案旁边，而不用先跳回 `Bot Status`。
   这些按钮会从结果继续发起下一步，而不会把刚收到的答案编辑掉。
 - `Provider Sessions`：管理员浏览并接管 Provider 原生保存的 session。
   列表和详情都会先解释 `Run` 是把当前 bot 重新附着到 provider session、`Fork` 是基于它再开一条 live 分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
