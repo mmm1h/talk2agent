@@ -614,6 +614,15 @@ def assert_switch_workspace_success_notice(text, *, workspace, provider):
     ) in text
 
 
+def expected_session_ready_notice(*extra_lines):
+    lines = [
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared."
+    ]
+    lines.extend(extra_lines)
+    return "\n".join(lines)
+
+
 def make_services(
     session=None,
     *,
@@ -1810,11 +1819,13 @@ def test_new_session_discards_pending_media_group_before_resetting_session():
 
 
 def test_new_session_clears_session_bound_interactions_preserves_bundle_chat_and_syncs_commands():
+    from talk2agent.acp.agent_session import PromptText
     from talk2agent.bots.telegram_bot import (
         BUTTON_NEW_SESSION,
         CALLBACK_PREFIX,
         TelegramUiState,
         _ContextBundleItem,
+        _ReplayTurn,
         handle_callback_query,
         handle_text,
     )
@@ -1826,6 +1837,16 @@ def test_new_session_clears_session_bound_interactions_preserves_bundle_chat_and
         "claude",
         "default",
         _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    ui_state.set_last_request_text(123, "default", "Review the saved context")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the saved context"),),
+            title_hint="Review the saved context",
+        ),
     )
     assert ui_state.enable_context_bundle_chat(123, "claude", "default") is True
     stale_token = ui_state.create(123, "workspace_page", relative_path="", page=0)
@@ -1839,7 +1860,16 @@ def test_new_session_clears_session_bound_interactions_preserves_bundle_chat_and
 
     assert store.reset_calls == [123]
     assert ui_state.get_pending_text_action(123) is None
+    assert ui_state.get_last_request_text(123, "default") == "Review the saved context"
+    assert ui_state.get_last_turn(123, "claude", "default") is not None
     assert ui_state.context_bundle_chat_active(123, "claude", "default") is True
+    assert update.message.reply_calls == [
+        "Started new session: session-123\n"
+        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+        "previous session were cleared.\n"
+        "Reusable in this workspace: Last Request, Last Turn, and Context Bundle.\n"
+        "Bundle chat is still on, so your next plain text message will include the current context bundle."
+    ]
     assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
     stale_update = FakeCallbackUpdate(123, f"{CALLBACK_PREFIX}{stale_token}", message=FakeIncomingMessage("stale"))
@@ -2661,6 +2691,7 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert "Last request source: plain text" in text
     assert "Context bundle: 1 item" in text
     assert "Bundle chat: on" in text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in text
     assert "Bundle preview:" in text
     assert "1. [file] notes.txt" in text
     assert "Agent commands cached: unknown until a live session starts." in text
@@ -4073,6 +4104,52 @@ def test_last_turn_item_detail_can_open_and_back():
     assert find_inline_button(restored_markup, "Open 2")
 
 
+def test_last_turn_view_shows_visible_range_when_paginated():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=tuple(PromptText(f"step {index}") for index in range(1, 7)),
+            title_hint="step 1",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    last_turn_button = find_inline_button(update.message.reply_markups[0], "Last Turn")
+    callback_message = FakeIncomingMessage("status")
+    last_turn_update = FakeCallbackUpdate(123, last_turn_button.callback_data, message=callback_message)
+    run(handle_callback_query(last_turn_update, None, services, ui_state))
+
+    first_page_text, first_page_markup = callback_message.edit_calls[-1]
+    assert "Prompt items: 6" in first_page_text
+    assert "Showing: 1-5 of 6" in first_page_text
+    assert "Page: 1/2" in first_page_text
+    next_button = find_inline_button(first_page_markup, "Next")
+
+    next_update = FakeCallbackUpdate(123, next_button.callback_data, message=callback_message)
+    run(handle_callback_query(next_update, None, services, ui_state))
+
+    second_page_text, _second_page_markup = callback_message.edit_calls[-1]
+    assert "Prompt items: 6" in second_page_text
+    assert "Showing: 6-6 of 6" in second_page_text
+    assert "Page: 2/2" in second_page_text
+    assert "6. [text] step 6" in second_page_text
+
+
 def test_session_info_can_open_agent_commands_and_back_to_session_info():
     from talk2agent.bots.telegram_bot import (
         BUTTON_BOT_STATUS,
@@ -4629,6 +4706,52 @@ def test_agent_plan_detail_can_open_and_back():
     assert find_inline_button(restored_markup, "Open 1")
 
 
+def test_agent_plan_view_shows_visible_range_when_paginated():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(
+        session_id="session-live",
+        plan_entries=tuple(
+            SimpleNamespace(
+                content=f"Plan step {index}",
+                status="pending",
+                priority="medium",
+            )
+            for index in range(1, 8)
+        ),
+    )
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    plan_button = find_inline_button(update.message.reply_markups[0], "Agent Plan")
+    callback_message = FakeIncomingMessage("status")
+    plan_update = FakeCallbackUpdate(123, plan_button.callback_data, message=callback_message)
+    run(handle_callback_query(plan_update, None, services, ui_state))
+
+    first_page_text, first_page_markup = callback_message.edit_calls[-1]
+    assert "Plan items: 7" in first_page_text
+    assert "Showing: 1-6 of 7" in first_page_text
+    assert "Page: 1/2" in first_page_text
+    next_button = find_inline_button(first_page_markup, "Next")
+
+    next_update = FakeCallbackUpdate(123, next_button.callback_data, message=callback_message)
+    run(handle_callback_query(next_update, None, services, ui_state))
+
+    second_page_text, _second_page_markup = callback_message.edit_calls[-1]
+    assert "Plan items: 7" in second_page_text
+    assert "Showing: 7-7 of 7" in second_page_text
+    assert "Page: 2/2" in second_page_text
+    assert "7. [ ] Plan step 7 (priority: medium)" in second_page_text
+
+
 def test_bot_status_shows_recent_tool_activity_preview():
     from talk2agent.bots.telegram_bot import BUTTON_BOT_STATUS, TelegramUiState, handle_text
 
@@ -4705,6 +4828,54 @@ def test_bot_status_can_open_tool_activity_and_back_to_status():
     restored_text, restored_markup = callback_message.edit_calls[-1]
     assert restored_text.startswith("Bot status for Codex in Default Workspace")
     assert find_inline_button(restored_markup, "Tool Activity")
+
+
+def test_tool_activity_view_shows_visible_range_when_paginated():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(
+        session_id="session-live",
+        recent_tool_activities=tuple(
+            SimpleNamespace(
+                tool_call_id=f"tool-{index}",
+                title=f"Run task {index}",
+                status="completed",
+                kind="execute",
+                details=(f"cmd: task {index}",),
+            )
+            for index in range(1, 7)
+        ),
+    )
+    ui_state = TelegramUiState()
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    tool_button = find_inline_button(update.message.reply_markups[0], "Tool Activity")
+    callback_message = FakeIncomingMessage("status")
+    tool_update = FakeCallbackUpdate(123, tool_button.callback_data, message=callback_message)
+    run(handle_callback_query(tool_update, None, services, ui_state))
+
+    first_page_text, first_page_markup = callback_message.edit_calls[-1]
+    assert "Recent tools: 6" in first_page_text
+    assert "Showing: 1-5 of 6" in first_page_text
+    assert "Page: 1/2" in first_page_text
+    next_button = find_inline_button(first_page_markup, "Next")
+
+    next_update = FakeCallbackUpdate(123, next_button.callback_data, message=callback_message)
+    run(handle_callback_query(next_update, None, services, ui_state))
+
+    second_page_text, _second_page_markup = callback_message.edit_calls[-1]
+    assert "Recent tools: 6" in second_page_text
+    assert "Showing: 6-6 of 6" in second_page_text
+    assert "Page: 2/2" in second_page_text
+    assert "6. [completed] Run task 6 (execute, cmd: task 6)" in second_page_text
 
 
 def test_tool_activity_detail_can_open_file_preview_and_back(monkeypatch, tmp_path):
@@ -5174,7 +5345,7 @@ def test_bot_status_recent_session_quick_switch_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice()}\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: session-1" in final_text
@@ -5225,7 +5396,7 @@ def test_bot_status_recent_session_quick_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -5763,7 +5934,7 @@ def test_bot_status_provider_session_run_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice()}\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: desktop-session" in final_text
@@ -5823,7 +5994,7 @@ def test_bot_status_provider_session_run_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -5869,7 +6040,7 @@ def test_bot_status_provider_session_fork_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice()}\n"
         "Bot status for Codex in Default Workspace"
     )
     assert "Session: fork-desktop-session" in final_text
@@ -5933,7 +6104,7 @@ def test_bot_status_provider_session_fork_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -6023,7 +6194,7 @@ def test_bot_status_history_provider_session_run_keeps_back_chain_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared."
+        f"{expected_session_ready_notice()}"
     )
     back_to_history_button = find_inline_button(final_markup, "Back to History")
 
@@ -6220,7 +6391,7 @@ def test_bot_status_session_history_run_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -6323,7 +6494,7 @@ def test_bot_status_session_history_fork_retry_returns_to_status():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Bot status for Codex in Default Workspace"
     )
@@ -9010,6 +9181,8 @@ def test_bot_status_switch_agent_can_open_and_back_to_status():
         "Switch impact:"
     )
     assert "- Context bundle does not follow an agent switch." in switch_text
+    assert "Available agents: 3" in switch_text
+    assert "Choose a provider below to switch the shared runtime now." in switch_text
     assert "Provider capabilities:" in switch_text
     assert find_inline_button(switch_markup, "Back to Bot Status")
 
@@ -9085,6 +9258,8 @@ def test_bot_status_switch_workspace_can_open_and_back_to_status():
         "- Any Context Bundle, Last Request, or Last Turn from this workspace will stay behind."
         in switch_text
     )
+    assert "Configured workspaces: 2" in switch_text
+    assert "Choose a workspace below to switch the shared runtime there." in switch_text
     assert find_inline_button(switch_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(
@@ -9145,6 +9320,8 @@ def test_switch_agent_button_shows_provider_choices():
         "- Old bot buttons and pending inputs will be cleared.\n"
         "- Context bundle does not follow an agent switch.\n"
         "- After switching, send a fresh request or open Bot Status to keep going.\n"
+        "Available agents: 3\n"
+        "Choose a provider below to switch the shared runtime now.\n"
         "Provider capabilities:"
     )
     assert "- Claude Code: img=yes audio=no docs=yes sessions=list/resume/fork" in switch_text
@@ -9195,6 +9372,12 @@ def test_switch_agent_button_shows_replay_shortcuts_when_last_turn_exists():
     assert "Switch impact:" in switch_text
     assert "- Context bundle (1 item) stays with the current agent runtime and won't follow the switch." in switch_text
     assert "- Last Turn stays available in this workspace: hello" in switch_text
+    assert "Available agents: 3" in switch_text
+    assert (
+        "Choose a provider below. Retry on ... replays the last turn in this workspace; Fork "
+        "on ... starts a new session there first."
+        in switch_text
+    )
     markup = update.message.reply_markups[0]
     labels = [button.text for row in markup.inline_keyboard for button in row]
     assert labels == [
@@ -9275,6 +9458,8 @@ def test_switch_agent_button_shows_unavailable_provider_capability_summary():
         "- Old bot buttons and pending inputs will be cleared.\n"
         "- Context bundle does not follow an agent switch.\n"
         "- After switching, send a fresh request or open Bot Status to keep going.\n"
+        "Available agents: 3\n"
+        "Choose a provider below to switch the shared runtime now.\n"
         "Provider capabilities:"
     )
     assert "- Claude Code: unavailable (command missing)" in switch_text
@@ -9365,6 +9550,8 @@ def test_switch_workspace_button_shows_choices_and_switches():
         "Switch impact:"
     )
     assert "Current workspace state that will stay behind: Context Bundle (1 item), Last Request, Last Turn." in switch_text
+    assert "Configured workspaces: 2" in switch_text
+    assert "Choose a workspace below to switch the shared runtime there." in switch_text
     markup = update.message.reply_markups[0]
     alt_button = markup.inline_keyboard[1][0]
     callback_update = FakeCallbackUpdate(123, alt_button.callback_data, message=FakeIncomingMessage("workspace"))
@@ -9903,7 +10090,7 @@ def test_session_history_run_clears_session_bound_interactions_and_syncs_command
     final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Context Bundle.', 'Bundle chat is still on, so your next plain text message will include the current context bundle.')}\n"
         "Session history for Codex in Default Workspace"
     )
     assert "[current]" in final_text
@@ -10077,7 +10264,7 @@ def test_session_history_run_retry_switches_session_and_replays_last_turn():
         "Switching to session...",
         (
             "Switched to session session-1 on Codex in Default Workspace. "
-            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
             "Retrying last turn in this session..."
         ),
     ]
@@ -10087,7 +10274,7 @@ def test_session_history_run_retry_switches_session_and_replays_last_turn():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to session session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Session history for Codex in Default Workspace"
     )
@@ -10239,7 +10426,7 @@ def test_session_history_fork_retry_switches_session_and_replays_last_turn():
         "Forking session...",
         (
             "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
             "Retrying last turn in this session..."
         ),
     ]
@@ -10252,7 +10439,7 @@ def test_session_history_fork_retry_switches_session_and_replays_last_turn():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked session fork-session-1 from session-1 on Codex in Default Workspace. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Session history for Codex in Default Workspace"
     )
@@ -10345,6 +10532,25 @@ def test_session_history_shows_provider_sessions_button_for_admin():
     run(handle_text(update, None, services, TelegramUiState()))
 
     assert find_inline_button(update.message.reply_markups[0], "Provider Sessions").text == "Provider Sessions"
+
+
+def test_session_history_shows_count_and_page_summary_when_paginated():
+    from talk2agent.bots.telegram_bot import BUTTON_SESSION_HISTORY, TelegramUiState, handle_text
+
+    history_entries = [
+        build_history_entry(f"session-{index}", f"Session {index}")
+        for index in range(1, 7)
+    ]
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(history_entries=history_entries)
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert "Local sessions: 6" in text
+    assert "Showing: 1-5 of 6" in text
+    assert "Page: 1/2" in text
+    assert find_inline_button(update.message.reply_markups[0], "Next")
 
 
 def test_session_history_empty_state_offers_new_session_and_status_recovery():
@@ -10442,7 +10648,7 @@ def test_provider_sessions_can_be_browsed_and_attached_from_history():
     final_text = run_update.callback_query.message.edit_calls[-1][0]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared."
+        f"{expected_session_ready_notice('Reusable in this workspace: Context Bundle.', 'Bundle chat is still on, so your next plain text message will include the current context bundle.')}"
     )
     assert "Desktop Flow [current]" in final_text
 
@@ -10451,6 +10657,42 @@ def test_provider_sessions_can_be_browsed_and_attached_from_history():
     assert stale_update.callback_query.answers == [
         ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
     ]
+
+
+def test_provider_sessions_show_loaded_count_and_cursor_page():
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
+
+    provider_page = SimpleNamespace(
+        entries=(
+            build_provider_session("desktop-session", "Desktop Flow", cwd_label="src"),
+            build_provider_session("review-session", "Review Flow", cwd_label="docs"),
+        ),
+        next_cursor="cursor-2",
+        supported=True,
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(
+        provider="codex",
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={None: provider_page},
+    )
+    ui_state = TelegramUiState()
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
+    run(handle_callback_query(provider_update, None, services, ui_state))
+
+    provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
+    assert "Loaded sessions on this page: 2" in provider_text
+    assert "Cursor page: 1" in provider_text
+    assert find_inline_button(provider_markup, "Next")
 
 
 def test_provider_session_detail_from_history_keeps_back_chain_to_status():
@@ -10663,7 +10905,7 @@ def test_provider_session_run_retry_switches_session_and_replays_last_turn():
         "Switching to provider session...",
         (
             "Switched to provider session desktop-session. "
-            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
             "Retrying last turn in this session..."
         ),
     ]
@@ -10673,7 +10915,7 @@ def test_provider_session_run_retry_switches_session_and_replays_last_turn():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Provider sessions for Codex in Default Workspace"
     )
@@ -10729,7 +10971,7 @@ def test_provider_session_run_retry_without_previous_turn_restores_provider_view
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Switched to provider session desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice()}\n"
         "No previous turn is available yet. Send a new request first, then try again.\n"
         "Provider sessions for Codex in Default Workspace"
     )
@@ -10867,7 +11109,7 @@ def test_provider_session_fork_retry_switches_session_and_replays_last_turn():
         "Forking provider session...",
         (
             "Forked provider session desktop-session into fork-desktop-session. "
-            "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+            f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
             "Retrying last turn in this session..."
         ),
     ]
@@ -10880,7 +11122,7 @@ def test_provider_session_fork_retry_switches_session_and_replays_last_turn():
     final_text, final_markup = callback_message.edit_calls[-1]
     assert final_text.startswith(
         "Forked provider session desktop-session into fork-desktop-session. "
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the previous session were cleared.\n"
+        f"{expected_session_ready_notice('Reusable in this workspace: Last Turn.')}\n"
         "Retried last turn in this session.\n"
         "Provider sessions for Codex in Default Workspace"
     )
@@ -11023,6 +11265,25 @@ def test_agent_commands_button_shows_discovered_commands_without_live_session():
     )
     assert "/status" in update.message.reply_calls[0]
     assert "args: model id" in update.message.reply_calls[0]
+
+
+def test_agent_commands_show_count_and_page_summary_when_paginated():
+    from talk2agent.bots.telegram_bot import BUTTON_AGENT_COMMANDS, TelegramUiState, handle_text
+
+    commands = [FakeCommand(f"cmd-{index}", f"Command {index}") for index in range(1, 8)]
+    update = FakeUpdate(user_id=123, text=BUTTON_AGENT_COMMANDS)
+    services, _ = make_services(
+        session=FakeSession(available_commands=commands),
+        peek_session=None,
+    )
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert "Commands: 7" in text
+    assert "Showing: 1-6 of 7" in text
+    assert "Page: 1/2" in text
+    assert find_inline_button(update.message.reply_markups[0], "Next")
 
 
 def test_agent_commands_empty_state_offers_refresh_and_status_recovery():
@@ -11518,9 +11779,23 @@ def test_workspace_files_button_shows_current_directory_listing(tmp_path):
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls[0].startswith(
+    text = update.message.reply_calls[0]
+    assert text.startswith(
         "Workspace files for Claude Code in Default Workspace\nPath: ."
     )
+    assert "Action guide:" in text
+    assert (
+        "- Ask Agent With Visible Files starts a fresh turn using the files shown on this page."
+        in text
+    )
+    assert (
+        "- Start Bundle Chat With Visible Files keeps the files shown on this page attached to your "
+        "next plain text messages."
+    ) in text
+    assert (
+        "- Add Visible Files to Context saves the files shown on this page to Context Bundle "
+        "without sending anything yet."
+    ) in text
     labels = [button.text for row in update.message.reply_markups[0].inline_keyboard for button in row]
     assert labels == [
         "src/",
@@ -11556,8 +11831,18 @@ def test_workspace_files_can_navigate_directory_and_preview_file(tmp_path):
     file_update = FakeCallbackUpdate(123, file_button.callback_data, message=dir_update.callback_query.message)
     run(handle_callback_query(file_update, None, services, ui_state))
 
-    assert file_update.callback_query.message.edit_calls[-1][0].startswith(
+    preview_text = file_update.callback_query.message.edit_calls[-1][0]
+    assert preview_text.startswith(
         "Workspace file for Claude Code in Default Workspace\nPath: src/app.py\nprint('hello')"
+    )
+    assert "- Ask Agent About File starts a fresh turn about this file." in preview_text
+    assert (
+        "- Start Bundle Chat With File keeps this file attached to your next plain text messages."
+        in preview_text
+    )
+    assert (
+        "- Add File to Context saves this file to Context Bundle without sending anything yet."
+        in preview_text
     )
 
 
@@ -11610,6 +11895,24 @@ def test_workspace_listing_empty_directory_offers_search_and_status_recovery(tmp
     markup = update.message.reply_markups[0]
     assert find_inline_button(markup, "Workspace Search")
     assert find_inline_button(markup, "Open Bot Status")
+
+
+def test_workspace_listing_shows_entry_count_and_page_summary_when_paginated(tmp_path):
+    from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_FILES, TelegramUiState, handle_text
+
+    for index in range(1, 10):
+        (tmp_path / f"file-{index}.txt").write_text(f"file {index}\n", encoding="utf-8")
+
+    update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_FILES)
+    services, _ = make_services(workspace_path=str(tmp_path))
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert "Entries: 9" in text
+    assert "Showing: 1-8 of 9" in text
+    assert "Page: 1/2" in text
+    assert find_inline_button(update.message.reply_markups[0], "Next")
 
 
 def test_workspace_listing_can_add_visible_files_to_context_bundle(tmp_path):
@@ -11749,6 +12052,10 @@ def test_workspace_listing_can_ask_with_last_request(tmp_path):
     update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_FILES)
     run(handle_text(update, None, services, ui_state))
 
+    assert (
+        "- Ask With Last Request reuses the saved request text with the files shown on this page."
+        in update.message.reply_calls[0]
+    )
     ask_button = find_inline_button(update.message.reply_markups[0], "Ask With Last Request")
     ask_update = FakeCallbackUpdate(123, ask_button.callback_data, message=FakeIncomingMessage("workspace"))
     run(handle_callback_query(ask_update, None, services, ui_state))
@@ -11870,15 +12177,50 @@ def test_workspace_search_uses_next_text_message_and_shows_matches(tmp_path):
     query_update = FakeUpdate(user_id=123, text="agent")
     run(handle_text(query_update, None, services, ui_state))
 
-    assert query_update.message.reply_calls[0].startswith(
+    text = query_update.message.reply_calls[0]
+    assert text.startswith(
         "Workspace search for Claude Code in Default Workspace\nQuery: agent"
     )
-    assert "README.md:1" in query_update.message.reply_calls[0]
-    assert "src/app.py:1" in query_update.message.reply_calls[0]
+    assert "README.md:1" in text
+    assert "src/app.py:1" in text
+    assert (
+        "- Ask Agent With Matching Files starts a fresh turn using the matching files shown on "
+        "this page."
+    ) in text
+    assert (
+        "- Start Bundle Chat With Matching Files keeps the matching files shown on this page "
+        "attached to your next plain text messages."
+    ) in text
+    assert (
+        "- Add Matching Files to Context saves the matching files shown on this page to Context "
+        "Bundle without sending anything yet."
+    ) in text
     assert find_inline_button(query_update.message.reply_markups[0], "Ask Agent With Matching Files")
     assert find_inline_button(query_update.message.reply_markups[0], "Start Bundle Chat With Matching Files")
     assert find_inline_button(query_update.message.reply_markups[0], "Add Matching Files to Context")
     assert find_inline_button(query_update.message.reply_markups[0], "Open Context Bundle")
+
+
+def test_workspace_search_shows_match_count_and_page_summary_when_paginated(tmp_path):
+    from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_SEARCH, TelegramUiState, handle_text
+
+    for index in range(1, 7):
+        (tmp_path / f"match-{index}.txt").write_text("agent\n", encoding="utf-8")
+
+    ui_state = TelegramUiState()
+    start_update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_SEARCH)
+    services, _ = make_services(workspace_path=str(tmp_path))
+
+    run(handle_text(start_update, None, services, ui_state))
+
+    query_update = FakeUpdate(user_id=123, text="agent")
+    run(handle_text(query_update, None, services, ui_state))
+
+    text = query_update.message.reply_calls[0]
+    assert "Matches: 6" in text
+    assert "Showing: 1-5 of 6" in text
+    assert "Page: 1/2" in text
+    assert find_inline_button(query_update.message.reply_markups[0], "Next")
 
 
 def test_workspace_search_no_matches_offers_recovery_buttons(tmp_path):
@@ -12413,6 +12755,30 @@ def test_context_bundle_button_shows_empty_bundle():
     assert find_inline_button(markup, "Open Bot Status")
 
 
+def test_context_bundle_shows_page_summary_when_paginated():
+    from talk2agent.bots.telegram_bot import BUTTON_CONTEXT_BUNDLE, TelegramUiState, _ContextBundleItem, handle_text
+
+    ui_state = TelegramUiState()
+    for index in range(1, 8):
+        ui_state.add_context_item(
+            123,
+            "claude",
+            "default",
+            _ContextBundleItem(kind="file", relative_path=f"notes-{index}.txt"),
+        )
+
+    update = FakeUpdate(user_id=123, text=BUTTON_CONTEXT_BUNDLE)
+    services, _ = make_services()
+
+    run(handle_text(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert "Items: 7" in text
+    assert "Showing: 1-6 of 7" in text
+    assert "Page: 1/2" in text
+    assert find_inline_button(update.message.reply_markups[0], "Next")
+
+
 def test_workspace_previews_can_add_context_and_bundle_can_run_agent_turn(monkeypatch, tmp_path):
     from talk2agent.bots import telegram_bot
     from talk2agent.bots.telegram_bot import (
@@ -12777,15 +13143,58 @@ def test_workspace_changes_button_shows_git_status(monkeypatch):
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls[0].startswith(
+    text = update.message.reply_calls[0]
+    assert text.startswith(
         "Workspace changes for Claude Code in Default Workspace\nBranch: main"
     )
-    assert "[ M] src/app.py" in update.message.reply_calls[0]
-    assert "[??] notes.txt" in update.message.reply_calls[0]
+    assert "[ M] src/app.py" in text
+    assert "[??] notes.txt" in text
+    assert (
+        "- Ask Agent With Current Changes starts a fresh turn using the changes shown on this page."
+        in text
+    )
+    assert (
+        "- Start Bundle Chat With Changes keeps the changes shown on this page attached to your "
+        "next plain text messages."
+    ) in text
+    assert (
+        "- Add All Changes to Context saves the changes shown on this page to Context Bundle "
+        "without sending anything yet."
+    ) in text
     assert find_inline_button(update.message.reply_markups[0], "Ask Agent With Current Changes")
     assert find_inline_button(update.message.reply_markups[0], "Start Bundle Chat With Changes")
     assert find_inline_button(update.message.reply_markups[0], "Add All Changes to Context")
     assert find_inline_button(update.message.reply_markups[0], "Open Context Bundle")
+
+
+def test_workspace_changes_show_count_and_page_summary_when_paginated(monkeypatch):
+    from talk2agent.bots import telegram_bot
+    from talk2agent.bots.telegram_bot import BUTTON_WORKSPACE_CHANGES, TelegramUiState, handle_text
+    from talk2agent.workspace_git import WorkspaceGitStatus, WorkspaceGitStatusEntry
+
+    monkeypatch.setattr(
+        telegram_bot,
+        "read_workspace_git_status",
+        lambda _path: WorkspaceGitStatus(
+            is_git_repo=True,
+            branch_line="main",
+            entries=tuple(
+                WorkspaceGitStatusEntry(" M", f"src/file_{index}.py", f"src/file_{index}.py")
+                for index in range(1, 8)
+            ),
+        ),
+    )
+
+    update = FakeUpdate(user_id=123, text=BUTTON_WORKSPACE_CHANGES)
+    services, _ = make_services()
+
+    run(handle_text(update, None, services, TelegramUiState()))
+
+    text = update.message.reply_calls[0]
+    assert "Changes: 7" in text
+    assert "Showing: 1-6 of 7" in text
+    assert "Page: 1/2" in text
+    assert find_inline_button(update.message.reply_markups[0], "Next")
 
 
 def test_workspace_changes_not_git_repo_offers_workspace_recovery_buttons(monkeypatch):
@@ -12859,8 +13268,18 @@ def test_workspace_changes_open_diff_and_back(monkeypatch):
     diff_update = FakeCallbackUpdate(123, open_button.callback_data, message=FakeIncomingMessage("changes"))
     run(handle_callback_query(diff_update, None, services, ui_state))
 
-    assert diff_update.callback_query.message.edit_calls[-1][0].startswith(
+    preview_text = diff_update.callback_query.message.edit_calls[-1][0]
+    assert preview_text.startswith(
         "Workspace change for Claude Code in Default Workspace\nPath: src/app.py\nStatus:  M\ndiff --git"
+    )
+    assert "- Ask Agent About Change starts a fresh turn about this change." in preview_text
+    assert (
+        "- Start Bundle Chat With Change keeps this change attached to your next plain text "
+        "messages."
+    ) in preview_text
+    assert (
+        "- Add Change to Context saves this change to Context Bundle without sending anything yet."
+        in preview_text
     )
 
     back_button = find_inline_button(
@@ -13219,6 +13638,10 @@ def test_workspace_change_preview_can_ask_with_last_request(monkeypatch):
     diff_update = FakeCallbackUpdate(123, open_button.callback_data, message=FakeIncomingMessage("changes"))
     run(handle_callback_query(diff_update, None, services, ui_state))
 
+    assert (
+        "- Ask With Last Request reuses the saved request text with this change."
+        in diff_update.callback_query.message.edit_calls[-1][0]
+    )
     ask_button = find_inline_button(
         diff_update.callback_query.message.edit_calls[-1][1],
         "Ask With Last Request",

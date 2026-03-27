@@ -31,9 +31,11 @@
    如果该 `Last Request` 或 `Last Turn` 最初记录在另一个 Provider 上，再确认状态页会明确提示这次重放将落到当前 Provider，而不是让用户自己猜。
 10. 执行 `Switch Agent`，确认切换前有预检，切换菜单会明确提示旧按钮 / 待输入会被清理、`Context Bundle` 不会跟随切换，而同 workspace 下的 `Last Turn` / `Last Request` 仍可继续复用；切换后旧 UI 动作立即失效。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
+   再确认菜单会显示 `Available agents`，并在存在可复用 `Last Turn` 时直接解释 `Retry on ...` / `Fork on ...` 的差别，而不是只把按钮堆出来让管理员自己猜。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 agent。
 11. 执行 `Switch Workspace`，确认只显示白名单 workspace，并且切换跨重启持久化；切换菜单和成功回显都要明确提示 workspace 作用域内的 `Context Bundle`、`Last Request`、`Last Turn` 不会跟到新 workspace。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
+   再确认菜单会显示 `Configured workspaces`，避免管理员在多 workspace 环境下只看到按钮列表却不知道还有多少目标可切。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 workspace。
 12. 使用一个未授权 Telegram 账号访问 bot，确认提示会明确说明需要联系操作者开通访问。
 
@@ -42,12 +44,15 @@
 1. 发送普通文本，确认会创建或复用当前运行时中的 live session。
 2. 点击 `New Session` 和 `Restart Agent`，确认会话被替换，旧 session 不再接收新请求。
    额外在 `media_group` 仍处于收集窗口内时分别执行一次，确认 bot 会先提示已丢弃待发送上传，而不是让旧附件继续流入新 session。
+   如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认成功回显会明确说明哪些内容仍可复用；若 `Bundle Chat` 仍开启，也要明确提醒下一条纯文本仍会自动带上当前 bundle，避免把“新 session”误解成“所有上下文已清空”。
 3. 打开 `Session History`，确认可以浏览、切换、分叉、重命名和删除本地历史会话。
    额外在本地历史为空时打开一次，确认空状态会直接给出 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，而不是只显示一句“没有历史”。
    再确认列表和详情都会明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。
+   如果历史记录超过一页，再确认页首会显示 `Local sessions`、`Showing` 和 `Page`，让用户知道总共有多少条、当前页覆盖哪一段，而不是只剩 `Prev` / `Next`。
 4. 如果 Provider 支持原生 session 浏览，打开 `Provider Sessions`，确认可以接管或分叉 provider 侧 session。
    再分别制造“当前 agent 不支持 provider session browsing”和“当前页暂时没有任何 provider session”两种空状态，确认视图会解释原因，并保留 `Refresh` 或 `Open Bot Status` 恢复入口，而不是只留一句空文案。
    同时确认列表和详情都会明确解释 `Run` 是接管 provider session、`Fork` 是基于它开新分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
+   如果 provider session 列表存在多页，再确认页首会显示当前页加载数量和 `Cursor page`，避免管理员翻页后失去方向感。
 5. 验证 `Retry Last Turn` 和 `Fork Last Turn` 会复用上一轮保存的 replay payload。
 6. 对一次普通成功回合，确认最终结果消息本身附带 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
    再点击一次结果消息上的 `Open Bot Status`，确认 bot 会新发一条状态消息，而不是把原答案直接改写掉。
@@ -66,8 +71,10 @@
    再搜一个明确不存在的关键词，确认空结果视图会直接给出 `Search Again`、`Workspace Files` 和状态页恢复入口，而不是只留“没有匹配”。
 3. 打开 `Workspace Changes`，确认可以查看当前 Git 变更和 diff 预览。
    再分别在“当前 workspace 不是 Git 仓库”和“Git 仓库但工作树干净”两种空状态下打开，确认视图会直接给出 `Workspace Files`、`Workspace Search` 和状态页恢复入口。
+   再分别检查 `Workspace Files`、`Workspace Search`、`Workspace Changes` 以及单文件 / 单变更预览，确认页面正文会直接解释 `Ask Agent ...`、`Ask With Last Request`、`Start Bundle Chat ...`、`Add ... to Context` 或 `Remove From Context` 的差别，而不是只堆动作按钮。
 4. 从文件、搜索结果或变更中加入 `Context Bundle`，确认 bundle 可浏览、移除、清空和持续附着。
    当 bundle 非空时，再确认页面会直接解释 `Ask Agent With Context`、`Ask With Last Request` 和 `Start / Stop Bundle Chat` 各自会做什么，而不是只显示动作按钮。
+   对 `Workspace Files`、`Workspace Search`、`Workspace Changes` 和 `Context Bundle` 这些列表页，再分别制造一次超过一页的场景，确认页首会显示 `Entries` / `Matches` / `Changes` / `Items`，以及 `Showing` 和 `Page`，而不是只留翻页按钮。
 5. 在 `Context Bundle` 为空、或点击 `Ask With Last Request` 但当前 workspace 没有上一条请求时，确认提示会明确指向“先加上下文”或“先发送一条新请求”，而不是只显示空泛短语。
    其中 `Context Bundle` 为空时，确认视图本身也会提供 `Workspace Files`、`Workspace Search` 和 `Workspace Changes` 的直接入口。
 
@@ -75,6 +82,7 @@
 
 1. 打开 `Agent Commands`，确认显示的是当前 agent 暴露的命令，而不是 bot 自己的管理命令。
    再制造一个“当前没有任何可发现命令”的场景，确认空状态会解释这是“仍在发现中”或“agent 不暴露命令”，并保留 `Refresh` 与状态页恢复入口。
+   如果命令列表超过一页，再确认页首会显示 `Commands`、`Showing` 和 `Page`，让用户知道当前只看到哪一段命令。
 2. 打开 `Model / Mode`，确认可以查看并切换当前 live session 暴露的选项。
    同时确认页面会先显示当前 setup，并明确说明这次切换作用于当前 live session；主列表还应告诉用户可以直接切换，或先打开某个 choice 查看详情再决定。
    如果当前 session 只暴露 `Model` 或只暴露 `Mode`，再确认页面会直接说明另一半当前不可用，而不是静默少一半按钮。
@@ -88,6 +96,7 @@
    如果当前 workspace 还有上一轮可复用 turn，再确认 `Last Request` 详情会同时提供 `Retry Last Turn` / `Fork Last Turn`，把“重跑文本”和“恢复整轮上下文”区分清楚。
    如果 `Last Request` 或 `Last Turn` 记录自另一个 Provider，再确认详情页会直接写明“Recorded provider` 与 `Current provider` 的差异，以及当前重放到底会发往哪里”，避免跨 runtime 误会。
    同时确认 `Last Turn` 详情会额外解释 `Retry Last Turn` 是在当前 live session 里重放整轮 payload，而 `Fork Last Turn` 会先开新 session 再重放。
+   如果 `Last Turn`、`Agent Plan` 或 `Tool Activity` 超过一页，再确认页首会显示总数、`Showing` 和 `Page`，避免只读排查长列表时失去位置感。
 
 ## 附件与长回合
 

@@ -1664,6 +1664,96 @@ def _resume_snapshot_lines(
     return lines
 
 
+def _join_label_series(labels: list[str]) -> str:
+    if not labels:
+        return ""
+    if len(labels) == 1:
+        return labels[0]
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return f"{', '.join(labels[:-1])}, and {labels[-1]}"
+
+
+def _workspace_reuse_labels(
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    provider: str,
+    workspace_id: str,
+) -> list[str]:
+    labels: list[str] = []
+    if ui_state.get_last_request(user_id, workspace_id) is not None:
+        labels.append("Last Request")
+    if ui_state.get_last_turn(user_id, provider, workspace_id) is not None:
+        labels.append("Last Turn")
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    if bundle is not None and bundle.items:
+        labels.append("Context Bundle")
+    return labels
+
+
+def _workspace_reuse_summary_line(
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    provider: str,
+    workspace_id: str,
+) -> str | None:
+    labels = _workspace_reuse_labels(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    if not labels:
+        return None
+    return f"Reusable in this workspace: {_join_label_series(labels)}."
+
+
+def _session_ready_extra_lines(
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    provider: str,
+    workspace_id: str,
+) -> tuple[str, ...]:
+    lines = []
+    reuse_summary = _workspace_reuse_summary_line(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    if reuse_summary is not None:
+        lines.append(reuse_summary)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    if (
+        bundle_count > 0
+        and ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    ):
+        lines.append(
+            "Bundle chat is still on, so your next plain text message will include the current context bundle."
+        )
+    return tuple(lines)
+
+
+def _session_ready_notice_for_runtime(
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    state,
+) -> str:
+    return _session_ready_notice_text(
+        extra_lines=_session_ready_extra_lines(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=state.provider,
+            workspace_id=state.workspace_id,
+        )
+    )
+
+
 def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
     lines = [
         "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn.",
@@ -1724,19 +1814,31 @@ def _help_core_concept_lines() -> list[str]:
     ]
 
 
-def _session_ready_notice_text() -> str:
-    return (
-        "You're ready for the next request. Old bot buttons and pending inputs tied to the "
-        "previous session were cleared."
-    )
+def _session_ready_notice_text(*, extra_lines: tuple[str, ...] = ()) -> str:
+    lines = [
+        (
+            "You're ready for the next request. Old bot buttons and pending inputs tied to the "
+            "previous session were cleared."
+        )
+    ]
+    lines.extend(line for line in extra_lines if line)
+    return "\n".join(lines)
 
 
-def _new_session_success_text(session_id: str) -> str:
-    return f"Started new session: {session_id}\n{_session_ready_notice_text()}"
+def _new_session_success_text(
+    session_id: str,
+    *,
+    extra_lines: tuple[str, ...] = (),
+) -> str:
+    return f"Started new session: {session_id}\n{_session_ready_notice_text(extra_lines=extra_lines)}"
 
 
-def _restart_agent_success_text(session_id: str) -> str:
-    return f"Restarted agent: {session_id}\n{_session_ready_notice_text()}"
+def _restart_agent_success_text(
+    session_id: str,
+    *,
+    extra_lines: tuple[str, ...] = (),
+) -> str:
+    return f"Restarted agent: {session_id}\n{_session_ready_notice_text(extra_lines=extra_lines)}"
 
 
 def _build_start_text(
@@ -6272,6 +6374,15 @@ async def _show_workspace_file_preview_from_callback(
         secondary_button_label="Add File to Context",
         secondary_button_action="workspace_file_add_context",
         secondary_button_payload={"relative_path": preview.relative_path},
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About File",
+            subject_summary="this file",
+            secondary_label="Add File to Context",
+            secondary_summary="saves this file to Context Bundle without sending anything yet.",
+            has_last_request=last_request_text is not None,
+            bundle_chat_label="Start Bundle Chat With File",
+            bundle_chat_summary="keeps this file attached to your next plain text messages.",
+        ),
         supplemental_buttons=(
             (
                 "Start Bundle Chat With File",
@@ -6347,6 +6458,15 @@ async def _show_workspace_search_file_preview_from_callback(
         secondary_button_label="Add File to Context",
         secondary_button_action="workspace_file_add_context",
         secondary_button_payload={"relative_path": preview.relative_path},
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About File",
+            subject_summary="this file",
+            secondary_label="Add File to Context",
+            secondary_summary="saves this file to Context Bundle without sending anything yet.",
+            has_last_request=last_request_text is not None,
+            bundle_chat_label="Start Bundle Chat With File",
+            bundle_chat_summary="keeps this file attached to your next plain text messages.",
+        ),
         supplemental_buttons=(
             (
                 "Start Bundle Chat With File",
@@ -6930,6 +7050,90 @@ def _session_action_guide_lines(
     return lines
 
 
+def _append_paged_list_summary_lines(
+    lines: list[str],
+    *,
+    total_label: str,
+    total_count: int,
+    start_index: int,
+    visible_count: int,
+    page: int,
+    page_count: int,
+) -> None:
+    lines.append(f"{total_label}: {total_count}")
+    if visible_count > 0 and page_count > 1:
+        end_index = start_index + visible_count - 1
+        lines.append(f"Showing: {start_index}-{end_index} of {total_count}")
+    if page_count > 1:
+        lines.append(f"Page: {page + 1}/{page_count}")
+
+
+def _append_action_guide_lines(
+    lines: list[str],
+    *,
+    entries: tuple[tuple[str, str], ...],
+) -> None:
+    if not entries:
+        return
+    lines.append("")
+    lines.append("Action guide:")
+    for label, summary in entries:
+        lines.append(f"- {label} {summary}")
+
+
+def _workspace_collection_action_guide_entries(
+    *,
+    ask_label: str,
+    subject_summary: str,
+    bundle_chat_label: str,
+    add_label: str,
+    has_last_request: bool,
+) -> tuple[tuple[str, str], ...]:
+    entries = [
+        (ask_label, f"starts a fresh turn using {subject_summary}."),
+    ]
+    if has_last_request:
+        entries.append(
+            ("Ask With Last Request", f"reuses the saved request text with {subject_summary}.")
+        )
+    entries.extend(
+        [
+            (
+                bundle_chat_label,
+                f"keeps {subject_summary} attached to your next plain text messages.",
+            ),
+            (
+                add_label,
+                f"saves {subject_summary} to Context Bundle without sending anything yet.",
+            ),
+        ]
+    )
+    return tuple(entries)
+
+
+def _workspace_item_action_guide_entries(
+    *,
+    ask_label: str,
+    subject_summary: str,
+    secondary_label: str,
+    secondary_summary: str,
+    has_last_request: bool,
+    bundle_chat_label: str | None = None,
+    bundle_chat_summary: str | None = None,
+) -> tuple[tuple[str, str], ...]:
+    entries = [
+        (ask_label, f"starts a fresh turn about {subject_summary}."),
+    ]
+    if has_last_request:
+        entries.append(
+            ("Ask With Last Request", f"reuses the saved request text with {subject_summary}.")
+        )
+    if bundle_chat_label is not None and bundle_chat_summary is not None:
+        entries.append((bundle_chat_label, bundle_chat_summary))
+    entries.append((secondary_label, secondary_summary))
+    return tuple(entries)
+
+
 def _no_model_mode_controls_text() -> str:
     return (
         "This agent does not expose model or mode controls in the current session. "
@@ -7176,6 +7380,15 @@ async def _show_workspace_change_preview_from_callback(
             "relative_path": diff_preview.relative_path,
             "status_code": diff_preview.status_code,
         },
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About Change",
+            subject_summary="this change",
+            secondary_label="Add Change to Context",
+            secondary_summary="saves this change to Context Bundle without sending anything yet.",
+            has_last_request=last_request_text is not None,
+            bundle_chat_label="Start Bundle Chat With Change",
+            bundle_chat_summary="keeps this change attached to your next plain text messages.",
+        ),
         supplemental_buttons=(
             (
                 "Start Bundle Chat With Change",
@@ -7242,6 +7455,13 @@ async def _show_tool_activity_file_preview_from_callback(
         secondary_button_label="Add File to Context",
         secondary_button_action="workspace_file_add_context",
         secondary_button_payload={"relative_path": preview.relative_path},
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About File",
+            subject_summary="this file",
+            secondary_label="Add File to Context",
+            secondary_summary="saves this file to Context Bundle without sending anything yet.",
+            has_last_request=last_request_text is not None,
+        ),
         supplemental_buttons=(),
     )
     await _edit_query_message(query, text, reply_markup=markup)
@@ -7302,6 +7522,13 @@ async def _show_tool_activity_change_preview_from_callback(
             "relative_path": diff_preview.relative_path,
             "status_code": diff_preview.status_code,
         },
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About Change",
+            subject_summary="this change",
+            secondary_label="Add Change to Context",
+            secondary_summary="saves this change to Context Bundle without sending anything yet.",
+            has_last_request=last_request_text is not None,
+        ),
         supplemental_buttons=(),
     )
     await _edit_query_message(query, text, reply_markup=markup)
@@ -7366,6 +7593,13 @@ async def _show_context_bundle_file_preview_from_callback(
             "back_target": back_target,
             **source_payload,
         },
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About File",
+            subject_summary="this file",
+            secondary_label="Remove From Context",
+            secondary_summary="drops this file from the saved bundle without sending anything.",
+            has_last_request=last_request_text is not None,
+        ),
         supplemental_buttons=source_buttons,
     )
     await _edit_query_message(query, text, reply_markup=markup)
@@ -7438,6 +7672,13 @@ async def _show_context_bundle_change_preview_from_callback(
             "back_target": back_target,
             **source_payload,
         },
+        action_guide_entries=_workspace_item_action_guide_entries(
+            ask_label="Ask Agent About Change",
+            subject_summary="this change",
+            secondary_label="Remove From Context",
+            secondary_summary="drops this change from the saved bundle without sending anything.",
+            has_last_request=last_request_text is not None,
+        ),
         supplemental_buttons=source_buttons,
     )
     await _edit_query_message(query, text, reply_markup=markup)
@@ -7760,7 +8001,17 @@ async def _start_new_session(update: Update, services, ui_state: TelegramUiState
         user_id,
         _prefixed_notice_text(
             pending_upload_notice,
-            _new_session_success_text(session.session_id),
+            _new_session_success_text(
+                session.session_id,
+                extra_lines=(
+                    _session_ready_extra_lines(
+                        ui_state=ui_state,
+                        user_id=user_id,
+                        provider=state.provider,
+                        workspace_id=state.workspace_id,
+                    )
+                ),
+            ),
         ),
     )
 
@@ -7816,7 +8067,17 @@ async def _start_new_session_from_callback(
 
     success_text = _prefixed_notice_text(
         pending_upload_notice,
-        _new_session_success_text(session.session_id),
+        _new_session_success_text(
+            session.session_id,
+            extra_lines=(
+                _session_ready_extra_lines(
+                    ui_state=ui_state,
+                    user_id=user_id,
+                    provider=state.provider,
+                    workspace_id=state.workspace_id,
+                )
+            ),
+        ),
     )
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -7875,7 +8136,17 @@ async def _restart_agent(update: Update, services, ui_state: TelegramUiState, *,
         user_id,
         _prefixed_notice_text(
             pending_upload_notice,
-            _restart_agent_success_text(session.session_id),
+            _restart_agent_success_text(
+                session.session_id,
+                extra_lines=(
+                    _session_ready_extra_lines(
+                        ui_state=ui_state,
+                        user_id=user_id,
+                        provider=state.provider,
+                        workspace_id=state.workspace_id,
+                    )
+                ),
+            ),
         ),
     )
 
@@ -7931,7 +8202,17 @@ async def _restart_agent_from_callback(
 
     success_text = _prefixed_notice_text(
         pending_upload_notice,
-        _restart_agent_success_text(session.session_id),
+        _restart_agent_success_text(
+            session.session_id,
+            extra_lines=(
+                _session_ready_extra_lines(
+                    ui_state=ui_state,
+                    user_id=user_id,
+                    provider=state.provider,
+                    workspace_id=state.workspace_id,
+                )
+            ),
+        ),
     )
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -7995,7 +8276,8 @@ async def _fork_live_session_from_callback(
 
     success_text = _prefixed_notice_text(
         pending_upload_notice,
-        f"Forked session: {session.session_id}\n{_session_ready_notice_text()}",
+        f"Forked session: {session.session_id}\n"
+        f"{_session_ready_notice_for_runtime(ui_state=ui_state, user_id=user_id, state=state)}",
     )
     if back_target == "status":
         await _show_runtime_status_from_callback(
@@ -8317,6 +8599,7 @@ def _build_switch_agent_view(
     back_target: str = "none",
     notice: str | None = None,
 ):
+    provider_profiles = tuple(iter_provider_profiles())
     lines = []
     if notice:
         lines.append(notice)
@@ -8331,9 +8614,17 @@ def _build_switch_agent_view(
             replay_turn=replay_turn,
         )
     )
+    lines.append(f"Available agents: {len(provider_profiles)}")
+    if replay_turn is not None:
+        lines.append(
+            "Choose a provider below. Retry on ... replays the last turn in this workspace; "
+            "Fork on ... starts a new session there first."
+        )
+    else:
+        lines.append("Choose a provider below to switch the shared runtime now.")
     lines.append("Provider capabilities:")
     buttons = []
-    for profile in iter_provider_profiles():
+    for profile in provider_profiles:
         lines.append(
             _format_provider_capability_summary(
                 profile,
@@ -8483,8 +8774,11 @@ def _build_switch_workspace_view(
             ui_state=ui_state,
         )
     )
+    workspaces = tuple(services.config.agent.workspaces)
+    lines.append(f"Configured workspaces: {len(workspaces)}")
+    lines.append("Choose a workspace below to switch the shared runtime there.")
     buttons = []
-    for workspace in services.config.agent.workspaces:
+    for workspace in workspaces:
         if workspace.id == state.workspace_id:
             buttons.append(
                 [
@@ -9465,7 +9759,7 @@ async def _switch_history_session_from_callback(
             f"Switched to session {session.session_id} on "
             f"{resolve_provider_profile(state.provider).display_name} in "
             f"{_workspace_label(services, state.workspace_id)}. "
-            f"{_session_ready_notice_text()}"
+            f"{_session_ready_notice_for_runtime(ui_state=ui_state, user_id=user_id, state=state)}"
         ),
     )
     if replay_after_switch:
@@ -9670,7 +9964,7 @@ async def _fork_history_session_from_callback(
         f"Forked session {session.session_id} from {session_id} on "
         f"{resolve_provider_profile(state.provider).display_name} in "
         f"{_workspace_label(services, state.workspace_id)}. "
-        f"{_session_ready_notice_text()}"
+        f"{_session_ready_notice_for_runtime(ui_state=ui_state, user_id=user_id, state=state)}"
     )
     if replay_after_fork:
         await _edit_query_message(
@@ -9821,7 +10115,7 @@ async def _switch_provider_session_from_callback(
     back_target = str(payload.get("back_target", "history"))
     history_back_target = str(payload.get("history_back_target", "none"))
     try:
-        _, session = await asyncio.wait_for(
+        state, session = await asyncio.wait_for(
             _with_active_store(
                 services,
                 lambda store: store.activate_provider_session(
@@ -9870,7 +10164,7 @@ async def _switch_provider_session_from_callback(
         pending_upload_notice,
         (
             f"Switched to provider session {payload['session_id']}. "
-            f"{_session_ready_notice_text()}"
+            f"{_session_ready_notice_for_runtime(ui_state=ui_state, user_id=user_id, state=state)}"
         ),
     )
     if replay_after_switch:
@@ -10094,7 +10388,7 @@ async def _fork_provider_session_from_callback(
         pending_upload_notice,
         (
             f"Forked provider session {payload['session_id']} into {session.session_id}. "
-            f"{_session_ready_notice_text()}"
+            f"{_session_ready_notice_for_runtime(ui_state=ui_state, user_id=user_id, state=state)}"
         ),
     )
     if replay_after_fork:
@@ -14249,6 +14543,12 @@ def _build_runtime_status_view(
     bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
     bundle_count = 0 if bundle is None else len(bundle.items)
     bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    workspace_reuse_summary = _workspace_reuse_summary_line(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
     workspace_changes_available = _status_workspace_changes_available(git_status)
     current_time = ui_state.current_time()
 
@@ -14431,6 +14731,8 @@ def _build_runtime_status_view(
     lines.append(
         "Main keyboard: keep high-frequency actions ready without filling the whole chat."
     )
+    if workspace_reuse_summary is not None:
+        lines.append(workspace_reuse_summary)
     if is_admin:
         lines.append("Admin switches stay on the main keyboard.")
 
@@ -14928,6 +15230,15 @@ def _build_history_view(
     start = page * HISTORY_PAGE_SIZE
     visible_entries = entries[start : start + HISTORY_PAGE_SIZE]
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Local sessions",
+        total_count=len(entries),
+        start_index=start + 1,
+        visible_count=len(visible_entries),
+        page=page,
+        page_count=page_count,
+    )
     lines.extend(
         _session_action_guide_lines(
             run_summary="keeps working in that saved session",
@@ -15287,6 +15598,9 @@ def _build_provider_sessions_view(
                 ]
             )
     else:
+        lines.append(f"Loaded sessions on this page: {len(entries)}")
+        if previous_cursors or next_cursor is not None:
+            lines.append(f"Cursor page: {len(previous_cursors) + 1}")
         lines.extend(
             _session_action_guide_lines(
                 run_summary="attaches this bot to that provider session and keeps working there",
@@ -15984,12 +16298,11 @@ def _build_last_turn_view(
     )
 
     prompt_items = _replay_prompt_items(replay_turn)
-    lines.append(f"Prompt items: {len(prompt_items)}")
     saved_context_items = tuple(getattr(replay_turn, "saved_context_items", ()) or ())
-    lines.append(f"Saved context items: {len(saved_context_items)}")
-    lines.extend(_last_turn_context_preview_lines(saved_context_items))
-
     if not prompt_items:
+        lines.append("Prompt items: 0")
+        lines.append(f"Saved context items: {len(saved_context_items)}")
+        lines.extend(_last_turn_context_preview_lines(saved_context_items))
         lines.append("No replay payload items are available.")
         buttons.append(
             [
@@ -16021,9 +16334,17 @@ def _build_last_turn_view(
     page = min(max(page, 0), page_count - 1)
     start = page * LAST_TURN_PAGE_SIZE
     visible_items = prompt_items[start : start + LAST_TURN_PAGE_SIZE]
-
-    if page_count > 1:
-        lines.append(f"Page: {page + 1}/{page_count}")
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Prompt items",
+        total_count=len(prompt_items),
+        start_index=start + 1,
+        visible_count=len(visible_items),
+        page=page,
+        page_count=page_count,
+    )
+    lines.append(f"Saved context items: {len(saved_context_items)}")
+    lines.extend(_last_turn_context_preview_lines(saved_context_items))
 
     for offset, item in enumerate(visible_items, start=1):
         index = start + offset
@@ -16234,10 +16555,15 @@ def _build_plan_view(
     page = min(max(page, 0), page_count - 1)
     start = page * PLAN_PAGE_SIZE
     visible_entries = entries[start : start + PLAN_PAGE_SIZE]
-
-    lines.append(f"Plan items: {len(entries)}")
-    if page_count > 1:
-        lines.append(f"Page: {page + 1}/{page_count}")
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Plan items",
+        total_count=len(entries),
+        start_index=start + 1,
+        visible_count=len(visible_entries),
+        page=page,
+        page_count=page_count,
+    )
 
     for offset, entry in enumerate(visible_entries, start=1):
         index = start + offset
@@ -16393,10 +16719,15 @@ def _build_tool_activity_view(
     page = min(max(page, 0), page_count - 1)
     start = page * TOOL_ACTIVITY_PAGE_SIZE
     visible_activities = activities[start : start + TOOL_ACTIVITY_PAGE_SIZE]
-
-    lines.append(f"Recent tools: {len(activities)}")
-    if page_count > 1:
-        lines.append(f"Page: {page + 1}/{page_count}")
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Recent tools",
+        total_count=len(activities),
+        start_index=start + 1,
+        visible_count=len(visible_activities),
+        page=page,
+        page_count=page_count,
+    )
 
     for offset, activity in enumerate(visible_activities, start=1):
         index = start + offset
@@ -16796,6 +17127,15 @@ def _build_agent_commands_view(
     page = min(max(page, 0), page_count - 1)
     start = page * COMMAND_PAGE_SIZE
     visible_commands = commands[start : start + COMMAND_PAGE_SIZE]
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Commands",
+        total_count=len(commands),
+        start_index=start + 1,
+        visible_count=len(visible_commands),
+        page=page,
+        page_count=page_count,
+    )
 
     for offset, command in enumerate(visible_commands, start=1):
         index = start + offset
@@ -17248,6 +17588,15 @@ def _build_workspace_listing_view(
         return "\n".join(lines), markup
 
     page, page_count, visible_entries = _visible_workspace_entries(listing, page)
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Entries",
+        total_count=len(listing.entries),
+        start_index=page * WORKSPACE_PAGE_SIZE + 1,
+        visible_count=len(visible_entries),
+        page=page,
+        page_count=page_count,
+    )
 
     buttons = []
     bundle_source_payload = _callback_source_restore_payload(
@@ -17275,6 +17624,17 @@ def _build_workspace_listing_view(
                 )
             ]
         )
+
+    _append_action_guide_lines(
+        lines,
+        entries=_workspace_collection_action_guide_entries(
+            ask_label="Ask Agent With Visible Files",
+            subject_summary="the files shown on this page",
+            bundle_chat_label="Start Bundle Chat With Visible Files",
+            add_label="Add Visible Files to Context",
+            has_last_request=last_request_text is not None,
+        ),
+    )
 
     nav = []
     if listing.relative_path:
@@ -17451,6 +17811,15 @@ def _build_workspace_search_results_view(
     page = min(max(page, 0), page_count - 1)
     start = page * WORKSPACE_SEARCH_PAGE_SIZE
     visible_matches = search_results.matches[start : start + WORKSPACE_SEARCH_PAGE_SIZE]
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Matches",
+        total_count=len(search_results.matches),
+        start_index=start + 1,
+        visible_count=len(visible_matches),
+        page=page,
+        page_count=page_count,
+    )
 
     buttons = []
     bundle_source_payload = _callback_source_restore_payload(
@@ -17483,6 +17852,17 @@ def _build_workspace_search_results_view(
 
     if search_results.truncated:
         lines.append("[results truncated]")
+
+    _append_action_guide_lines(
+        lines,
+        entries=_workspace_collection_action_guide_entries(
+            ask_label="Ask Agent With Matching Files",
+            subject_summary="the matching files shown on this page",
+            bundle_chat_label="Start Bundle Chat With Matching Files",
+            add_label="Add Matching Files to Context",
+            has_last_request=last_request_text is not None,
+        ),
+    )
 
     if page_count > 1:
         nav = []
@@ -17677,6 +18057,15 @@ def _build_workspace_changes_view(
     page = min(max(page, 0), page_count - 1)
     start = page * WORKSPACE_CHANGES_PAGE_SIZE
     visible_entries = git_status.entries[start : start + WORKSPACE_CHANGES_PAGE_SIZE]
+    _append_paged_list_summary_lines(
+        lines,
+        total_label="Changes",
+        total_count=len(git_status.entries),
+        start_index=start + 1,
+        visible_count=len(visible_entries),
+        page=page,
+        page_count=page_count,
+    )
 
     buttons = []
     bundle_source_payload = _callback_source_restore_payload(
@@ -17704,6 +18093,17 @@ def _build_workspace_changes_view(
                 )
             ]
         )
+
+    _append_action_guide_lines(
+        lines,
+        entries=_workspace_collection_action_guide_entries(
+            ask_label="Ask Agent With Current Changes",
+            subject_summary="the changes shown on this page",
+            bundle_chat_label="Start Bundle Chat With Changes",
+            add_label="Add All Changes to Context",
+            has_last_request=last_request_text is not None,
+        ),
+    )
 
     if page_count > 1:
         nav = []
@@ -17892,6 +18292,9 @@ def _build_context_bundle_view(
     page = min(max(page, 0), page_count - 1)
     start = page * CONTEXT_BUNDLE_PAGE_SIZE
     visible_items = bundle.items[start : start + CONTEXT_BUNDLE_PAGE_SIZE]
+    if page_count > 1:
+        lines.append(f"Showing: {start + 1}-{start + len(visible_items)} of {len(bundle.items)}")
+        lines.append(f"Page: {page + 1}/{page_count}")
 
     buttons = []
     for offset, item in enumerate(visible_items, start=1):
@@ -18044,6 +18447,7 @@ def _build_workspace_file_preview_view(
     secondary_button_label: str,
     secondary_button_action: str,
     secondary_button_payload: dict[str, Any],
+    action_guide_entries: tuple[tuple[str, str], ...] = (),
     supplemental_buttons: tuple[tuple[str, str, dict[str, Any]], ...] = (),
 ):
     lines = [
@@ -18056,6 +18460,8 @@ def _build_workspace_file_preview_view(
         lines.append(preview.text)
         if preview.truncated:
             lines.append("[preview truncated]")
+
+    _append_action_guide_lines(lines, entries=action_guide_entries)
 
     buttons = [
         [
@@ -18131,6 +18537,7 @@ def _build_workspace_change_preview_view(
     secondary_button_label: str,
     secondary_button_action: str,
     secondary_button_payload: dict[str, Any],
+    action_guide_entries: tuple[tuple[str, str], ...] = (),
     supplemental_buttons: tuple[tuple[str, str, dict[str, Any]], ...] = (),
 ):
     lines = [
@@ -18141,6 +18548,8 @@ def _build_workspace_change_preview_view(
     ]
     if diff_preview.truncated:
         lines.append("[diff preview truncated]")
+
+    _append_action_guide_lines(lines, entries=action_guide_entries)
 
     buttons = [
         [
