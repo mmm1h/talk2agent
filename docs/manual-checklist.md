@@ -25,7 +25,9 @@
 8. 发送一个伪造或跨用户的 callback，确认 bot 会给出“重新打开最近视图”或“从自己的聊天里重新打开菜单 / 使用 `/start`”之类的纠正提示，而不是只显示模糊的系统短语。
 9. 点击 `Bot Status`，确认它是只读入口，不会隐式创建新 session。
    同时确认顶部会前置当前状态下的主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`。
+   再确认正文被分成 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 这类可扫读分段，而不是一整块无层次长文本。
    如果当前 workspace 已缓存 `Last Request`，再确认状态页会显示它的来源摘要，并提供 `Run Last Request`；这个入口应只重跑请求文本，而不是隐式恢复旧附件或旧上下文。
+   如果该 `Last Request` 或 `Last Turn` 最初记录在另一个 Provider 上，再确认状态页会明确提示这次重放将落到当前 Provider，而不是让用户自己猜。
 10. 执行 `Switch Agent`，确认切换前有预检，切换菜单会明确提示旧按钮 / 待输入会被清理、`Context Bundle` 不会跟随切换，而同 workspace 下的 `Last Turn` / `Last Request` 仍可继续复用；切换后旧 UI 动作立即失效。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 agent。
@@ -81,6 +83,7 @@
 6. 从 `Bot Status` 进入 `Session Info`、`Workspace Runtime`、`Usage`、`Last Request`、`Last Turn`、`Agent Plan`、`Tool Activity`，确认这些只读检查视图都能打开并返回。
    再从 `Last Request` 详情点击一次 `Run Last Request`，确认 bot 会执行该文本并回到状态页，而不是把用户困在只读详情页里。
    如果当前 workspace 还有上一轮可复用 turn，再确认 `Last Request` 详情会同时提供 `Retry Last Turn` / `Fork Last Turn`，把“重跑文本”和“恢复整轮上下文”区分清楚。
+   如果 `Last Request` 或 `Last Turn` 记录自另一个 Provider，再确认详情页会直接写明“Recorded provider` 与 `Current provider` 的差异，以及当前重放到底会发往哪里”，避免跨 runtime 误会。
 
 ## 附件与长回合
 

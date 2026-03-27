@@ -2486,6 +2486,11 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert text.startswith("Bot status for Codex in Default Workspace")
     assert "Workspace ID: default" in text
     assert "Path: F:/workspace" in text
+    assert "Current runtime:" in text
+    assert "Recoverable memory:" in text
+    assert "Workspace context:" in text
+    assert "Agent capabilities:" in text
+    assert "Controls:" in text
     assert "Session: none (will start on first request)" in text
     assert (
         "Primary controls right now: send the expected text next, or use Cancel Pending Input "
@@ -2526,6 +2531,48 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert find_inline_button(markup, "Agent Commands")
     assert find_inline_button(markup, "Workspace Search")
     assert find_inline_button(markup, "Workspace Runtime")
+
+
+def test_bot_status_surfaces_cross_provider_replay_notes_for_cached_request_and_turn():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ReplayTurn,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(
+        123,
+        "default",
+        "Review the diff",
+        provider="claude",
+    )
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the diff"),),
+            title_hint="Review the diff",
+        ),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, _ = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert (
+        "Last request replay note: This request was recorded on Claude Code, but Run Last "
+        "Request will send it to Codex in the current workspace now."
+    ) in text
+    assert (
+        "Last turn replay note: This payload was recorded on Claude Code, but Retry Last Turn / "
+        "Fork Last Turn will replay it on Codex in the current workspace now. If attachment "
+        "support differs, the bot adapts the saved payload first."
+    ) in text
 
 
 def test_bot_status_shows_workspace_git_preview_for_dirty_repo(monkeypatch):
@@ -3556,9 +3603,16 @@ def test_bot_status_can_open_last_request_and_back_to_status():
 
     request_text, request_markup = callback_message.edit_calls[-1]
     assert request_text.startswith("Last request for Codex in Default Workspace")
+    assert "Replay summary:" in request_text
+    assert "Current provider: Codex" in request_text
     assert "Recorded provider: Claude Code" in request_text
     assert "Recorded workspace: default" in request_text
     assert "Source: selected context request (current workspace changes, 1 item)" in request_text
+    assert (
+        "Replay note: This request was recorded on Claude Code, but Run Last Request will send "
+        "it to Codex in the current workspace now."
+        in request_text
+    )
     assert (
         "Run Last Request sends only this text again in the current provider and workspace. "
         "It does not restore the original attachments or extra context."
@@ -3661,6 +3715,11 @@ def test_bot_status_last_request_view_offers_last_turn_replay_recovery():
 
     request_text, request_markup = callback_message.edit_calls[-1]
     assert (
+        "Replay note: This request was recorded on Claude Code, but Run Last Request will send "
+        "it to Codex in the current workspace now."
+        in request_text
+    )
+    assert (
         "Use Retry Last Turn or Fork Last Turn if you need the original attachments or extra "
         "context back."
         in request_text
@@ -3746,8 +3805,16 @@ def test_bot_status_can_open_last_turn_and_back_to_status():
 
     last_turn_text, last_turn_markup = callback_message.edit_calls[-1]
     assert last_turn_text.startswith("Last turn for Codex in Default Workspace")
+    assert "Replay summary:" in last_turn_text
+    assert "Current provider: Codex" in last_turn_text
     assert "Recorded provider: Claude Code" in last_turn_text
     assert "Recorded workspace: default" in last_turn_text
+    assert (
+        "Replay note: This payload was recorded on Claude Code, but Retry Last Turn / Fork Last "
+        "Turn will replay it on Codex in the current workspace now. If attachment support "
+        "differs, the bot adapts the saved payload first."
+        in last_turn_text
+    )
     assert "Prompt items: 3" in last_turn_text
     assert "Saved context items: 2" in last_turn_text
     assert "Saved context preview:" in last_turn_text
@@ -3815,6 +3882,7 @@ def test_last_turn_item_detail_can_open_and_back():
     detail_text, detail_markup = callback_message.edit_calls[-1]
     assert detail_text.startswith("Last turn for Codex in Default Workspace")
     assert "Item: 2/3" in detail_text
+    assert "Current provider: Codex" in detail_text
     assert "Kind: text resource" in detail_text
     assert "URI: telegram://document/doc-1/notes.md" in detail_text
     assert "MIME type: text/markdown" in detail_text

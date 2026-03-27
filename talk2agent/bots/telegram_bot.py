@@ -3089,6 +3089,55 @@ def _replay_provider_display_name(provider: str) -> str:
         return provider
 
 
+def _last_request_recorded_provider(
+    last_request: _LastRequestText,
+    *,
+    current_provider: str,
+) -> str:
+    return last_request.provider or current_provider
+
+
+def _last_request_replay_note(
+    *,
+    last_request: _LastRequestText,
+    current_provider: str,
+) -> str:
+    recorded_provider = _last_request_recorded_provider(
+        last_request,
+        current_provider=current_provider,
+    )
+    current_display = _replay_provider_display_name(current_provider)
+    recorded_display = _replay_provider_display_name(recorded_provider)
+    if recorded_provider == current_provider:
+        return (
+            f"Run Last Request will send this text again to {current_display} in the current "
+            "workspace."
+        )
+    return (
+        f"This request was recorded on {recorded_display}, but Run Last Request will send it to "
+        f"{current_display} in the current workspace now."
+    )
+
+
+def _last_turn_replay_note(
+    *,
+    replay_turn: _ReplayTurn,
+    current_provider: str,
+) -> str:
+    current_display = _replay_provider_display_name(current_provider)
+    recorded_display = _replay_provider_display_name(replay_turn.provider)
+    if replay_turn.provider == current_provider:
+        return (
+            f"Retry Last Turn / Fork Last Turn will replay this saved payload on "
+            f"{current_display} in the current workspace."
+        )
+    return (
+        f"This payload was recorded on {recorded_display}, but Retry Last Turn / Fork Last Turn "
+        f"will replay it on {current_display} in the current workspace now. If attachment "
+        "support differs, the bot adapts the saved payload first."
+    )
+
+
 def _last_turn_item_kind_label(item: Any) -> str:
     if isinstance(item, PromptText):
         return "text"
@@ -14006,13 +14055,14 @@ def _build_runtime_status_view(
     )
     lines.append("")
 
+    runtime_lines: list[str] = []
     if session is None:
-        lines.append("Session: none (will start on first request)")
+        runtime_lines.append("Session: none (will start on first request)")
     else:
-        lines.append(f"Session: {session.session_id or 'pending'}")
+        runtime_lines.append(f"Session: {session.session_id or 'pending'}")
         if session_title is not None:
-            lines.append(f"Session title: {session_title}")
-    lines.extend(_status_active_turn_lines(active_turn))
+            runtime_lines.append(f"Session title: {session_title}")
+    runtime_lines.extend(_status_active_turn_lines(active_turn))
 
     get_selection = None if session is None else getattr(session, "get_selection", None)
     if callable(get_selection):
@@ -14025,67 +14075,91 @@ def _build_runtime_status_view(
         except Exception:
             mode_selection = None
         if model_selection is not None:
-            lines.append(f"Model: {_current_choice_label(model_selection)}")
+            runtime_lines.append(f"Model: {_current_choice_label(model_selection)}")
         if mode_selection is not None:
-            lines.append(f"Mode: {_current_choice_label(mode_selection)}")
+            runtime_lines.append(f"Mode: {_current_choice_label(mode_selection)}")
     usage_summary = _status_usage_summary(session)
     if usage_summary is not None:
-        lines.append(f"Usage: {usage_summary}")
-    lines.extend(_status_plan_preview_lines(session))
+        runtime_lines.append(f"Usage: {usage_summary}")
+    runtime_lines.extend(_status_plan_preview_lines(session))
     plan_count = len(_plan_items(session))
-    lines.extend(_status_tool_activity_preview_lines(session))
+    runtime_lines.extend(_status_tool_activity_preview_lines(session))
     tool_activity_count = len(_tool_activity_items(session))
 
-    lines.append(f"Pending input: {_pending_text_action_label(pending_text_action)}")
+    memory_lines = [f"Pending input: {_pending_text_action_label(pending_text_action)}"]
     if pending_media_group_stats is not None:
-        lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
-    lines.append(f"Local sessions: {history_count}")
+        memory_lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
+    memory_lines.append(f"Local sessions: {history_count}")
     recent_history_entries, recent_history_total = _status_recent_history_entries(
         history_entries,
         current_session_id=None if session is None else session.session_id,
     )
-    lines.extend(
+    memory_lines.extend(
         _status_recent_session_preview_lines(
             recent_history_entries,
             total_count=recent_history_total,
         )
     )
-    lines.append(f"Workspace changes: {_status_workspace_changes_summary(git_status)}")
-    lines.extend(_status_workspace_change_preview_lines(git_status))
     if last_turn is None:
-        lines.append("Last turn replay: none")
+        memory_lines.append("Last turn replay: none")
     else:
         replay_snippet = _status_text_snippet(last_turn.title_hint) or "untitled turn"
-        lines.append(f"Last turn replay: available ({replay_snippet})")
+        memory_lines.append(f"Last turn replay: available ({replay_snippet})")
+        if last_turn.provider != provider:
+            memory_lines.append(
+                "Last turn replay note: "
+                + _last_turn_replay_note(
+                    replay_turn=last_turn,
+                    current_provider=provider,
+                )
+            )
     if last_request_text is None:
-        lines.append("Last request text: none")
+        memory_lines.append("Last request text: none")
     else:
-        lines.append(
+        memory_lines.append(
             f"Last request text: {_status_text_snippet(last_request_text) or '[empty]'}"
         )
-        lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
+        memory_lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
+        if last_request is not None:
+            recorded_request_provider = _last_request_recorded_provider(
+                last_request,
+                current_provider=provider,
+            )
+            if recorded_request_provider != provider:
+                memory_lines.append(
+                    "Last request replay note: "
+                    + _last_request_replay_note(
+                        last_request=last_request,
+                        current_provider=provider,
+                    )
+                )
 
-    lines.append(f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}")
-    lines.append(f"Bundle chat: {'on' if bundle_chat_active else 'off'}")
-    lines.extend(_status_context_bundle_preview_lines(bundle))
+    workspace_lines = [
+        f"Workspace changes: {_status_workspace_changes_summary(git_status)}",
+        *_status_workspace_change_preview_lines(git_status),
+        f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}",
+        f"Bundle chat: {'on' if bundle_chat_active else 'off'}",
+        *_status_context_bundle_preview_lines(bundle),
+    ]
 
+    capability_lines: list[str] = []
     if session is None:
-        lines.append("Agent commands cached: unknown until a live session starts.")
+        capability_lines.append("Agent commands cached: unknown until a live session starts.")
     elif session.session_id is None:
-        lines.append("Agent commands cached: waiting for session start.")
+        capability_lines.append("Agent commands cached: waiting for session start.")
     else:
         cached_commands = tuple(getattr(session, "available_commands", ()) or ())
-        lines.append(f"Agent commands cached: {len(cached_commands)}")
-        lines.extend(_status_agent_command_preview_lines(cached_commands))
+        capability_lines.append(f"Agent commands cached: {len(cached_commands)}")
+        capability_lines.extend(_status_agent_command_preview_lines(cached_commands))
         capabilities = getattr(session, "capabilities", None)
         if capabilities is not None:
-            lines.append(
+            capability_lines.append(
                 "Prompt input: "
                 f"img={'yes' if getattr(capabilities, 'supports_image_prompt', False) else 'no'},"
                 f"audio={'yes' if getattr(capabilities, 'supports_audio_prompt', False) else 'no'},"
                 f"docs={'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}"
             )
-            lines.append(
+            capability_lines.append(
                 "Session control: "
                 f"fork={'yes' if getattr(capabilities, 'can_fork', False) else 'no'},"
                 f"list={'yes' if getattr(capabilities, 'can_list', False) else 'no'},"
@@ -14093,6 +14167,19 @@ def _build_runtime_status_view(
             )
 
     lines.append("")
+    lines.append("Current runtime:")
+    lines.extend(runtime_lines)
+    lines.append("")
+    lines.append("Recoverable memory:")
+    lines.extend(memory_lines)
+    lines.append("")
+    lines.append("Workspace context:")
+    lines.extend(workspace_lines)
+    lines.append("")
+    lines.append("Agent capabilities:")
+    lines.extend(capability_lines)
+    lines.append("")
+    lines.append("Controls:")
     lines.append(
         "Control center: use the buttons below for session recovery, history, files, changes, "
         "model / mode, agent commands, and workspace actions."
@@ -15369,9 +15456,18 @@ def _build_last_request_view(
         return "\n".join(lines), markup
 
     recorded_provider = last_request.provider or current_provider
+    lines.append("Replay summary:")
+    lines.append(f"Current provider: {_replay_provider_display_name(current_provider)}")
     lines.append(f"Recorded provider: {_replay_provider_display_name(recorded_provider)}")
     lines.append(f"Recorded workspace: {last_request.workspace_id}")
     lines.append(f"Source: {_last_request_source_summary(last_request)}")
+    lines.append(
+        "Replay note: "
+        + _last_request_replay_note(
+            last_request=last_request,
+            current_provider=current_provider,
+        )
+    )
     lines.append(
         "Run Last Request sends only this text again in the current provider and workspace. "
         "It does not restore the original attachments or extra context."
@@ -15385,6 +15481,7 @@ def _build_last_request_view(
         f"Text length: {len(last_request.text)} character{'s' if len(last_request.text) != 1 else ''}"
     )
     content, truncated = _last_turn_render_text_detail(last_request.text)
+    lines.append("")
     lines.append("Request text:")
     lines.append(content or "[empty]")
     if truncated:
@@ -15602,8 +15699,17 @@ def _build_last_turn_view(
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
+    lines.append("Replay summary:")
+    lines.append(f"Current provider: {_replay_provider_display_name(current_provider)}")
     lines.append(f"Recorded provider: {_replay_provider_display_name(replay_turn.provider)}")
     lines.append(f"Recorded workspace: {replay_turn.workspace_id}")
+    lines.append(
+        "Replay note: "
+        + _last_turn_replay_note(
+            replay_turn=replay_turn,
+            current_provider=current_provider,
+        )
+    )
     lines.append(f"Title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
 
     prompt_items = _replay_prompt_items(replay_turn)
@@ -15743,8 +15849,16 @@ def _build_last_turn_item_view(
         f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
     )
     lines.append(f"Item: {item_index + 1}/{total_count}")
+    lines.append(f"Current provider: {_replay_provider_display_name(current_provider)}")
     lines.append(f"Recorded provider: {_replay_provider_display_name(replay_turn.provider)}")
     lines.append(f"Recorded workspace: {replay_turn.workspace_id}")
+    lines.append(
+        "Replay note: "
+        + _last_turn_replay_note(
+            replay_turn=replay_turn,
+            current_provider=current_provider,
+        )
+    )
     lines.append(f"Replay title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
     lines.append(f"Kind: {_last_turn_item_kind_label(item)}")
 

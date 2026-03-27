@@ -44,8 +44,10 @@
 - 无效或跨用户按钮：版本漂移、失效 payload，或点到别人的按钮时，bot 会返回恢复或纠正建议，而不是只显示生硬的系统短语。
 - `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
 - `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`，减少手机端来回扫按钮。
+- `Bot Status` 的正文会按 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 分段，避免长消息退化成一整屏无层次的状态 dump。
 - `Last Request` 不再只是只读缓存：`Bot Status` 会额外显示它来自 plain text / bundle / workspace request 等哪个来源，并提供 `Run Last Request`，用于只重跑请求文本本身；如果你需要原附件或原上下文，则继续使用 `Retry Last Turn`。
   在 `Last Request` 详情页里，如果当前 workspace 还有上一轮可复用 turn，页面也会直接给出 `Retry Last Turn` / `Fork Last Turn`，把“只重跑文本”和“恢复整轮上下文”明确分开。
+  如果这条缓存请求最初记录在另一个 Provider 上，状态页和详情页还会明确提示“当前会重放到哪个 Provider”，避免管理员切换共享 runtime 后用户误以为还是在旧 agent 上执行。
 - `Bot Status` 导航失败：如果某个只读视图临时打开失败，bot 会保留 `Try Again` 和相应的返回按钮，避免把用户丢出当前流程。
 - 关键失败态：包括通用请求失败、session 拉起/切换/分叉失败、Provider Session 接管失败，以及 Model / Mode 更新失败，都会优先返回可操作的恢复建议，而不是直接暴露内部错误短语。
   如果当前 workspace 已经没有可复用的 `Last Turn`，失败恢复面板不会继续保留 `Retry Last Turn` / `Fork Last Turn` 这类死入口，而会改成优先给出 `Run Last Request`、`New Session` 和 `Open Bot Status`。
@@ -61,6 +63,7 @@
   `Session History` 列表和详情都会先解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
   如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；而是补上 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，把下一步动作直接放在空状态里。
 - `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，bot 会明确提示先发送一条新请求；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
+  当上一轮最初记录在另一个 Provider 上时，状态页和 `Last Turn` 详情页也会明确提示“本次会在当前 Provider 上重放，必要时会先做附件能力适配”，减少跨 runtime 误解。
 - 回合完成快捷操作：当一次 turn 正常结束且没有更具体的 workspace change follow-up 时，最终结果消息本身会附上 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
   这些按钮会从结果继续发起下一步，而不会把刚收到的答案编辑掉。
 - `Provider Sessions`：管理员浏览并接管 Provider 原生保存的 session。
