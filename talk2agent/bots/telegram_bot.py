@@ -373,6 +373,9 @@ class TelegramUiState:
         self._prune()
         return self._pending_text_actions.pop(user_id, None)
 
+    def current_time(self) -> float:
+        return self._clock()
+
     def start_active_turn(
         self,
         user_id: int,
@@ -920,6 +923,82 @@ async def _reply_with_menu(message, services, user_id: int, text: str, *, reply_
     await message.reply_text(text, reply_markup=markup)
 
 
+def _inline_notice_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+    *rows: tuple[tuple[str, str, dict[str, Any]], ...],
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    label,
+                    action,
+                    **payload,
+                )
+                for label, action, payload in row
+            ]
+            for row in rows
+            if row
+        ]
+    )
+
+
+def _status_only_notice_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return _inline_notice_markup(
+        ui_state,
+        user_id,
+        (("Open Bot Status", "runtime_status_page", {}),),
+    )
+
+
+def _pending_input_notice_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return _inline_notice_markup(
+        ui_state,
+        user_id,
+        (
+            ("Cancel Pending Input", "runtime_status_cancel_pending", {}),
+            ("Open Bot Status", "runtime_status_page", {}),
+        ),
+    )
+
+
+def _pending_uploads_notice_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return _inline_notice_markup(
+        ui_state,
+        user_id,
+        (
+            ("Discard Pending Uploads", "runtime_status_discard_pending_uploads", {}),
+            ("Open Bot Status", "runtime_status_page", {}),
+        ),
+    )
+
+
+def _active_turn_notice_markup(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> InlineKeyboardMarkup:
+    return _inline_notice_markup(
+        ui_state,
+        user_id,
+        (
+            ("Stop Turn", "runtime_status_stop_turn", {}),
+            ("Open Bot Status", "runtime_status_page", {}),
+        ),
+    )
+
+
 def _unauthorized_text() -> str:
     return "Access denied. Ask the operator to allow your Telegram user ID."
 
@@ -1336,6 +1415,17 @@ def _pending_media_group_cancelled_text(stats: _PendingMediaGroupStats) -> str:
             "Nothing was sent to the agent."
         )
     return f"Discarded pending {_pending_media_group_summary(stats)}. Nothing was sent to the agent."
+
+
+def _format_elapsed_duration(seconds: float) -> str:
+    total_seconds = max(0, int(seconds))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {remaining_seconds}s"
+    hours, remaining_minutes = divmod(minutes, 60)
+    return f"{hours}h {remaining_minutes}m"
 
 
 def _discard_pending_uploads_for_transition(
@@ -2075,6 +2165,7 @@ async def handle_text(
             services,
             user_id,
             _pending_media_group_blocked_input_text(pending_media_group_stats),
+            reply_markup=_pending_uploads_notice_markup(ui_state, user_id),
         )
         return
 
@@ -2161,6 +2252,7 @@ async def handle_attachment(
             services,
             user_id,
             _waiting_for_plain_text_notice(pending_text_action),
+            reply_markup=_pending_input_notice_markup(ui_state, user_id),
         )
         return
 
@@ -2171,13 +2263,20 @@ async def handle_attachment(
             services,
             user_id,
             _pending_media_group_blocked_input_text(pending_media_group_stats),
+            reply_markup=_pending_uploads_notice_markup(ui_state, user_id),
         )
         return
 
     try:
         prompt = await _build_attachment_prompt(update.message)
     except AttachmentPromptError as exc:
-        await _reply_with_menu(update.message, services, user_id, str(exc))
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            str(exc),
+            reply_markup=_status_only_notice_markup(ui_state, user_id),
+        )
         return
     except Exception:
         await _reply_request_failed(update, services)
@@ -2215,6 +2314,7 @@ async def handle_unsupported_message(
             services,
             user_id,
             _waiting_for_plain_text_notice(pending_text_action),
+            reply_markup=_pending_input_notice_markup(ui_state, user_id),
         )
         return
 
@@ -2225,6 +2325,7 @@ async def handle_unsupported_message(
             services,
             user_id,
             _pending_media_group_blocked_input_text(pending_media_group_stats),
+            reply_markup=_pending_uploads_notice_markup(ui_state, user_id),
         )
         return
 
@@ -2235,6 +2336,7 @@ async def handle_unsupported_message(
             services,
             user_id,
             _turn_busy_notice(active_turn),
+            reply_markup=_active_turn_notice_markup(ui_state, user_id),
         )
         return
 
@@ -2255,6 +2357,7 @@ async def handle_unsupported_message(
         services,
         user_id,
         _unsupported_message_text(update.message, bundle_chat_active=bundle_chat_active),
+        reply_markup=_status_only_notice_markup(ui_state, user_id),
     )
 
 
@@ -2856,7 +2959,11 @@ def _turn_busy_notice(active_turn: _ActiveTurn | None) -> str:
     )
 
 
-def _status_active_turn_lines(active_turn: _ActiveTurn | None) -> list[str]:
+def _status_active_turn_lines(
+    active_turn: _ActiveTurn | None,
+    *,
+    now: float | None = None,
+) -> list[str]:
     if active_turn is None:
         return ["Turn: idle"]
 
@@ -2865,7 +2972,18 @@ def _status_active_turn_lines(active_turn: _ActiveTurn | None) -> list[str]:
     if session_id:
         details.append(session_id)
     status = "stop requested" if active_turn.stop_requested else "running"
-    return [f"Turn: {status} ({', '.join(details)})"]
+    lines = [f"Turn: {status} ({', '.join(details)})"]
+    if now is not None:
+        lines.append(f"Turn elapsed: {_format_elapsed_duration(now - active_turn.started_at)}")
+    return lines
+
+
+def _pending_text_action_hint_line(
+    pending_text_action: _PendingTextAction | None,
+) -> str | None:
+    if pending_text_action is None:
+        return None
+    return f"Next plain text: {_pending_text_action_waiting_hint(pending_text_action)}."
 
 
 def _status_item_count_summary(count: int) -> str | None:
@@ -4228,13 +4346,20 @@ async def _flush_media_group_after_delay(
             services,
             user_id,
             _waiting_for_plain_text_notice(pending_text_action),
+            reply_markup=_pending_input_notice_markup(ui_state, user_id),
         )
         return
 
     try:
         prompt = await _build_media_group_prompt(messages)
     except AttachmentPromptError as exc:
-        await _reply_with_menu(lead_message, services, user_id, str(exc))
+        await _reply_with_menu(
+            lead_message,
+            services,
+            user_id,
+            str(exc),
+            reply_markup=_status_only_notice_markup(ui_state, user_id),
+        )
         return
     except Exception:
         await _reply_with_menu(lead_message, services, user_id, _request_failed_text())
@@ -5193,6 +5318,7 @@ async def _run_agent_session_turn_on_message(
             services,
             user_id,
             _turn_busy_notice(active_turn),
+            reply_markup=_active_turn_notice_markup(ui_state, user_id),
         )
         return
 
@@ -5348,7 +5474,10 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
         await _invoke_turn_failure_callback(on_turn_failure)
         return
     except AttachmentPromptError as exc:
-        await stream.fail(str(exc))
+        await stream.fail(
+            str(exc),
+            reply_markup=_status_only_notice_markup(ui_state, user_id),
+        )
         await _invoke_turn_failure_callback(on_turn_failure)
         return
     except Exception:
@@ -14010,6 +14139,7 @@ def _build_runtime_status_view(
     bundle_count = 0 if bundle is None else len(bundle.items)
     bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
     workspace_changes_available = _status_workspace_changes_available(git_status)
+    current_time = ui_state.current_time()
 
     lines = []
     if notice:
@@ -14062,7 +14192,7 @@ def _build_runtime_status_view(
         runtime_lines.append(f"Session: {session.session_id or 'pending'}")
         if session_title is not None:
             runtime_lines.append(f"Session title: {session_title}")
-    runtime_lines.extend(_status_active_turn_lines(active_turn))
+    runtime_lines.extend(_status_active_turn_lines(active_turn, now=current_time))
 
     get_selection = None if session is None else getattr(session, "get_selection", None)
     if callable(get_selection):
@@ -14087,6 +14217,9 @@ def _build_runtime_status_view(
     tool_activity_count = len(_tool_activity_items(session))
 
     memory_lines = [f"Pending input: {_pending_text_action_label(pending_text_action)}"]
+    pending_text_hint = _pending_text_action_hint_line(pending_text_action)
+    if pending_text_hint is not None:
+        memory_lines.append(pending_text_hint)
     if pending_media_group_stats is not None:
         memory_lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
     memory_lines.append(f"Local sessions: {history_count}")

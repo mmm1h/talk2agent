@@ -45,6 +45,8 @@
 - `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
 - `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`，减少手机端来回扫按钮。
 - `Bot Status` 的正文会按 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 分段，避免长消息退化成一整屏无层次的状态 dump。
+- 当当前 turn 仍在运行时，`Bot Status` 会额外显示 `Turn elapsed`；当 bot 正在等待下一条纯文本时，也会直接显示 `Next plain text` 提示，减少用户猜“下一条到底该发什么”。
+- 当用户的消息被当前运行中 turn、待输入动作或待发送附件组挡住时，bot 不只会解释原因，还会直接附上 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Open Bot Status` 这类恢复按钮，避免用户还得记 slash 命令。
 - `Last Request` 不再只是只读缓存：`Bot Status` 会额外显示它来自 plain text / bundle / workspace request 等哪个来源，并提供 `Run Last Request`，用于只重跑请求文本本身；如果你需要原附件或原上下文，则继续使用 `Retry Last Turn`。
   在 `Last Request` 详情页里，如果当前 workspace 还有上一轮可复用 turn，页面也会直接给出 `Retry Last Turn` / `Fork Last Turn`，把“只重跑文本”和“恢复整轮上下文”明确分开。
   如果这条缓存请求最初记录在另一个 Provider 上，状态页和详情页还会明确提示“当前会重放到哪个 Provider”，避免管理员切换共享 runtime 后用户误以为还是在旧 agent 上执行。
@@ -97,6 +99,7 @@
 - 文本消息直接进入 ACP prompt。
 - 图片、音频、视频和文档会尽量映射为 ACP 结构化内容块。
 - 超过 `8 MiB` 的附件会在送出前直接被拒绝，并明确提示压缩或改发更小文件；不会把任何内容半路发给 agent。
+- 这类附件校验或降级失败提示也会保留 `Open Bot Status` 恢复入口，避免用户只看到一条终点文案后不知道回哪里继续。
 - 如果当前 Provider 不支持某类附件，bot 会优先使用受控降级路径，例如写入当前 workspace 的 `.talk2agent/telegram-inbox/`。
 - 当附件被这样降级时，bot 会额外发一条说明消息，明确告知附件已加入 `Context Bundle`，并附上 `Open Context Bundle` 与 `Open Bot Status` 恢复入口。
 - 即使这类附件所在的 turn 后续失败，bot 也会保留已落盘的文件并继续挂在 `Context Bundle` 里，避免用户被迫重新上传。

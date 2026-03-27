@@ -26,6 +26,7 @@
 9. 点击 `Bot Status`，确认它是只读入口，不会隐式创建新 session。
    同时确认顶部会前置当前状态下的主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`。
    再确认正文被分成 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 这类可扫读分段，而不是一整块无层次长文本。
+   如果当前 turn 仍在运行，再确认状态页会显示 `Turn elapsed`；如果当前正在等待纯文本输入，再确认状态页会显示 `Next plain text`，让用户知道下一条该发什么。
    如果当前 workspace 已缓存 `Last Request`，再确认状态页会显示它的来源摘要，并提供 `Run Last Request`；这个入口应只重跑请求文本，而不是隐式恢复旧附件或旧上下文。
    如果该 `Last Request` 或 `Last Turn` 最初记录在另一个 Provider 上，再确认状态页会明确提示这次重放将落到当前 Provider，而不是让用户自己猜。
 10. 执行 `Switch Agent`，确认切换前有预检，切换菜单会明确提示旧按钮 / 待输入会被清理、`Context Bundle` 不会跟随切换，而同 workspace 下的 `Last Turn` / `Last Request` 仍可继续复用；切换后旧 UI 动作立即失效。
@@ -97,7 +98,9 @@
 5. 发送一条足够长、会超过 Telegram 文本上限的请求结果，确认 bot 会优先按段落、换行或空格分段，而不是把一句完整的话硬切成难读碎片。
 6. 人为制造一次附件降级后的 turn 失败，确认已落盘的文件仍保留在 `Context Bundle`，并提示用户无需重新上传即可恢复或重试。
 7. 在 bot 正在等待纯文本动作时误发附件或 sticker，确认提示不仅会点名当前待完成的动作，还会明确说明这条误发消息没有转给 agent。
+   同时确认这类阻断提示会直接附上 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads` 或 `Open Bot Status` 之类的恢复按钮，而不是只给文字说明。
 8. 发送 sticker、location、contact、poll、GIF、video note 或 dice，确认 bot 不会无响应，而是明确提示改发文本、图片、文档、音频或视频，并给出 `/help` 或 `/start` 的恢复路径；如果当前正在等待纯文本，仍应优先提示继续发送纯文本，并点名当前待完成的动作。
+   对附件过大、附件降级失败等本地校验错误，也确认提示会保留 `Open Bot Status` 恢复入口。
 
 ## 回归出口
 

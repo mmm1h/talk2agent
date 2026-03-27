@@ -1412,6 +1412,7 @@ def test_handle_unsupported_message_replies_with_supported_inputs_and_recovery_g
         "or video instead, use /help for supported flows, or use /start to reopen the main "
         "keyboard."
     ]
+    assert find_inline_button(message.reply_markups[0], "Open Bot Status")
     assert store.get_or_create_calls == []
 
 
@@ -1436,6 +1437,7 @@ def test_handle_unsupported_message_mentions_bundle_chat_when_active():
         "current context bundle, or send a photo, document, audio, or video instead. Use /help "
         "for supported flows, or use /start to reopen the main keyboard."
     ]
+    assert find_inline_button(message.reply_markups[0], "Open Bot Status")
 
 
 def test_handle_unsupported_message_preserves_pending_plain_text_notice():
@@ -1453,6 +1455,9 @@ def test_handle_unsupported_message_preserves_pending_plain_text_notice():
         "Workspace search is waiting for plain text. Send the search text next, or send /cancel to back out. "
         "Nothing was sent to the agent."
     ]
+    markup = message.reply_markups[0]
+    assert find_inline_button(markup, "Cancel Pending Input")
+    assert find_inline_button(markup, "Open Bot Status")
 
 
 def test_build_telegram_application_registers_start_handler_before_generic_commands(monkeypatch):
@@ -2498,6 +2503,7 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
         in text
     )
     assert "Pending input: Workspace search" in text
+    assert "Next plain text: Send the search text next." in text
     assert "Local sessions: 2" in text
     assert "Last turn replay: available (hello)" in text
     assert "Last request text: search for adapter" in text
@@ -2655,6 +2661,7 @@ def test_bot_status_shows_stop_turn_and_can_cancel_running_turn():
 
         status_text = status_update.message.reply_calls[0]
         assert "Turn: running" in status_text
+        assert "Turn elapsed: " in status_text
         stop_button = find_inline_button(status_update.message.reply_markups[0], "Stop Turn")
 
         stop_update = FakeCallbackUpdate(
@@ -2762,6 +2769,9 @@ def test_handle_text_rejects_new_turn_while_background_turn_running():
                 "This new message was not sent to the agent."
             )
         ]
+        blocked_markup = second_update.message.reply_markups[0]
+        assert find_inline_button(blocked_markup, "Stop Turn")
+        assert find_inline_button(blocked_markup, "Open Bot Status")
 
         session._turn_cancelled.set()
         await application.wait_for_tasks()
@@ -2802,6 +2812,9 @@ def test_handle_text_waits_for_pending_media_group_before_starting_new_turn():
             "This new message was not sent to the agent."
         )
     ]
+    blocked_markup = text_update.message.reply_markups[0]
+    assert find_inline_button(blocked_markup, "Discard Pending Uploads")
+    assert find_inline_button(blocked_markup, "Open Bot Status")
     assert ui_state.get_last_request_text(123, "default") is None
     assert len(services.final_session.prompt_items) == 1
     prompt_items = services.final_session.prompt_items[0]
@@ -14956,6 +14969,9 @@ def test_handle_attachment_media_group_respects_pending_plain_text_action():
         "Rename session title (session-1) is waiting for plain text. Send the new session title next, or send /cancel to back out. "
         "Nothing was sent to the agent."
     ]
+    blocked_markup = first_message.reply_markups[0]
+    assert find_inline_button(blocked_markup, "Cancel Pending Input")
+    assert find_inline_button(blocked_markup, "Open Bot Status")
     assert second_message.reply_calls == []
 
 
@@ -14994,6 +15010,9 @@ def test_handle_attachment_waits_for_pending_media_group_before_starting_new_tur
             "This new message was not sent to the agent."
         )
     ]
+    blocked_markup = blocked_message.reply_markups[0]
+    assert find_inline_button(blocked_markup, "Discard Pending Uploads")
+    assert find_inline_button(blocked_markup, "Open Bot Status")
     assert len(services.final_session.prompt_items) == 1
     prompt_items = services.final_session.prompt_items[0]
     assert isinstance(prompt_items[0], PromptText)
@@ -15072,6 +15091,7 @@ def test_handle_attachment_workspace_inbox_save_failure_shows_actionable_text(mo
         "Couldn't save the attachment into the current workspace for fallback handling. "
         "Try again or send a different file if possible. Nothing was sent to the agent."
     ]
+    assert find_inline_button(message.reply_markups[0], "Open Bot Status")
 
 
 def test_handle_attachment_rejects_oversized_file_with_recovery_guidance():
@@ -15096,6 +15116,7 @@ def test_handle_attachment_rejects_oversized_file_with_recovery_guidance():
         "This attachment is larger than the 8 MiB bot limit. "
         "Send a smaller file or compress it before retrying. Nothing was sent to the agent."
     ]
+    assert find_inline_button(message.reply_markups[0], "Open Bot Status")
 
 
 def test_build_media_group_prompt_empty_group_uses_actionable_copy():
@@ -15294,4 +15315,7 @@ def test_handle_attachment_respects_pending_plain_text_action():
         "Rename session title (session-1) is waiting for plain text. Send the new session title next, or send /cancel to back out. "
         "Nothing was sent to the agent."
     ]
+    markup = message.reply_markups[0]
+    assert find_inline_button(markup, "Cancel Pending Input")
+    assert find_inline_button(markup, "Open Bot Status")
 
