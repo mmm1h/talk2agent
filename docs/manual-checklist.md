@@ -12,7 +12,7 @@
 ## 启动与全局运行时
 
 1. 发送 `/start`，确认会返回欢迎页和主键盘，且不会隐式创建新 session。
-   同时确认主键盘前两行优先呈现 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，`Workspace Search` / `Context Bundle` 紧随其后，且消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的“Start here”引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒。
+   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的“Start here”引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒。
 2. 发送 `/help`，确认会返回快速使用指南和恢复入口，且不会隐式创建新 session。
    同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用。
 3. 发送 `/status`，确认会直接打开 `Bot Status`，且不会隐式创建新 session；在主键盘被 Telegram 折叠时，这条命令仍然可作为只读恢复入口。

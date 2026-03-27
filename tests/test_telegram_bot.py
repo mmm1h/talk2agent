@@ -884,10 +884,14 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     from talk2agent.bots.telegram_bot import (
         BUTTON_BOT_STATUS,
         BUTTON_CANCEL_OR_STOP,
+        BUTTON_CONTEXT_BUNDLE,
         BUTTON_FORK_LAST_TURN,
         BUTTON_HELP,
         BUTTON_NEW_SESSION,
         BUTTON_RETRY_LAST_TURN,
+        BUTTON_SWITCH_AGENT,
+        BUTTON_SWITCH_WORKSPACE,
+        BUTTON_WORKSPACE_SEARCH,
         TelegramUiState,
         handle_start,
     )
@@ -901,10 +905,14 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     assert text.startswith("Welcome to Talk2Agent for Codex in Default Workspace.")
     assert "Workspace ID: default" in text
     assert "Status: ready. Your first text or attachment will start a session." in text
-    assert "Recommended next step: send text or an attachment, or open workspace tools before you ask." in text
     assert (
-        "Primary controls right now: send text or an attachment, or open Workspace "
-        "Files/Search/Changes first."
+        "Recommended next step: send text or an attachment, or use Workspace Search / Context "
+        "Bundle before you ask."
+        in text
+    )
+    assert (
+        "Primary controls right now: send text or an attachment, or use Workspace Search / "
+        "Context Bundle first."
         in text
     )
     assert text.count("Primary controls right now:") == 1
@@ -914,9 +922,19 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     assert "Context bundle: empty" in text
     assert "Start here:" in text
     assert "Send plain text or an attachment to talk to the current agent." in text
-    assert "Main keyboard priority: New Session and Bot Status first, then Retry / Fork Last Turn." in text
     assert (
-        "Context prep row: Workspace Search and Context Bundle are the fastest path to a grounded request."
+        "Open Bot Status when you need the control center for history, files, model / mode, "
+        "agent commands, or recovery."
+        in text
+    )
+    assert "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn." in text
+    assert (
+        "Context prep row: Workspace Search and Context Bundle stay one tap away before you ask."
+        in text
+    )
+    assert (
+        "Advanced actions live in Bot Status: Session History, Model / Mode, Agent Commands, "
+        "Workspace Files/Changes, and Restart Agent."
         in text
     )
     assert (
@@ -926,9 +944,13 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     )
     assert "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime." in text
     keyboard = [[button.text for button in row] for row in update.message.reply_markups[0].keyboard]
-    assert keyboard[0] == [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS]
-    assert keyboard[1] == [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN]
-    assert keyboard[-2] == [BUTTON_HELP, BUTTON_CANCEL_OR_STOP]
+    assert keyboard == [
+        [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
+        [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
+        [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
+        [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
+        [BUTTON_SWITCH_AGENT, BUTTON_SWITCH_WORKSPACE],
+    ]
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1033,10 +1055,14 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
     assert text.startswith("Talk2Agent help for Codex in Default Workspace.")
     assert "Workspace ID: default" in text
     assert "Status: ready. Your first text or attachment will start a session." in text
-    assert "Recommended next step: send text or an attachment, or open workspace tools before you ask." in text
     assert (
-        "Primary controls right now: send text or an attachment, or open Workspace "
-        "Files/Search/Changes first."
+        "Recommended next step: send text or an attachment, or use Workspace Search / Context "
+        "Bundle before you ask."
+        in text
+    )
+    assert (
+        "Primary controls right now: send text or an attachment, or use Workspace Search / "
+        "Context Bundle first."
         in text
     )
     assert "Session: none yet. Send text or an attachment to start one." in text
@@ -1046,18 +1072,27 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
     assert "Quick guide:" in text
     assert "1. Send text or an attachment to chat with the current agent." in text
     assert (
-        "2. Use Workspace Search, Workspace Files/Changes, and Context Bundle when you want to "
-        "prepare context before you ask."
+        "2. Use Workspace Search and Context Bundle from the main keyboard, or open Bot Status "
+        "for Workspace Files/Changes, when you want to prepare context before you ask."
         in text
     )
-    assert "3. Use Bot Status or /status to inspect runtime state, stop turns, and recover." in text
     assert (
-        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent to branch "
-        "or reset your work."
+        "3. Use Bot Status or /status as the control center for runtime state, history, model "
+        "/ mode, agent commands, and recovery."
+        in text
+    )
+    assert (
+        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent from Bot "
+        "Status when you need to branch or reset your work."
         in text
     )
     assert "Keyboard:" in text
-    assert "Main keyboard priority: New Session and Bot Status first, then Retry / Fork Last Turn." in text
+    assert "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn." in text
+    assert (
+        "Advanced actions live in Bot Status: Session History, Model / Mode, Agent Commands, "
+        "Workspace Files/Changes, and Restart Agent."
+        in text
+    )
     assert "/start restores the welcome screen and the full keyboard." in text
     assert "/status opens Bot Status even when the keyboard is hidden." in text
     assert "Help or /help reopens this guide without changing the current session." in text
@@ -1084,8 +1119,13 @@ def test_handle_status_opens_runtime_status_without_starting_session():
     assert text.startswith("Bot status for Codex in Default Workspace")
     assert "Session: none (will start on first request)" in text
     assert (
-        "Primary controls right now: send text or an attachment, or open Workspace "
-        "Files/Search/Changes first."
+        "Primary controls right now: send text or an attachment, or use Workspace Search / "
+        "Context Bundle first."
+        in text
+    )
+    assert (
+        "Control center: use the buttons below for session recovery, history, files, changes, "
+        "model / mode, agent commands, and workspace actions."
         in text
     )
     assert store.peek_calls == [123]
@@ -2536,11 +2576,11 @@ def test_bot_status_prioritizes_run_last_request_when_cached_request_is_availabl
     text = update.message.reply_calls[0]
     assert (
         "Recommended next step: run the last request again from Bot Status, send text or an "
-        "attachment, or open workspace tools before you ask."
+        "attachment, or use Workspace Search / Context Bundle before you ask."
     ) in text
     assert (
-        "Primary controls right now: Run Last Request, send text or an attachment, or open "
-        "Workspace Files/Search/Changes first."
+        "Primary controls right now: Run Last Request, send text or an attachment, or use "
+        "Workspace Search / Context Bundle first."
     ) in text
     assert "Last request text: Re-run the rollout summary" in text
     assert "Last request source: plain text" in text

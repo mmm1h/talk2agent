@@ -37,12 +37,12 @@
 - 待发送附件组：Telegram `media_group` 还在收集窗口内时，bot 会把它视为显式的本地待处理状态；`/cancel` / `Cancel / Stop` 可以直接丢弃，避免“以为取消了，其实附件还是发到了 agent”。
 - 相册收集中的并发保护：当 `media_group` 还没收齐时，新的非相册文本/附件不会抢先进入 agent；bot 会明确提示“这条新消息没有发出去”，避免用户误以为它会排队执行，结果把待收集附件组冲掉。
 - 状态切换前的上传止损：如果用户在附件组仍处于收集窗口内时执行 `New Session`、`Restart Agent`、会话切换/分叉，或管理员执行 `Switch Agent` / `Switch Workspace`，bot 会先丢弃这些待发送上传，并明确提示“Nothing was sent to the agent”，避免旧附件晚到新 session 或新 workspace。
-- 主键盘高频入口：前两行优先放 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`；`Workspace Search` 与 `Context Bundle` 紧随其后，`Help` / `Cancel / Stop` 保持为专门的恢复行，减少手机端在高频动作和恢复动作之间来回找按钮。
+- 主键盘只保留高频入口：前两行优先放 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`；第三行保留 `Workspace Search` 与 `Context Bundle`，第四行固定 `Help` / `Cancel / Stop` 作为恢复行。`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 统一收口到 `Bot Status`，减少手机端被大键盘占满。
 - Telegram slash 菜单：固定显示本地 `/start`、`/status`、`/help`、`/cancel`，并追加当前 agent 暴露的命令。
   如果 agent 命令发现暂时失败，菜单仍会保留这些本地恢复入口。
 - 过期按钮：旧消息上的 inline button 过期后，bot 会明确提示“这是旧菜单上的按钮”，并建议重新打开最近视图或使用 `/start`，避免只留下不可操作的死按钮。
 - 无效或跨用户按钮：版本漂移、失效 payload，或点到别人的按钮时，bot 会返回恢复或纠正建议，而不是只显示生硬的系统短语。
-- `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，并作为高频入口。
+- `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
 - `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`，减少手机端来回扫按钮。
 - `Last Request` 不再只是只读缓存：`Bot Status` 会额外显示它来自 plain text / bundle / workspace request 等哪个来源，并提供 `Run Last Request`，用于只重跑请求文本本身；如果你需要原附件或原上下文，则继续使用 `Retry Last Turn`。
   在 `Last Request` 详情页里，如果当前 workspace 还有上一轮可复用 turn，页面也会直接给出 `Retry Last Turn` / `Fork Last Turn`，把“只重跑文本”和“恢复整轮上下文”明确分开。

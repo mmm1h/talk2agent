@@ -742,9 +742,6 @@ def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
         [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
         [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
         [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
-        [BUTTON_SESSION_HISTORY, BUTTON_MODEL_MODE],
-        [BUTTON_WORKSPACE_FILES, BUTTON_WORKSPACE_CHANGES],
-        [BUTTON_AGENT_COMMANDS, BUTTON_RESTART_AGENT],
         [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
     ]
     if user_id == services.admin_user_id:
@@ -1438,11 +1435,11 @@ def _recommended_next_step_line(
         if session is None:
             return (
                 "Recommended next step: run the last request again from Bot Status, send text "
-                "or an attachment, or open workspace tools before you ask."
+                "or an attachment, or use Workspace Search / Context Bundle before you ask."
             )
         return (
             "Recommended next step: run the last request again from Bot Status, send text or "
-            "an attachment, or use the workspace tools below if you want more context first."
+            "an attachment, or open Bot Status if you want files, changes, or history first."
         )
     if last_turn_available:
         return (
@@ -1451,12 +1448,12 @@ def _recommended_next_step_line(
         )
     if session is None:
         return (
-            "Recommended next step: send text or an attachment, or open workspace tools "
-            "before you ask."
+            "Recommended next step: send text or an attachment, or use Workspace Search / "
+            "Context Bundle before you ask."
         )
     return (
-        "Recommended next step: send text or an attachment, or use the workspace tools below "
-        "if you want more context first."
+        "Recommended next step: send text or an attachment, or open Bot Status if you want "
+        "files, changes, or history first."
     )
 
 
@@ -1509,29 +1506,33 @@ def _primary_controls_line(
         if session is None:
             return (
                 "Primary controls right now: Run Last Request, send text or an attachment, or "
-                "open Workspace Files/Search/Changes first."
+                "use Workspace Search / Context Bundle first."
             )
         return (
             "Primary controls right now: Run Last Request, send text or an attachment, or "
-            "prepare context with Workspace Files/Search/Changes and Context Bundle."
+            "open Bot Status for files, changes, and context prep."
         )
     if last_turn_available:
         return "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh request."
     if session is None:
         return (
-            "Primary controls right now: send text or an attachment, or open Workspace "
-            "Files/Search/Changes first."
+            "Primary controls right now: send text or an attachment, or use Workspace Search "
+            "/ Context Bundle first."
         )
     return (
-        "Primary controls right now: send text or an attachment, or prepare context with "
-        "Workspace Files/Search/Changes and Context Bundle."
+        "Primary controls right now: send text or an attachment, or open Bot Status for files, "
+        "changes, and context prep."
     )
 
 
 def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
     lines = [
-        "Main keyboard priority: New Session and Bot Status first, then Retry / Fork Last Turn.",
-        "Context prep row: Workspace Search and Context Bundle are the fastest path to a grounded request.",
+        "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn.",
+        "Context prep row: Workspace Search and Context Bundle stay one tap away before you ask.",
+        (
+            "Advanced actions live in Bot Status: Session History, Model / Mode, Agent "
+            "Commands, Workspace Files/Changes, and Restart Agent."
+        ),
         (
             "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
             "/help, and /cancel still work if Telegram hides it."
@@ -1658,6 +1659,10 @@ def _build_start_text(
     lines.append("")
     lines.append("Start here:")
     lines.append("Send plain text or an attachment to talk to the current agent.")
+    lines.append(
+        "Open Bot Status when you need the control center for history, files, model / mode, "
+        "agent commands, or recovery."
+    )
     lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
 
     return "\n".join(lines)
@@ -1735,13 +1740,16 @@ def _build_help_text(
     lines.append("Quick guide:")
     lines.append("1. Send text or an attachment to chat with the current agent.")
     lines.append(
-        "2. Use Workspace Search, Workspace Files/Changes, and Context Bundle when you want to "
-        "prepare context before you ask."
+        "2. Use Workspace Search and Context Bundle from the main keyboard, or open Bot Status "
+        "for Workspace Files/Changes, when you want to prepare context before you ask."
     )
-    lines.append("3. Use Bot Status or /status to inspect runtime state, stop turns, and recover.")
     lines.append(
-        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent to branch "
-        "or reset your work."
+        "3. Use Bot Status or /status as the control center for runtime state, history, model "
+        "/ mode, agent commands, and recovery."
+    )
+    lines.append(
+        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent from Bot "
+        "Status when you need to branch or reset your work."
     )
     lines.append("")
     lines.append("Keyboard:")
@@ -14086,8 +14094,11 @@ def _build_runtime_status_view(
 
     lines.append("")
     lines.append(
-        "Main keyboard: New Session and Bot Status first, then Retry/Fork Last Turn, context "
-        "prep tools, and a dedicated Help / Cancel recovery row."
+        "Control center: use the buttons below for session recovery, history, files, changes, "
+        "model / mode, agent commands, and workspace actions."
+    )
+    lines.append(
+        "Main keyboard: keep high-frequency actions ready without filling the whole chat."
     )
     if is_admin:
         lines.append("Admin switches stay on the main keyboard.")
