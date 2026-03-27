@@ -964,6 +964,23 @@ async def _reply_with_menu(message, services, user_id: int, text: str, *, reply_
     await message.reply_text(text, reply_markup=markup)
 
 
+def _stale_callback_recovery_text() -> str:
+    return (
+        "That menu is out of date. Restored the current keyboard. "
+        "Open Bot Status for the latest controls, or use /start for the welcome screen."
+    )
+
+
+async def _reply_stale_callback_recovery(query, services, user_id: int) -> None:
+    message = getattr(query, "message", None)
+    if message is None:
+        return
+    try:
+        await _reply_with_menu(message, services, user_id, _stale_callback_recovery_text())
+    except Exception:
+        pass
+
+
 def _inline_notice_markup(
     ui_state: TelegramUiState,
     user_id: int,
@@ -4848,12 +4865,16 @@ async def handle_callback_query(
     data = query.data or ""
     if not data.startswith(CALLBACK_PREFIX):
         await query.answer(_unknown_action_text(), show_alert=True)
+        if update.effective_user is not None:
+            await _reply_stale_callback_recovery(query, services, update.effective_user.id)
         return
 
     token = data[len(CALLBACK_PREFIX) :]
     callback_action = ui_state.get(token)
     if callback_action is None:
         await query.answer(_expired_button_text(), show_alert=True)
+        if update.effective_user is not None:
+            await _reply_stale_callback_recovery(query, services, update.effective_user.id)
         return
     if update.effective_user is None or callback_action.user_id != update.effective_user.id:
         await query.answer(_button_not_for_you_text(), show_alert=True)
@@ -4862,6 +4883,8 @@ async def handle_callback_query(
     callback_action = ui_state.pop(token)
     if callback_action is None:
         await query.answer(_expired_button_text(), show_alert=True)
+        if update.effective_user is not None:
+            await _reply_stale_callback_recovery(query, services, update.effective_user.id)
         return
 
     try:

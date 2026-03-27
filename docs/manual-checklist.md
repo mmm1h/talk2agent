@@ -21,7 +21,7 @@
    再额外验证一次 `media_group` 还在收集窗口内时发送普通文本或单独附件，确认 bot 会明确提示这条新消息没有发出去，并继续保留原附件组，而不是把相册悄悄冲掉。
 5. 打开 Telegram slash 菜单，确认固定可见 `/start`、`/status`、`/help`、`/cancel`，并且当前 agent 暴露的命令会追加在后面。
 6. 人为制造一次关键失败态，例如新 session 创建失败或切换失败，确认提示给出恢复建议，而不是直接暴露内部错误短语。
-7. 触发一个已失效的旧 inline button，确认 bot 会提示这是旧菜单上的按钮，并建议重新打开最近视图或使用 `/start`，而不是只弹出无方向的过期提示。
+7. 触发一个已失效的旧 inline button，确认 bot 会提示这是旧菜单上的按钮，并建议重新打开最近视图或使用 `/start`；同时还会补发一条新消息，把当前主键盘重新送回用户，而不是只弹出无方向的过期提示。
 8. 发送一个伪造或跨用户的 callback，确认 bot 会给出“重新打开最近视图”或“从自己的聊天里重新打开菜单 / 使用 `/start`”之类的纠正提示，而不是只显示模糊的系统短语。
 9. 点击 `Bot Status`，确认它是只读入口，不会隐式创建新 session。
    同时确认顶部会前置当前状态下的主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`。

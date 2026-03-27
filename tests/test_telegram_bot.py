@@ -1899,6 +1899,20 @@ def test_handle_callback_query_rejects_unknown_action_with_recovery_guidance():
             True,
         )
     ]
+    assert update.callback_query.message.reply_calls == [
+        "That menu is out of date. Restored the current keyboard. Open Bot Status for the latest "
+        "controls, or use /start for the welcome screen."
+    ]
+    keyboard = [
+        [button.text for button in row]
+        for row in update.callback_query.message.reply_markups[0].keyboard
+    ]
+    assert keyboard == [
+        ["New Session", "Bot Status"],
+        ["Retry Last Turn", "Fork Last Turn"],
+        ["Workspace Search", "Context Bundle"],
+        ["Help", "Cancel / Stop"],
+    ]
 
 
 def test_handle_callback_query_rejects_button_for_other_user_with_guidance():
@@ -2108,6 +2122,10 @@ def test_new_session_clears_session_bound_interactions_preserves_bundle_chat_and
     run(handle_callback_query(stale_update, None, services, ui_state))
     assert stale_update.callback_query.answers == [
         ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
+    assert stale_update.callback_query.message.reply_calls == [
+        "That menu is out of date. Restored the current keyboard. Open Bot Status for the latest "
+        "controls, or use /start for the welcome screen."
     ]
 
 
@@ -2328,6 +2346,10 @@ def test_fork_last_turn_button_replays_previous_text_turn_in_new_session():
     run(handle_callback_query(stale_update, None, services, ui_state))
     assert stale_update.callback_query.answers == [
         ("This button has expired because that menu is out of date. Reopen the latest menu or use /start.", True)
+    ]
+    assert stale_update.callback_query.message.reply_calls == [
+        "That menu is out of date. Restored the current keyboard. Open Bot Status for the latest "
+        "controls, or use /start for the welcome screen."
     ]
     assert store.record_session_usage_calls == [
         (123, "session-abc", "hello"),

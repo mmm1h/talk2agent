@@ -46,7 +46,7 @@
 - 主键盘只保留高频入口：前两行优先放 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`；第三行保留 `Workspace Search` 与 `Context Bundle`，第四行固定 `Help` / `Cancel / Stop` 作为恢复行。`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent`，以及管理员的 `Switch Agent` / `Switch Workspace` 都统一收口到 `Bot Status`，减少手机端被大键盘占满，也避免把 shared runtime 开关暴露在常驻键盘上。
 - Telegram slash 菜单：固定显示本地 `/start`、`/status`、`/help`、`/cancel`，并追加当前 agent 暴露的命令。
   如果 agent 命令发现暂时失败，菜单仍会保留这些本地恢复入口。
-- 过期按钮：旧消息上的 inline button 过期后，bot 会明确提示“这是旧菜单上的按钮”，并建议重新打开最近视图或使用 `/start`，避免只留下不可操作的死按钮。
+- 过期按钮：旧消息上的 inline button 过期后，bot 会明确提示“这是旧菜单上的按钮”，并建议重新打开最近视图或使用 `/start`；同时还会主动补发一条新消息，把当前主键盘重新送回用户，避免只留下不可操作的死按钮。
 - 无效或跨用户按钮：版本漂移、失效 payload，或点到别人的按钮时，bot 会返回恢复或纠正建议，而不是只显示生硬的系统短语。
 - `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
 - `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`，减少手机端来回扫按钮。
