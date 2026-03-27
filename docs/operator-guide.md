@@ -76,8 +76,8 @@
   当这些动作会替换当前 live session 时，如果还有待发送附件组，bot 也会先丢弃并明确告知，而不是让旧上传跨 session 漏过去。
   成功回显会直接说明同一 workspace 下哪些内容仍可复用；如果 `Bundle Chat` 仍处于开启状态，也会明确提醒“下一条纯文本仍会自动带上当前 bundle”，避免用户把“新 session”误解成“所有上下文都被清空”。
   从 `Session History` 里执行 `Run Session` / `Run+Retry` / `Fork+Retry` 时，成功和失败都会回到历史列表并保留当前上下文；如果上一轮已失效，也会明确提示先发新请求，而不是误报“已经重试成功”。
-  `Session History` 列表和详情都会先补一行 `Recommended next step`，再解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
-  这些历史页里原本容易挤在一排的 `Run` / `Open` / `Rename` / `Delete` 以及 `...+Retry` / `Fork` 动作也会拆成双列按钮，减少手机端误触和读不清按钮的问题。
+  `Session History` 列表和详情都会先补一行 `Recommended next step`，再解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。列表优先保留 `Run` / `Open` / `...+Retry` / `Fork` 这些继续工作的动作；`Rename` / `Delete` 收口到详情页，避免手机端在扫描历史列表时就撞上低频危险动作。
+  `Session History` 详情页会明确说明这些 `Rename` / `Delete` 只影响 bot 本地历史，不会改写 provider 原生 session，减少管理员在 `Session History` 与 `Provider Sessions` 之间切换时的语义误解。
   如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；除了 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，它还会补一行 `Recommended next step`。
   如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，同一个空状态里还会继续补上 `Recovery options`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这些真正能继续工作的入口直接挂出来。
 - `Session Info` / `Usage` / `Agent Commands` 的无 session 空状态：如果当前 live session 已消失，但当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些页面不会只剩“没有会话”；它们会先补一行 `Recommended next step`，再补上 `Recovery options`，并给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这类直达按钮。

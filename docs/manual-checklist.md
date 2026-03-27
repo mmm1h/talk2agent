@@ -52,8 +52,8 @@
 3. 打开 `Session History`，确认可以浏览、切换、分叉、重命名和删除本地历史会话。
    额外在本地历史为空时打开一次，确认空状态会直接给出 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，并补一行 `Recommended next step`，而不是只显示一句“没有历史”。
    如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认这个空状态会继续先补一行更贴近当前可复用内容的 `Recommended next step`，再补上 `Recovery options`，并直接给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 或 `Open Context Bundle`。
-   再确认列表和详情都会先补一行 `Recommended next step`，并明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。
-   同时确认 `Run` / `Open` / `Rename` / `Delete` 以及 `...+Retry` / `Fork` 这些密集动作不会再被挤进单行，而是按双列拆开，保证手机端仍然可点可读。
+   再确认列表和详情都会先补一行 `Recommended next step`，并明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。列表应优先保留 `Run` / `Open` / `...+Retry` / `Fork` 这些继续工作动作；`Rename` / `Delete` 应收口到详情页，避免在扫描列表时误触低频危险动作。
+   同时确认详情页会明确说明这些 `Rename` / `Delete` 只影响 bot 本地历史，不会改写 provider 原生 session；列表和详情里的高密度动作都仍应按双列拆开，保证手机端可点可读。
    如果历史记录超过一页，再确认页首会显示 `Local sessions`、`Showing` 和 `Page`，让用户知道总共有多少条、当前页覆盖哪一段，而不是只剩 `Prev` / `Next`。
 4. 如果 Provider 支持原生 session 浏览，打开 `Provider Sessions`，确认可以接管或分叉 provider 侧 session。
    再分别制造“当前 agent 不支持 provider session browsing”和“当前页暂时没有任何 provider session”两种空状态，确认视图会解释原因，并保留 `Refresh` 或 `Open Bot Status` 恢复入口，同时补一行 `Recommended next step`，而不是只留一句空文案。

@@ -7293,6 +7293,12 @@ def test_bot_status_session_history_detail_shows_fields_and_actions():
     assert "Created: 2026-03-20T00:00:00+00:00" in detail_text
     assert "Updated: 2026-03-20T00:00:00+00:00" in detail_text
     assert (
+        "Management: Rename updates only this bot-local title. Delete removes only this "
+        "bot-local checkpoint."
+        in detail_text
+    )
+    assert "Provider-owned sessions are not renamed or deleted from here." in detail_text
+    assert (
         "Recommended next step: tap Run Session to continue there, or use Run+Retry / "
         "Fork+Retry if you also want the previous turn replayed immediately."
         in detail_text
@@ -7303,6 +7309,8 @@ def test_bot_status_session_history_detail_shows_fields_and_actions():
     assert find_inline_button(detail_markup, "Refresh")
     assert find_inline_button(detail_markup, "Back to History")
     assert find_inline_button(detail_markup, "Run Session")
+    assert find_inline_button(detail_markup, "Rename Session")
+    assert find_inline_button(detail_markup, "Delete Session")
     assert find_inline_button(detail_markup, "Run+Retry Session")
     assert find_inline_button(detail_markup, "Fork Session")
     assert find_inline_button(detail_markup, "Fork+Retry Session")
@@ -11004,14 +11012,23 @@ def test_session_history_delete_refreshes_with_notice():
     run(handle_text(update, None, services, ui_state))
 
     first_markup = update.message.reply_markups[0]
-    delete_button = find_inline_button(first_markup, "Delete 1")
-    callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=FakeIncomingMessage("history"))
+    assert find_inline_button(first_markup, "Open 1")
+    assert all(button.text != "Delete 1" for row in first_markup.inline_keyboard for button in row)
+    history_message = FakeIncomingMessage("history")
+    open_button = find_inline_button(first_markup, "Open 1")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=history_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    detail_text, detail_markup = history_message.edit_calls[-1]
+    assert "Provider-owned sessions are not renamed or deleted from here." in detail_text
+    delete_button = find_inline_button(detail_markup, "Delete Session")
+    callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=history_message)
 
     run(handle_callback_query(callback_update, None, services, ui_state))
 
     assert store.delete_history_calls == [(123, "session-1")]
-    edited_texts = [text for text, _ in callback_update.callback_query.message.edit_calls]
-    assert edited_texts[0] == "Deleting session..."
+    edited_texts = [text for text, _ in history_message.edit_calls]
+    assert edited_texts[-2] == "Deleting session..."
     assert edited_texts[-1].startswith("Deleted session.\nSession history for Codex in Default Workspace")
     assert ui_state.get(stale_token) is not None
 
@@ -11039,14 +11056,19 @@ def test_session_history_delete_failure_shows_actionable_notice():
     run(handle_text(update, None, services, ui_state))
 
     first_markup = update.message.reply_markups[0]
-    delete_button = find_inline_button(first_markup, "Delete 1")
-    callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=FakeIncomingMessage("history"))
+    history_message = FakeIncomingMessage("history")
+    open_button = find_inline_button(first_markup, "Open 1")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=history_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    delete_button = find_inline_button(history_message.edit_calls[-1][1], "Delete Session")
+    callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=history_message)
 
     run(handle_callback_query(callback_update, None, services, ui_state))
 
     assert store.delete_history_calls == [(123, "session-1")]
-    edited_texts = [text for text, _ in callback_update.callback_query.message.edit_calls]
-    assert edited_texts[0] == "Deleting session..."
+    edited_texts = [text for text, _ in history_message.edit_calls]
+    assert edited_texts[-2] == "Deleting session..."
     assert edited_texts[-1].startswith(
         "Couldn't delete that session. Try again or reopen Session History.\n"
         "Session history for Codex in Default Workspace"
@@ -11098,11 +11120,20 @@ def test_session_history_delete_current_session_clears_session_bound_interaction
         await handle_text(update, make_context(application=application), services, ui_state)
 
         first_markup = update.message.reply_markups[0]
-        delete_button = find_inline_button(first_markup, "Delete 1")
+        history_message = FakeIncomingMessage("history")
+        open_button = find_inline_button(first_markup, "Open 1")
+        open_update = FakeCallbackUpdate(
+            123,
+            open_button.callback_data,
+            message=history_message,
+        )
+        await handle_callback_query(open_update, None, services, ui_state)
+
+        delete_button = find_inline_button(history_message.edit_calls[-1][1], "Delete Session")
         callback_update = FakeCallbackUpdate(
             123,
             delete_button.callback_data,
-            message=FakeIncomingMessage("history"),
+            message=history_message,
         )
 
         await handle_callback_query(
@@ -11154,7 +11185,7 @@ def test_session_history_delete_current_session_clears_session_bound_interaction
     assert command_names(application.bot.set_my_commands_calls[0]) == expected_command_menu("status")
 
     edited_texts = [text for text, _ in callback_update.callback_query.message.edit_calls]
-    assert edited_texts[0] == "Deleting session..."
+    assert edited_texts[-2] == "Deleting session..."
     assert edited_texts[-1].startswith(
         "Deleted session. Old bot buttons and pending inputs tied to that session were cleared.\n"
         "Session history for Codex in Default Workspace"
@@ -11695,14 +11726,21 @@ def test_session_history_rename_uses_next_text_message():
 
     run(handle_text(update, None, services, ui_state))
 
-    rename_button = find_inline_button(update.message.reply_markups[0], "Rename 1")
-    callback_update = FakeCallbackUpdate(123, rename_button.callback_data, message=FakeIncomingMessage("history"))
+    first_markup = update.message.reply_markups[0]
+    assert all(button.text != "Rename 1" for row in first_markup.inline_keyboard for button in row)
+    history_message = FakeIncomingMessage("history")
+    open_button = find_inline_button(first_markup, "Open 1")
+    open_update = FakeCallbackUpdate(123, open_button.callback_data, message=history_message)
+    run(handle_callback_query(open_update, None, services, ui_state))
+
+    rename_button = find_inline_button(history_message.edit_calls[-1][1], "Rename Session")
+    callback_update = FakeCallbackUpdate(123, rename_button.callback_data, message=history_message)
     run(handle_callback_query(callback_update, None, services, ui_state))
 
-    assert callback_update.callback_query.message.edit_calls[-1][0].startswith(
+    assert history_message.edit_calls[-1][0].startswith(
         "Send the new session title as your next plain text message."
     )
-    assert callback_update.callback_query.message.edit_calls[-1][0].endswith("Send /cancel to back out.")
+    assert history_message.edit_calls[-1][0].endswith("Send /cancel to back out.")
 
     rename_update = FakeUpdate(user_id=123, text="Renamed Session")
     run(handle_text(rename_update, None, services, ui_state))

@@ -16862,6 +16862,9 @@ def _build_history_view(
             can_retry_last_turn=can_retry_last_turn,
         )
     )
+    lines.append(
+        "Open a session first if you want timestamps or the local-only Rename / Delete actions."
+    )
     for offset, entry in enumerate(visible_entries, start=1):
         is_current = entry.session_id == active_session_id
         label = entry.title or entry.session_id
@@ -16891,21 +16894,6 @@ def _build_history_view(
                 user_id,
                 f"Open {start + offset}",
                 "history_open",
-                **history_entry_payload,
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                f"Rename {start + offset}",
-                "history_rename",
-                **history_entry_payload,
-                title=entry.title or entry.session_id,
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                f"Delete {start + offset}",
-                "history_delete",
                 **history_entry_payload,
             ),
         ]
@@ -17048,6 +17036,10 @@ def _build_history_entry_view(
     lines.append(f"Cwd: {entry.cwd}")
     lines.append(f"Created: {entry.created_at}")
     lines.append(f"Updated: {entry.updated_at}")
+    lines.append(
+        "Management: Rename updates only this bot-local title. Delete removes only this bot-local checkpoint."
+    )
+    lines.append("Provider-owned sessions are not renamed or deleted from here.")
 
     history_entry_payload = _history_entry_callback_payload(
         entry=entry,
@@ -17101,6 +17093,23 @@ def _build_history_entry_view(
                     else history_entry_payload
                 ),
             )
+        ],
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Rename Session",
+                "history_rename",
+                **history_entry_payload,
+                title=entry.title or entry.session_id,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                "Delete Session",
+                "history_delete",
+                **history_entry_payload,
+            ),
         ],
     ]
     action_buttons = []
