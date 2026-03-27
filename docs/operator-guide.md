@@ -99,9 +99,12 @@
   当 bundle 非空时，页面也会直接解释 `Ask Agent With Context`、`Ask With Last Request` 和 `Start / Stop Bundle Chat` 的区别，避免用户只看到按钮名却还得自己猜效果。
 - `Stop Turn`：停止当前正在运行的 agent 回合。
   如果用户在回合仍运行时又发来一条新消息，bot 会明确说明这条新消息没有发给 agent，避免误以为系统会排队执行。
+  这些被运行中 turn 挡住的纯文本不会覆盖 `Last Request`；被挡住的单附件或整组 Telegram 相册也会立即止损，而不是等当前 turn 结束后再悄悄送出。
+  如果 turn 最终被取消，最终回显本身也会保留 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`，让用户在止损后直接继续下一步。
 - `Cancel / Stop`：主键盘上的常驻快捷入口，对应 `/cancel` 的本地优先语义，便于手机端在长回合中快速止损。
 - 不支持的 Telegram 富消息：例如 sticker、location、contact、poll、GIF、video note 或 dice 不会再静默丢弃；bot 会明确提示改发文本、图片、文档、音频或视频，并补上 `/help` / `/start` 的恢复路径。若当前正在等待纯文本，仍会优先提醒继续发送纯文本。
 - 未授权访问：未被允许的 Telegram 用户会收到明确的访问拒绝说明，提示联系操作者开通访问。
+- 纯空白文本不会误开新回合；bot 会直接提示这条消息在去掉空白后为空，并明确说明没有发送给 agent。
 
 ## 附件与降级
 

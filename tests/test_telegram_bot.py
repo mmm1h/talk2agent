@@ -1336,6 +1336,25 @@ def test_handle_text_replies_with_recovery_notice_when_background_turn_snapshot_
     assert store.get_or_create_calls == []
 
 
+def test_handle_text_rejects_whitespace_only_message_without_starting_session():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_text
+
+    update = FakeUpdate(user_id=123, text=" \n\t ")
+    ui_state = TelegramUiState()
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    assert update.message.reply_calls == [
+        (
+            "This message was empty after trimming whitespace. "
+            "Send text or an attachment when ready. Nothing was sent to the agent."
+        )
+    ]
+    assert ui_state.get_last_request_text(123, "default") is None
+    assert store.get_or_create_calls == []
+
+
 def test_handle_help_rejects_unauthorized_user():
     from talk2agent.bots.telegram_bot import TelegramUiState, handle_help
 
@@ -1392,6 +1411,11 @@ def test_handle_cancel_stops_running_turn():
         await application.wait_for_tasks()
 
         assert start_update.message.reply_calls == ["Turn cancelled. Send a new request when ready."]
+        cancelled_markup = start_update.message.reply_markups[0]
+        assert find_inline_button(cancelled_markup, "Retry Last Turn")
+        assert find_inline_button(cancelled_markup, "Fork Last Turn")
+        assert find_inline_button(cancelled_markup, "Open Bot Status")
+        assert find_inline_button(cancelled_markup, "New Session")
         assert ui_state.get_active_turn(123) is None
 
     run(scenario())
@@ -1484,7 +1508,7 @@ def test_handle_cancel_discards_pending_media_group_before_it_reaches_agent():
     assert second_message.reply_calls == []
 
 
-def test_handle_cancel_clears_pending_input_and_pending_media_group_together():
+def test_handle_cancel_after_pending_input_blocks_media_group_immediately():
     from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment, handle_cancel
 
     async def scenario():
@@ -1506,13 +1530,17 @@ def test_handle_cancel_clears_pending_input_and_pending_media_group_together():
         cancel_update = FakeUpdate(user_id=123, text="/cancel")
         await handle_cancel(cancel_update, None, services, ui_state)
         await asyncio.sleep(0.07)
-        return services, ui_state, cancel_update
+        return services, ui_state, cancel_update, first_message, second_message
 
-    services, ui_state, cancel_update = asyncio.run(scenario())
+    services, ui_state, cancel_update, first_message, second_message = asyncio.run(scenario())
 
+    assert first_message.reply_calls == [
+        "Rename session title (session-1) is waiting for plain text. Send the new session title next, or send /cancel to back out. "
+        "Nothing was sent to the agent."
+    ]
+    assert second_message.reply_calls == []
     assert cancel_update.message.reply_calls == [
-        "Cancelled pending input: Rename session title (session-1). "
-        "Discarded pending attachment group (2 items). Nothing was sent to the agent."
+        "Cancelled pending input: Rename session title (session-1). Nothing was sent to the agent."
     ]
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.pending_media_group_stats(123) is None
@@ -2958,11 +2986,106 @@ def test_handle_text_rejects_new_turn_while_background_turn_running():
         blocked_markup = second_update.message.reply_markups[0]
         assert find_inline_button(blocked_markup, "Stop Turn")
         assert find_inline_button(blocked_markup, "Open Bot Status")
+        assert ui_state.get_last_request_text(123, "default") == "Long task"
 
         session._turn_cancelled.set()
         await application.wait_for_tasks()
 
     run(scenario())
+
+
+def test_handle_attachment_rejects_media_group_immediately_while_background_turn_running():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment, handle_text
+
+    async def scenario():
+        session = BlockingCancelableSession(session_id="session-abc")
+        ui_state = TelegramUiState(media_group_settle_seconds=0.01)
+        services, _ = make_services(provider="codex", session=session)
+        application = FakeAsyncApplication()
+
+        start_update = FakeUpdate(user_id=123, text="Long task")
+        await handle_text(start_update, make_context(application=application), services, ui_state)
+        await session.wait_until_started()
+
+        first_message = FakeIncomingMessage(
+            caption="Compare these screenshots",
+            photo=[FakePhotoSize(payload=b"one")],
+            media_group_id="group-running",
+        )
+        second_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(payload=b"two")],
+            media_group_id="group-running",
+        )
+
+        await handle_attachment(
+            FakeUpdate(user_id=123, message=first_message),
+            make_context(application=application),
+            services,
+            ui_state,
+        )
+        await handle_attachment(
+            FakeUpdate(user_id=123, message=second_message),
+            make_context(application=application),
+            services,
+            ui_state,
+        )
+        await asyncio.sleep(0.03)
+
+        session._turn_cancelled.set()
+        await application.wait_for_tasks()
+        return first_message, second_message, ui_state, services
+
+    first_message, second_message, ui_state, services = asyncio.run(scenario())
+
+    assert first_message.reply_calls == [
+        (
+            "Another request is already running (Long task). "
+            "Send /cancel to stop it, open Bot Status to inspect progress, or wait for it to finish. "
+            "This new message was not sent to the agent."
+        )
+    ]
+    blocked_markup = first_message.reply_markups[0]
+    assert find_inline_button(blocked_markup, "Stop Turn")
+    assert find_inline_button(blocked_markup, "Open Bot Status")
+    assert second_message.reply_calls == []
+    assert ui_state.pending_media_group_stats(123) is None
+    assert services.final_session.prompt_items == []
+
+
+def test_handle_attachment_media_group_blocked_by_pending_input_does_not_send_if_input_clears():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_attachment
+
+    async def scenario():
+        ui_state = TelegramUiState(media_group_settle_seconds=0.01)
+        ui_state.set_pending_text_action(123, "rename_history", session_id="session-1", page=0)
+        services, _ = make_services()
+        first_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(payload=b"one")],
+            media_group_id="group-pending-input",
+        )
+        second_message = FakeIncomingMessage(
+            photo=[FakePhotoSize(payload=b"two")],
+            media_group_id="group-pending-input",
+        )
+
+        await handle_attachment(FakeUpdate(user_id=123, message=first_message), None, services, ui_state)
+        ui_state.clear_pending_text_action(123)
+        await handle_attachment(FakeUpdate(user_id=123, message=second_message), None, services, ui_state)
+        await asyncio.sleep(0.03)
+        return services, first_message, second_message, ui_state
+
+    services, first_message, second_message, ui_state = asyncio.run(scenario())
+
+    assert services.final_session.prompt_items == []
+    assert first_message.reply_calls == [
+        "Rename session title (session-1) is waiting for plain text. Send the new session title next, or send /cancel to back out. "
+        "Nothing was sent to the agent."
+    ]
+    blocked_markup = first_message.reply_markups[0]
+    assert find_inline_button(blocked_markup, "Cancel Pending Input")
+    assert find_inline_button(blocked_markup, "Open Bot Status")
+    assert second_message.reply_calls == []
+    assert ui_state.pending_media_group_stats(123) is None
 
 
 def test_handle_text_waits_for_pending_media_group_before_starting_new_turn():

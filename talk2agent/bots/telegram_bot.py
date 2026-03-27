@@ -320,6 +320,7 @@ class TelegramUiState:
     ):
         self._ttl_seconds = ttl_seconds
         self.media_group_settle_seconds = media_group_settle_seconds
+        self._ignored_media_group_ttl_seconds = max(5.0, media_group_settle_seconds * 5.0)
         self._clock = time.monotonic if clock is None else clock
         self._actions: dict[str, _CallbackAction] = {}
         self._pending_text_actions: dict[int, _PendingTextAction] = {}
@@ -329,6 +330,7 @@ class TelegramUiState:
         self._last_turns: dict[int, _ReplayTurn] = {}
         self._last_request_texts: dict[int, _LastRequestText] = {}
         self._media_groups: dict[tuple[int, str], _MediaGroupBuffer] = {}
+        self._ignored_media_groups: dict[tuple[int, str], float] = {}
         self._active_turns: dict[int, _ActiveTurn] = {}
 
     def create(self, user_id: int, action: str, **payload: Any) -> str:
@@ -650,6 +652,7 @@ class TelegramUiState:
             if buffer.task is not None:
                 buffer.task.cancel()
         self._media_groups.clear()
+        self._ignored_media_groups.clear()
 
     def invalidate_session_bound_interactions(self) -> None:
         self._actions.clear()
@@ -669,6 +672,19 @@ class TelegramUiState:
             self._media_groups[key] = buffer
         buffer.messages.append(message)
         return buffer
+
+    def ignore_media_group(self, user_id: int, media_group_id: str) -> bool:
+        self._prune()
+        key = (user_id, media_group_id)
+        already_ignored = key in self._ignored_media_groups
+        self._ignored_media_groups[key] = (
+            self._clock() + self._ignored_media_group_ttl_seconds
+        )
+        return not already_ignored
+
+    def media_group_ignored(self, user_id: int, media_group_id: str) -> bool:
+        self._prune()
+        return (user_id, media_group_id) in self._ignored_media_groups
 
     def replace_media_group_task(
         self,
@@ -738,6 +754,13 @@ class TelegramUiState:
         ]
         for user_id in completed_turn_user_ids:
             self._active_turns.pop(user_id, None)
+        expired_media_groups = [
+            key
+            for key, expires_at in self._ignored_media_groups.items()
+            if expires_at <= now
+        ]
+        for key in expired_media_groups:
+            self._ignored_media_groups.pop(key, None)
 
 
 def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
@@ -1299,6 +1322,13 @@ def _unsupported_message_text(message, *, bundle_chat_active: bool) -> str:
     )
 
 
+def _empty_text_message() -> str:
+    return (
+        "This message was empty after trimming whitespace. "
+        "Send text or an attachment when ready. Nothing was sent to the agent."
+    )
+
+
 async def _reply_session_creation_failed(
     update: Update,
     services,
@@ -1312,6 +1342,26 @@ async def _reply_session_creation_failed(
             update.effective_user.id,
             _prefixed_notice_text(notice, _session_creation_failed_text()),
         )
+
+
+async def _reply_blocked_by_active_turn(
+    message,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+) -> bool:
+    active_turn = ui_state.get_active_turn(user_id)
+    if active_turn is None:
+        return False
+    await _reply_with_menu(
+        message,
+        services,
+        user_id,
+        _turn_busy_notice(active_turn),
+        reply_markup=_active_turn_notice_markup(ui_state, user_id),
+    )
+    return True
 
 
 async def _with_active_store(services, action):
@@ -2375,6 +2425,24 @@ async def handle_text(
         )
         return
 
+    if await _reply_blocked_by_active_turn(
+        update.message,
+        services,
+        ui_state,
+        user_id=user_id,
+    ):
+        return
+
+    stripped_text = text.strip()
+    if not stripped_text:
+        await _reply_with_menu(
+            update.message,
+            services,
+            user_id,
+            _empty_text_message(),
+        )
+        return
+
     try:
         state = await services.snapshot_runtime_state()
     except Exception:
@@ -2395,7 +2463,7 @@ async def handle_text(
         ui_state.set_last_request_text(
             user_id,
             state.workspace_id,
-            text,
+            stripped_text,
             provider=state.provider,
             source_summary=_last_request_bundle_chat_source_summary(len(bundle.items)),
         )
@@ -2404,8 +2472,8 @@ async def handle_text(
             user_id,
             services,
             ui_state,
-            _context_bundle_agent_prompt(tuple(bundle.items), text),
-            title_hint=text,
+            _context_bundle_agent_prompt(tuple(bundle.items), stripped_text),
+            title_hint=stripped_text,
             application=None if context is None else context.application,
         )
         return
@@ -2413,7 +2481,7 @@ async def handle_text(
     ui_state.set_last_request_text(
         user_id,
         state.workspace_id,
-        text,
+        stripped_text,
         provider=state.provider,
         source_summary=_last_request_plain_text_source_summary(),
     )
@@ -2421,7 +2489,7 @@ async def handle_text(
         update,
         services,
         ui_state,
-        text,
+        stripped_text,
         application=None if context is None else context.application,
     )
 
@@ -2441,10 +2509,35 @@ async def handle_attachment(
     user_id = update.effective_user.id
     media_group_id = getattr(update.message, "media_group_id", None)
     if media_group_id:
+        media_group_id = str(media_group_id)
+        if ui_state.media_group_ignored(user_id, media_group_id):
+            return
+        pending_text_action = ui_state.get_pending_text_action(user_id)
+        if pending_text_action is not None:
+            if ui_state.ignore_media_group(user_id, media_group_id):
+                await _reply_with_menu(
+                    update.message,
+                    services,
+                    user_id,
+                    _waiting_for_plain_text_notice(pending_text_action),
+                    reply_markup=_pending_input_notice_markup(ui_state, user_id),
+                )
+            return
+        active_turn = ui_state.get_active_turn(user_id)
+        if active_turn is not None:
+            if ui_state.ignore_media_group(user_id, media_group_id):
+                await _reply_with_menu(
+                    update.message,
+                    services,
+                    user_id,
+                    _turn_busy_notice(active_turn),
+                    reply_markup=_active_turn_notice_markup(ui_state, user_id),
+                )
+            return
         _queue_media_group_attachment(
             message=update.message,
             user_id=user_id,
-            media_group_id=str(media_group_id),
+            media_group_id=media_group_id,
             services=services,
             ui_state=ui_state,
             application=None if context is None else context.application,
@@ -2471,6 +2564,14 @@ async def handle_attachment(
             _pending_media_group_blocked_input_text(pending_media_group_stats),
             reply_markup=_pending_uploads_notice_markup(ui_state, user_id),
         )
+        return
+
+    if await _reply_blocked_by_active_turn(
+        update.message,
+        services,
+        ui_state,
+        user_id=user_id,
+    ):
         return
 
     try:
@@ -4563,6 +4664,14 @@ async def _flush_media_group_after_delay(
         )
         return
 
+    if await _reply_blocked_by_active_turn(
+        lead_message,
+        services,
+        ui_state,
+        user_id=user_id,
+    ):
+        return
+
     try:
         prompt = await _build_media_group_prompt(messages)
     except AttachmentPromptError as exc:
@@ -5742,7 +5851,7 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
     )
 
     final_reply_markup = None
-    if response.stop_reason != "cancelled" and workspace_changes_follow_up_git_status is None:
+    if workspace_changes_follow_up_git_status is None:
         final_reply_markup = _completed_turn_reply_markup(
             ui_state,
             user_id=user_id,

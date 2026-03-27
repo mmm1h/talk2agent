@@ -105,6 +105,8 @@
 2. 发送同一 `media_group_id` 的多附件，确认它们被合并为一次 ACP 回合。
    再打开一次 `Bot Status`，确认在附件组尚未真正送出前，状态顶部会明确显示这是待发送上传，并提供 `Discard Pending Uploads`。
 3. 发起一个持续几秒的请求，确认 `Bot Status` 能显示运行中状态并允许 `Stop Turn`。
+   再在 turn 运行中分别发送一条普通文本、一个单附件和一个 Telegram 相册，确认 bot 都会立即提示“这条新消息没有发出去”，而不是悄悄排队；其中被挡住的文本也不应覆盖已有 `Last Request`。
+   再执行一次 `/cancel` 或 `Stop Turn`，确认最终的取消回显本身会带上 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`，而不是只剩一条终点文案。
 4. 发起一个足够长的流式回合，确认 Telegram Draft 预览在超长时会明确用省略号表示当前只显示尾部进度，而不是无提示截断。
    再人为模拟一次 Draft 预览不可用，确认 bot 仍会立即发出“正在处理”的普通消息，而不是在最终回复前完全静默。
 5. 发送一条足够长、会超过 Telegram 文本上限的请求结果，确认 bot 会优先按段落、换行或空格分段，而不是把一句完整的话硬切成难读碎片。
@@ -113,6 +115,7 @@
    同时确认这类阻断提示会直接附上 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads` 或 `Open Bot Status` 之类的恢复按钮，而不是只给文字说明。
 8. 发送 sticker、location、contact、poll、GIF、video note 或 dice，确认 bot 不会无响应，而是明确提示改发文本、图片、文档、音频或视频，并给出 `/help` 或 `/start` 的恢复路径；如果当前正在等待纯文本，仍应优先提示继续发送纯文本，并点名当前待完成的动作。
    对附件过大、附件降级失败等本地校验错误，也确认提示会保留 `Open Bot Status` 恢复入口。
+   再发送一条只包含空格或换行的纯文本，确认 bot 会明确提示这条消息在去掉空白后为空，且不会启动新 session 或新 turn。
 
 ## 回归出口
 
