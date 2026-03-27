@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
+import logging
 import mimetypes
 import re
 import secrets
@@ -51,22 +53,25 @@ from talk2agent.workspace_files import (
 )
 
 
-BUTTON_NEW_SESSION = "New Session"
-BUTTON_BOT_STATUS = "Bot Status"
-BUTTON_HELP = "Help"
-BUTTON_CANCEL_OR_STOP = "Cancel / Stop"
-BUTTON_RETRY_LAST_TURN = "Retry Last Turn"
-BUTTON_FORK_LAST_TURN = "Fork Last Turn"
-BUTTON_SESSION_HISTORY = "Session History"
-BUTTON_AGENT_COMMANDS = "Agent Commands"
-BUTTON_MODEL_MODE = "Model / Mode"
-BUTTON_WORKSPACE_FILES = "Workspace Files"
-BUTTON_WORKSPACE_SEARCH = "Workspace Search"
-BUTTON_WORKSPACE_CHANGES = "Workspace Changes"
-BUTTON_CONTEXT_BUNDLE = "Context Bundle"
-BUTTON_RESTART_AGENT = "Restart Agent"
-BUTTON_SWITCH_AGENT = "Switch Agent"
-BUTTON_SWITCH_WORKSPACE = "Switch Workspace"
+logger = logging.getLogger(__name__)
+
+
+BUTTON_NEW_SESSION = "新建会话"
+BUTTON_BOT_STATUS = "状态中心"
+BUTTON_HELP = "帮助"
+BUTTON_CANCEL_OR_STOP = "取消 / 停止"
+BUTTON_RETRY_LAST_TURN = "重试上一轮"
+BUTTON_FORK_LAST_TURN = "分叉上一轮"
+BUTTON_SESSION_HISTORY = "会话历史"
+BUTTON_AGENT_COMMANDS = "Agent 命令"
+BUTTON_MODEL_MODE = "模型 / 模式"
+BUTTON_WORKSPACE_FILES = "工作区文件"
+BUTTON_WORKSPACE_SEARCH = "工作区搜索"
+BUTTON_WORKSPACE_CHANGES = "工作区变更"
+BUTTON_CONTEXT_BUNDLE = "上下文包"
+BUTTON_RESTART_AGENT = "重启 Agent"
+BUTTON_SWITCH_AGENT = "切换 Agent"
+BUTTON_SWITCH_WORKSPACE = "切换工作区"
 
 CALLBACK_PREFIX = "menu:"
 HISTORY_PAGE_SIZE = 5
@@ -90,10 +95,10 @@ _RESERVED_COMMAND_ALIASES = {
     DEBUG_STATUS_COMMAND,
 }
 _LOCAL_MENU_COMMAND_SPECS = (
-    (START_COMMAND, "Open the welcome screen and restore bot controls"),
-    (STATUS_COMMAND, "Open Bot Status with runtime state, recovery, and shortcuts"),
-    (HELP_COMMAND, "Show a quick guide to commands, recovery, and workspace tools"),
-    (CANCEL_COMMAND, "Cancel pending input, stop a turn, or leave bundle chat"),
+    (START_COMMAND, "恢复欢迎页与主键盘"),
+    (STATUS_COMMAND, "打开状态中心，查看运行态、恢复入口与工作区上下文"),
+    (HELP_COMMAND, "查看快速帮助、术语说明与恢复入口"),
+    (CANCEL_COMMAND, "取消待输入、停止当前回合或退出 Bundle Chat"),
 )
 MAX_PUBLIC_COMMANDS = 100
 ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024
@@ -132,6 +137,7 @@ TOOL_ACTIVITY_PATH_BUTTON_LIMIT = 3
 TOOL_ACTIVITY_TERMINAL_PREVIEW_LIMIT = 2
 TOOL_ACTIVITY_OUTPUT_PREVIEW_LIMIT = 600
 WORKSPACE_RUNTIME_SERVER_PREVIEW_LIMIT = 8
+LOG_TEXT_SNIPPET_LIMIT = 120
 _TEXT_DOCUMENT_SUFFIXES = {
     ".c",
     ".cfg",
@@ -166,6 +172,373 @@ _TEXT_DOCUMENT_SUFFIXES = {
     ".yaml",
     ".yml",
 }
+
+
+_BUTTON_LABEL_LOCALIZATIONS = {
+    "Stop Turn": "停止当前回合",
+    "Cancel Pending Input": "取消待输入",
+    "Discard Pending Uploads": "丢弃待上传",
+    "Bundle + Last Request": "上下文包 + 上次请求",
+    "Ask Agent With Context": "带上下文提问",
+    "Context Bundle": "上下文包",
+    "Run Last Request": "重跑上次请求",
+    "Last Request": "上次请求",
+    "Retry Last Turn": "重试上一轮",
+    "Fork Last Turn": "分叉上一轮",
+    "Refresh": "刷新",
+    "Session History": "会话历史",
+    "Provider Sessions": "Provider 会话",
+    "Switch Agent": "切换 Agent",
+    "Switch Workspace": "切换工作区",
+    "Stop Bundle Chat": "停止 Bundle Chat",
+    "Start Bundle Chat": "开启 Bundle Chat",
+    "New Session": "新建会话",
+    "Restart Agent": "重启 Agent",
+    "Fork Session": "分叉会话",
+    "Last Turn": "上一轮详情",
+    "Session Info": "会话信息",
+    "Model / Mode": "模型 / 模式",
+    "Workspace Runtime": "工作区运行态",
+    "Usage": "用量",
+    "Agent Plan": "Agent 计划",
+    "Tool Activity": "工具活动",
+    "Clear Bundle": "清空上下文包",
+    "Ask With Last Request": "用上次请求提问",
+    "Agent Commands": "Agent 命令",
+    "Workspace Files": "工作区文件",
+    "Workspace Search": "工作区搜索",
+    "Workspace Changes": "工作区变更",
+    "Search Again": "再搜一次",
+    "Try Again": "再试一次",
+    "Cancel Ask": "取消提问",
+    "Cancel Search": "取消搜索",
+    "Cancel Command": "取消命令",
+    "Current Session": "当前会话",
+    "Run Session": "进入会话",
+    "Rename Session": "重命名会话",
+    "Delete Session": "删除会话",
+    "Run+Retry Session": "进入并重试",
+    "Fork+Retry Session": "进入并分叉",
+    "Enter Args": "填写参数",
+    "Run Command": "执行命令",
+    "Current Model": "当前模型",
+    "Current Mode": "当前模式",
+    "Use Model": "使用模型",
+    "Use Mode": "使用模式",
+    "Use Model + Retry": "使用模型并重试",
+    "Use Mode + Retry": "使用模式并重试",
+    "Ask Agent With Visible Files": "带可见文件提问",
+    "Start Bundle Chat With Visible Files": "用可见文件开启 Bundle Chat",
+    "Add Visible Files to Context": "可见文件加入上下文",
+    "Ask Agent With Matching Files": "带匹配文件提问",
+    "Start Bundle Chat With Matching Files": "用匹配文件开启 Bundle Chat",
+    "Add Matching Files to Context": "匹配文件加入上下文",
+    "Ask Agent About File": "针对文件提问",
+    "Start Bundle Chat With File": "用文件开启 Bundle Chat",
+    "Add File to Context": "文件加入上下文",
+    "Ask Agent About Change": "针对变更提问",
+    "Start Bundle Chat With Change": "用变更开启 Bundle Chat",
+    "Add Change to Context": "变更加入上下文",
+    "Ask Agent With Current Changes": "带当前变更提问",
+    "Start Bundle Chat With Changes": "用变更开启 Bundle Chat",
+    "Add All Changes to Context": "全部变更加入上下文",
+    "Open Workspace Changes": "打开工作区变更",
+    "Reopen Model / Mode": "重新打开模型 / 模式",
+    "Back": "返回",
+    "Up": "上一级",
+    "Prev": "上一页",
+    "Next": "下一页",
+}
+_BUTTON_LABEL_SUBJECT_LOCALIZATIONS = {
+    "Bot Status": "状态中心",
+    "Context Bundle": "上下文包",
+    "History": "会话历史",
+    "Provider Sessions": "Provider 会话",
+    "Switch Agent": "切换 Agent",
+    "Switch Workspace": "切换工作区",
+    "Workspace Runtime": "工作区运行态",
+    "Session Info": "会话信息",
+    "Agent Commands": "Agent 命令",
+    "Agent Plan": "Agent 计划",
+    "Tool Activity": "工具活动",
+    "Folder": "文件夹",
+    "File": "文件",
+    "Search": "搜索结果",
+    "Changes": "变更列表",
+    "Change": "变更详情",
+    "Change Update": "变更更新",
+    "Model / Mode": "模型 / 模式",
+    "Last Turn": "上一轮详情",
+}
+
+
+def _localized_button_subject(text: str) -> str:
+    return _BUTTON_LABEL_SUBJECT_LOCALIZATIONS.get(text, text)
+
+
+def _localized_button_text(text: str) -> str:
+    localized = _BUTTON_LABEL_LOCALIZATIONS.get(text)
+    if localized is not None:
+        return localized
+    if text.startswith("Current Model: "):
+        return f"当前模型：{text[len('Current Model: '):]}"
+    if text.startswith("Current Mode: "):
+        return f"当前模式：{text[len('Current Mode: '):]}"
+    if text.startswith("Current "):
+        return f"当前 {text[len('Current '):]}"
+    if text.startswith("Model: "):
+        return f"模型：{text[len('Model: '):]}"
+    if text.startswith("Mode: "):
+        return f"模式：{text[len('Mode: '):]}"
+    if text.startswith("Current: "):
+        return f"当前：{text[len('Current: '):]}"
+    if text.startswith("Switch to "):
+        return f"切到 {text[len('Switch to '):]}"
+    if text.startswith("Switch+Retry "):
+        return f"切换并重试 {text[len('Switch+Retry '):]}"
+    if text.startswith("Switch "):
+        return f"切换到 {text[len('Switch '):]}"
+    if text.startswith("Retry on "):
+        return f"在 {text[len('Retry on '):]} 上重试"
+    if text.startswith("Fork on "):
+        return f"在 {text[len('Fork on '):]} 上分叉"
+    if text.startswith("Back to "):
+        return f"返回{_localized_button_subject(text[len('Back to '):])}"
+    if text.startswith("Open Model "):
+        return f"查看模型 {text[len('Open Model '):]}"
+    if text.startswith("Open Mode "):
+        return f"查看模式 {text[len('Open Mode '):]}"
+    if text.startswith("Open File "):
+        return f"打开文件 {text[len('Open File '):]}"
+    if text.startswith("Open Change "):
+        return f"打开变更 {text[len('Open Change '):]}"
+    if text.startswith("Open "):
+        subject = text[len("Open ") :]
+        localized_subject = _localized_button_subject(subject)
+        if localized_subject == subject and re.fullmatch(r"\d+", subject):
+            return f"打开 {subject}"
+        return f"打开{localized_subject}"
+    if text.startswith("Run+Retry "):
+        return f"执行并重试 {text[len('Run+Retry '):]}"
+    if text.startswith("Fork+Retry "):
+        return f"分叉并重试 {text[len('Fork+Retry '):]}"
+    if text.startswith("Run "):
+        return f"执行 {text[len('Run '):]}"
+    if text.startswith("Fork "):
+        return f"分叉 {text[len('Fork '):]}"
+    if text.startswith("Delete "):
+        return f"删除 {text[len('Delete '):]}"
+    if text.startswith("Rename "):
+        return f"重命名 {text[len('Rename '):]}"
+    if text.startswith("Remove "):
+        return f"移除 {text[len('Remove '):]}"
+    if text.startswith("Args "):
+        return f"参数 {text[len('Args '):]}"
+    if text.startswith("Model+Retry: "):
+        return f"模型并重试：{text[len('Model+Retry: '):]}"
+    if text.startswith("Mode+Retry: "):
+        return f"模式并重试：{text[len('Mode+Retry: '):]}"
+    return text
+
+
+def _with_cn_hint(en_text: str, cn_text: str | None = None) -> str:
+    if not cn_text:
+        return en_text
+    return f"{cn_text}\n{en_text}"
+
+
+def _view_heading(en_text: str, cn_text: str) -> str:
+    return _with_cn_hint(en_text, cn_text)
+
+
+def _kv_hint(
+    label_en: str,
+    value_en: Any,
+    label_cn: str,
+    value_cn: Any | None = None,
+) -> str:
+    cn_value = value_en if value_cn is None else value_cn
+    return _with_cn_hint(
+        f"{label_en}: {value_en}",
+        f"{label_cn}：{cn_value}",
+    )
+
+
+def _cn_yes_no(value: bool) -> str:
+    return "是" if value else "否"
+
+
+def _cn_on_off(value: bool) -> str:
+    return "开启" if value else "关闭"
+
+
+_PAGED_LIST_TOTAL_LABEL_LOCALIZATIONS = {
+    "Local sessions": "本地会话",
+    "Prompt items": "输入项",
+    "Plan items": "计划项",
+    "Recent tools": "最近工具",
+    "Commands": "命令数",
+    "Entries": "条目数",
+    "Matches": "匹配结果",
+    "Changes": "变更数",
+}
+
+
+def _localized_total_label(text: str) -> str:
+    return _PAGED_LIST_TOTAL_LABEL_LOCALIZATIONS.get(text, text)
+
+
+def _log_text_snippet(text: Any, *, limit: int = LOG_TEXT_SNIPPET_LIMIT) -> str | None:
+    if text is None:
+        return None
+    normalized = " ".join(str(text).split())
+    if not normalized:
+        return None
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: max(0, limit - 3)]}..."
+
+
+def _message_kind_for_log(message) -> str:
+    if getattr(message, "text", None):
+        text = str(message.text)
+        if text.startswith("/"):
+            return "command"
+        return "text"
+    if getattr(message, "photo", None):
+        return "photo"
+    if getattr(message, "document", None) is not None:
+        return "document"
+    if getattr(message, "voice", None) is not None:
+        return "voice"
+    if getattr(message, "audio", None) is not None:
+        return "audio"
+    if getattr(message, "video", None) is not None:
+        return "video"
+    if getattr(message, "sticker", None) is not None:
+        return "sticker"
+    if getattr(message, "location", None) is not None:
+        return "location"
+    if getattr(message, "contact", None) is not None:
+        return "contact"
+    if getattr(message, "poll", None) is not None:
+        return "poll"
+    return "message"
+
+
+def _message_log_fields(message, *, user_id: int | None = None) -> dict[str, Any]:
+    chat = getattr(message, "chat", None)
+    fields = {
+        "user_id": user_id,
+        "chat_id": getattr(message, "chat_id", None) or getattr(chat, "id", None),
+        "message_id": getattr(message, "message_id", None),
+        "kind": _message_kind_for_log(message),
+        "text": _log_text_snippet(getattr(message, "text", None)),
+        "caption": _log_text_snippet(getattr(message, "caption", None)),
+        "media_group_id": getattr(message, "media_group_id", None),
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _update_log_fields(update: Update | Any) -> dict[str, Any]:
+    user = getattr(update, "effective_user", None)
+    fields = {
+        "update_id": getattr(update, "update_id", None),
+        "user_id": getattr(user, "id", None),
+    }
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        fields["callback_data"] = _log_text_snippet(getattr(query, "data", None))
+        message = getattr(query, "message", None)
+        if message is not None:
+            fields.update(_message_log_fields(message, user_id=fields["user_id"]))
+        fields["kind"] = "callback_query"
+        return {key: value for key, value in fields.items() if value is not None}
+
+    message = getattr(update, "message", None)
+    if message is not None:
+        fields.update(_message_log_fields(message, user_id=fields["user_id"]))
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _runtime_log_fields(state) -> dict[str, Any]:
+    return {
+        "provider": getattr(state, "provider", None),
+        "workspace_id": getattr(state, "workspace_id", None),
+        "workspace_path": getattr(state, "workspace_path", None),
+    }
+
+
+def _session_log_fields(session) -> dict[str, Any]:
+    return {"session_id": getattr(session, "session_id", None)}
+
+
+def _log_fields_text(fields: dict[str, Any]) -> str:
+    return json.dumps(
+        {key: value for key, value in fields.items() if value is not None},
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _log_telegram_event(
+    event: str,
+    *,
+    level: int = logging.INFO,
+    update: Update | Any | None = None,
+    message=None,
+    user_id: int | None = None,
+    state=None,
+    session=None,
+    **extra: Any,
+) -> None:
+    fields: dict[str, Any] = {}
+    if update is not None:
+        fields.update(_update_log_fields(update))
+    elif message is not None:
+        fields.update(_message_log_fields(message, user_id=user_id))
+    if state is not None:
+        fields.update(_runtime_log_fields(state))
+    if session is not None:
+        fields.update(_session_log_fields(session))
+    for key, value in extra.items():
+        if value is not None:
+            fields[key] = value
+    logger.log(level, "telegram_%s %s", event, _log_fields_text(fields))
+
+
+def _log_telegram_exception(
+    event: str,
+    error: BaseException,
+    *,
+    level: int = logging.ERROR,
+    update: Update | Any | None = None,
+    message=None,
+    user_id: int | None = None,
+    state=None,
+    session=None,
+    **extra: Any,
+) -> None:
+    fields: dict[str, Any] = {}
+    if update is not None:
+        fields.update(_update_log_fields(update))
+    elif message is not None:
+        fields.update(_message_log_fields(message, user_id=user_id))
+    if state is not None:
+        fields.update(_runtime_log_fields(state))
+    if session is not None:
+        fields.update(_session_log_fields(session))
+    for key, value in extra.items():
+        if value is not None:
+            fields[key] = value
+    logger.log(
+        level,
+        "telegram_%s %s",
+        event,
+        _log_fields_text(fields),
+        exc_info=(type(error), error, error.__traceback__),
+    )
 
 
 @dataclass(slots=True)
@@ -783,14 +1156,43 @@ class TelegramUiState:
             self._ignored_media_groups.pop(key, None)
 
 
-def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
-    rows = [
-        [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
-        [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
-        [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
-        [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+def _bind_services_ui_state(services, ui_state: TelegramUiState) -> None:
+    try:
+        setattr(services, "_telegram_ui_state", ui_state)
+    except Exception:
+        pass
+
+
+def _main_menu_rows(*, include_replay_row: bool) -> list[list[str]]:
+    rows = [[BUTTON_NEW_SESSION, BUTTON_BOT_STATUS]]
+    if include_replay_row:
+        rows.append([BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN])
+    rows.extend(
+        [
+            [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
+            [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
+        ]
+    )
+    return rows
+
+
+async def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
+    include_replay_row = True
+    ui_state = getattr(services, "_telegram_ui_state", None)
+    if ui_state is not None:
+        try:
+            state = await services.snapshot_runtime_state()
+        except Exception:
+            state = None
+        if state is not None:
+            include_replay_row = (
+                ui_state.get_last_turn(user_id, state.provider, state.workspace_id) is not None
+            )
+    return ReplyKeyboardMarkup(
+        _main_menu_rows(include_replay_row=include_replay_row),
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
 
 def _is_authorized(update: Update, services) -> bool:
@@ -897,11 +1299,23 @@ async def _sync_agent_commands_for_session(
                 commands = tuple(
                     await wait_for_available_commands(COMMAND_DISCOVERY_TIMEOUT_SECONDS)
                 )
-            except Exception:
+            except Exception as exc:
+                _log_telegram_exception(
+                    "wait_for_available_commands_failed",
+                    exc,
+                    user_id=user_id,
+                    session=session,
+                )
                 commands = tuple(getattr(session, "available_commands", ()) or ())
     try:
         await _sync_agent_commands_for_user(application, ui_state, user_id, commands)
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "sync_agent_commands_for_session_failed",
+            exc,
+            user_id=user_id,
+            session=session,
+        )
         pass
 
 
@@ -917,11 +1331,21 @@ async def _sync_discovered_agent_commands_for_user(
         commands = await services.discover_agent_commands(
             timeout_seconds=COMMAND_DISCOVERY_TIMEOUT_SECONDS
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "discover_agent_commands_failed",
+            exc,
+            user_id=user_id,
+        )
         commands = ()
     try:
         await _sync_agent_commands_for_user(application, ui_state, user_id, commands)
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "sync_discovered_agent_commands_failed",
+            exc,
+            user_id=user_id,
+        )
         pass
 
 
@@ -953,21 +1377,24 @@ async def _sync_agent_commands_for_all_users(application, services, ui_state: Te
         commands = await services.discover_agent_commands(
             timeout_seconds=COMMAND_DISCOVERY_TIMEOUT_SECONDS
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("discover_agent_commands_for_all_users_failed", exc)
         commands = ()
     for user_id in services.allowed_user_ids:
         await _sync_agent_commands_for_user(application, ui_state, user_id, commands)
 
 
 async def _reply_with_menu(message, services, user_id: int, text: str, *, reply_markup=None):
-    markup = _main_menu_markup(user_id, services) if reply_markup is None else reply_markup
+    markup = await _main_menu_markup(user_id, services) if reply_markup is None else reply_markup
     await message.reply_text(text, reply_markup=markup)
 
 
 def _stale_callback_recovery_text() -> str:
-    return (
+    return _with_cn_hint(
         "That menu is out of date. Restored the current keyboard. "
-        "Open Bot Status for the latest controls, or use /start for the welcome screen."
+        "Open Bot Status for the latest controls, or use /start for the welcome screen.",
+        "这张菜单已经过期。我已经把当前主键盘恢复给你。"
+        "如果你要看最新控制项，就打开状态中心；如果你想回欢迎页，就用 /start。",
     )
 
 
@@ -1058,21 +1485,30 @@ def _active_turn_notice_markup(
 
 
 def _unauthorized_text() -> str:
-    return "Access denied. Ask the operator to allow your Telegram user ID."
+    return _with_cn_hint(
+        "Access denied. Ask the operator to allow your Telegram user ID.",
+        "访问被拒绝：请联系操作者把你的 Telegram 用户 ID 加入白名单。",
+    )
 
 
 def _unknown_action_text() -> str:
-    return (
+    return _with_cn_hint(
         "This action is no longer available because that menu is out of date. "
-        "Reopen the latest menu or use /start."
+        "Reopen the latest menu or use /start.",
+        "这个动作已经失效，因为对应菜单过期了。"
+        "请重新打开最新菜单，或直接使用 /start。",
     )
 
 
 def _button_not_for_you_text() -> str:
-    return "This button belongs to another user. Reopen the menu from your own chat or use /start there."
+    return _with_cn_hint(
+        "This button belongs to another user. Reopen the menu from your own chat or use /start there.",
+        "这个按钮属于另一位用户。请在你自己的聊天里重新打开菜单，或在那里使用 /start。",
+    )
 
 
 async def _reply_unauthorized(update: Update) -> None:
+    _log_telegram_event("unauthorized", level=logging.WARNING, update=update)
     if update.message is not None:
         await update.message.reply_text(_unauthorized_text())
 
@@ -1088,115 +1524,186 @@ async def _reply_request_failed(update: Update, services) -> None:
 
 
 def _request_failed_text() -> str:
-    return "Request failed. Try again, use /start, or open Bot Status."
+    return _with_cn_hint(
+        "Request failed. Try again, use /start, or open Bot Status.",
+        "请求失败。请重试，或使用 /start / 打开状态中心继续恢复。",
+    )
 
 
 def _expired_button_text() -> str:
-    return (
+    return _with_cn_hint(
         "This button has expired because that menu is out of date. "
-        "Reopen the latest menu or use /start."
+        "Reopen the latest menu or use /start.",
+        "这个按钮已经过期，因为对应菜单不是最新的。"
+        "请重新打开最新菜单，或直接使用 /start。",
     )
 
 
 def _context_bundle_empty_text() -> str:
-    return "Context bundle is empty. Add files or changes first."
+    return _with_cn_hint(
+        "Context bundle is empty. Add files or changes first.",
+        "上下文包当前为空。请先添加文件或工作区变更。",
+    )
 
 
 def _no_previous_request_text() -> str:
-    return "No previous request is available in this workspace yet. Send a new request first."
+    return _with_cn_hint(
+        "No previous request is available in this workspace yet. Send a new request first.",
+        "当前工作区还没有可复用的上次请求。请先发送一条新请求。",
+    )
 
 
 def _no_previous_turn_text() -> str:
-    return "No previous turn is available yet. Send a new request first, then try again."
+    return _with_cn_hint(
+        "No previous turn is available yet. Send a new request first, then try again.",
+        "当前还没有可复用的上一轮。请先发送一条新请求，再回来重试。",
+    )
 
 
 def _no_active_session_text() -> str:
-    return "No active session. Send text or an attachment to start one."
+    return _with_cn_hint(
+        "No active session. Send text or an attachment to start one.",
+        "当前没有活跃会话。直接发送文本或附件即可开始。",
+    )
 
 
 def _switch_session_failed_text() -> str:
-    return "Couldn't switch to that session. Try again, reopen Session History, or start a new session."
+    return _with_cn_hint(
+        "Couldn't switch to that session. Try again, reopen Session History, or start a new session.",
+        "切换到该会话失败。请重试，重新打开会话历史，或直接新建会话。",
+    )
 
 
 def _fork_session_failed_text() -> str:
-    return "Couldn't fork that session. Try again or start a new session."
+    return _with_cn_hint(
+        "Couldn't fork that session. Try again or start a new session.",
+        "分叉该会话失败。请重试，或直接新建会话。",
+    )
 
 
 def _switch_provider_session_failed_text() -> str:
-    return "Couldn't switch to that provider session. Try again or reopen Provider Sessions."
+    return _with_cn_hint(
+        "Couldn't switch to that provider session. Try again or reopen Provider Sessions.",
+        "切换到该 Provider 会话失败。请重试，或重新打开 Provider 会话列表。",
+    )
 
 
 def _fork_provider_session_failed_text() -> str:
-    return "Couldn't fork that provider session. Try again or reopen Provider Sessions."
+    return _with_cn_hint(
+        "Couldn't fork that provider session. Try again or reopen Provider Sessions.",
+        "分叉该 Provider 会话失败。请重试，或重新打开 Provider 会话列表。",
+    )
 
 
 def _selection_update_failed_text() -> str:
-    return "Couldn't update model or mode. Try again or reopen Model / Mode."
+    return _with_cn_hint(
+        "Couldn't update model or mode. Try again or reopen Model / Mode.",
+        "更新模型或模式失败。请重试，或重新打开模型 / 模式。",
+    )
 
 
 def _model_mode_load_failed_text() -> str:
-    return "Couldn't load Model / Mode. Try again or go back to Bot Status."
+    return _with_cn_hint(
+        "Couldn't load Model / Mode. Try again or go back to Bot Status.",
+        "加载模型 / 模式失败。请重试，或返回状态中心。",
+    )
 
 
 def _session_creation_failed_text() -> str:
-    return "Couldn't start a session. Try again, use /start, or open Bot Status."
+    return _with_cn_hint(
+        "Couldn't start a session. Try again, use /start, or open Bot Status.",
+        "启动会话失败。请重试，或使用 /start / 打开状态中心继续恢复。",
+    )
 
 
 def _switch_agent_failed_text() -> str:
-    return "Couldn't switch agent. Try again or choose another agent."
+    return _with_cn_hint(
+        "Couldn't switch agent. Try again or choose another agent.",
+        "切换 Agent 失败。请重试，或改选另一个 Agent。",
+    )
 
 
 def _switch_workspace_failed_text() -> str:
-    return "Couldn't switch workspace. Try again or choose another workspace."
+    return _with_cn_hint(
+        "Couldn't switch workspace. Try again or choose another workspace.",
+        "切换工作区失败。请重试，或改选另一个工作区。",
+    )
 
 
 def _runtime_status_refresh_failed_text() -> str:
-    return "Couldn't refresh Bot Status. Reopen Bot Status to confirm the latest state."
+    return _with_cn_hint(
+        "Couldn't refresh Bot Status. Reopen Bot Status to confirm the latest state.",
+        "刷新状态中心失败。请重新打开状态中心确认最新状态。",
+    )
 
 
 def _runtime_status_refresh_degraded_notice(notice: str) -> str:
-    return f"{notice} Reopen Bot Status to confirm the latest state."
+    return _prefixed_notice_text(
+        notice,
+        _with_cn_hint(
+            "Reopen Bot Status to confirm the latest state.",
+            "请重新打开状态中心确认最新状态。",
+        ),
+    )
 
 
 def _stop_turn_failed_text() -> str:
-    return "Couldn't stop the current turn. Try again or reopen Bot Status."
+    return _with_cn_hint(
+        "Couldn't stop the current turn. Try again or reopen Bot Status.",
+        "停止当前回合失败。请重试，或重新打开状态中心。",
+    )
 
 
 def _bundle_chat_update_failed_text() -> str:
-    return "Couldn't update bundle chat. Reopen Bot Status and try again."
+    return _with_cn_hint(
+        "Couldn't update bundle chat. Reopen Bot Status and try again.",
+        "更新 Bundle Chat 失败。请重新打开状态中心后再试。",
+    )
 
 
 def _delete_session_failed_text() -> str:
-    return "Couldn't delete that session. Try again or reopen Session History."
+    return _with_cn_hint(
+        "Couldn't delete that session. Try again or reopen Session History.",
+        "删除该会话失败。请重试，或重新打开会话历史。",
+    )
 
 
 def _empty_media_group_text() -> str:
-    return (
+    return _with_cn_hint(
         "Telegram didn't deliver any usable attachments from that album. "
-        "Send the album again. Nothing was sent to the agent."
+        "Send the album again. Nothing was sent to the agent.",
+        "Telegram 这次没有从相册里送达任何可用附件。"
+        "请重新发送这个相册；当前没有任何内容发给 agent。",
     )
 
 
 def _unsupported_attachment_for_turn_text() -> str:
-    return (
+    return _with_cn_hint(
         "This attachment type can't be sent in this chat flow. Send a photo, document, audio, "
         "voice note, or video instead, use /help for supported flows, or use /start to reopen "
-        "the main keyboard. Nothing was sent to the agent."
+        "the main keyboard. Nothing was sent to the agent.",
+        "当前聊天流里不支持这类附件。请改发图片、文档、音频、语音或视频；"
+        "需要查看支持流程请用 /help，想恢复主键盘请用 /start。"
+        "这次没有任何内容发给 agent。",
     )
 
 
 def _attachment_too_large_text() -> str:
     limit_mib = ATTACHMENT_MAX_BYTES // (1024 * 1024)
-    return (
+    return _with_cn_hint(
         f"This attachment is larger than the {limit_mib} MiB bot limit. "
-        "Send a smaller file or compress it before retrying. Nothing was sent to the agent."
+        "Send a smaller file or compress it before retrying. Nothing was sent to the agent.",
+        f"这个附件超过了 bot 的 {limit_mib} MiB 大小限制。"
+        "请压缩后重发，或换一个更小的文件；这次没有任何内容发给 agent。",
     )
 
 
 def _workspace_fallback_save_failed_text() -> str:
-    return (
+    return _with_cn_hint(
         "Couldn't save the attachment into the current workspace for fallback handling. "
-        "Try again or send a different file if possible. Nothing was sent to the agent."
+        "Try again or send a different file if possible. Nothing was sent to the agent.",
+        "无法把附件保存到当前工作区作为降级处理。"
+        "请重试，或换一个文件；这次没有任何内容发给 agent。",
     )
 
 
@@ -1209,58 +1716,119 @@ def _saved_attachment_notice_text(
     if count <= 0:
         raise ValueError("saved attachment notice requires at least one context item")
 
+    saved_summary_en = "this saved item" if count == 1 else f"these {count} saved items"
+    saved_summary_cn = "这项已保存内容" if count == 1 else f"这 {count} 项已保存内容"
     if count == 1:
         lines = [
-            (
-                "The request did not finish, but this attachment was saved in the workspace and "
+            _with_cn_hint(
+                "This request did not finish, but the attachment was saved in the workspace and "
                 "added to Context Bundle."
-            )
-            if recovery
-            else (
-                "This attachment couldn't be sent directly to the current agent, so it was "
-                "saved in the workspace and added to Context Bundle."
+                if recovery
+                else (
+                    "This attachment couldn't be sent directly to the current agent, so it was "
+                    "saved in the workspace and added to Context Bundle."
+                ),
+                "这次请求虽然没有完整结束，但这个附件已经保存到工作区，并加入了 Context Bundle。"
+                if recovery
+                else "这个附件暂时不能直接发给当前 Agent，所以我已把它保存到工作区，并加入了 Context Bundle。",
             )
         ]
         lines.append(
-            "You can retry without uploading it again."
-            if recovery
-            else "You can reuse it in follow-up turns."
+            _with_cn_hint(
+                "You can continue without uploading it again."
+                if recovery
+                else "You can reuse it in follow-up turns.",
+                "后续继续时不需要重新上传这个附件。"
+                if recovery
+                else "后续回合里你可以直接继续复用这个附件。",
+            )
         )
     else:
         lines = [
-            (
-                f"The request did not finish, but these {count} attachments were saved in the "
-                "workspace and added to Context Bundle."
-            )
-            if recovery
-            else (
-                f"These {count} attachments couldn't be sent directly to the current agent, so they "
-                "were saved in the workspace and added to Context Bundle."
+            _with_cn_hint(
+                (
+                    f"The request did not finish, but these {count} attachments were saved in the "
+                    "workspace and added to Context Bundle."
+                )
+                if recovery
+                else (
+                    f"These {count} attachments couldn't be sent directly to the current agent, so they "
+                    "were saved in the workspace and added to Context Bundle."
+                ),
+                f"这次请求虽然没有完整结束，但这 {count} 个附件都已保存到工作区，并加入了 Context Bundle。"
+                if recovery
+                else f"这 {count} 个附件暂时不能直接发给当前 Agent，所以我已把它们保存到工作区，并加入了 Context Bundle。",
             )
         ]
         lines.append(
-            "You can retry without uploading them again."
-            if recovery
-            else "You can reuse them in follow-up turns."
+            _with_cn_hint(
+                "You can continue without uploading them again."
+                if recovery
+                else "You can reuse them in follow-up turns.",
+                "后续继续时不需要重新上传这些附件。"
+                if recovery
+                else "后续回合里你可以直接继续复用这些附件。",
+            )
         )
 
+    lines.append(_with_cn_hint("Saved items:", "已保存内容："))
     preview_items = saved_context_items[:3]
     for index, item in enumerate(preview_items, start=1):
         lines.append(f"{index}. {_context_bundle_item_label(item)}")
     remaining = count - len(preview_items)
     if remaining > 0:
-        lines.append(f"... {remaining} more {_count_noun(remaining, 'item', 'items')}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more {_count_noun(remaining, 'item', 'items')}",
+                f"……另外还有 {remaining} 项",
+            )
+        )
 
-    lines.append("Open Context Bundle to inspect them, or open Bot Status to keep going.")
+    lines.append(
+        _with_cn_hint(
+            "Recommended next step: Ask Agent With Context to continue now, or start Bundle Chat "
+            f"so the next plain-text message carries {saved_summary_en} automatically.",
+            "建议下一步：如果你想现在继续，就直接点“带上下文提问”；如果你想让下一条纯文本自动带上"
+            f"{saved_summary_cn}，就开启 Bundle Chat。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "Open Context Bundle if you want to inspect or trim the saved items, or open Bot "
+            "Status for the full control center.",
+            "如果你想检查或整理这些内容，就打开上下文包；如果你要看完整恢复入口，就回状态中心。",
+        )
+    )
     return "\n".join(lines)
 
 
 def _saved_attachment_notice_markup(
     ui_state: TelegramUiState,
     user_id: int,
+    *,
+    provider: str,
+    workspace_id: str,
 ) -> InlineKeyboardMarkup:
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
     return InlineKeyboardMarkup(
         [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Context",
+                    "runtime_status_control",
+                    target="context_bundle_ask",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Stop Bundle Chat" if bundle_chat_active else "Start Bundle Chat",
+                    "runtime_status_stop_bundle_chat"
+                    if bundle_chat_active
+                    else "runtime_status_start_bundle_chat",
+                ),
+            ],
             [
                 _callback_button(
                     ui_state,
@@ -1301,6 +1869,8 @@ async def _reply_saved_attachment_notice(
     *,
     ui_state: TelegramUiState,
     user_id: int,
+    provider: str,
+    workspace_id: str,
     saved_context_items: tuple[_ContextBundleItem, ...],
     recovery: bool,
 ) -> None:
@@ -1312,55 +1882,70 @@ async def _reply_saved_attachment_notice(
                 saved_context_items,
                 recovery=recovery,
             ),
-            reply_markup=_saved_attachment_notice_markup(ui_state, user_id),
+            reply_markup=_saved_attachment_notice_markup(
+                ui_state,
+                user_id,
+                provider=provider,
+                workspace_id=workspace_id,
+            ),
         )
     except Exception:
         pass
 
 
 def _workspace_search_cancelled_text() -> str:
-    return "Search cancelled. Use Workspace Search to search again or open Bot Status when ready."
+    return _with_cn_hint(
+        "Search cancelled. Use Workspace Search to search again or open Bot Status when ready.",
+        "搜索已取消。准备好后可以重新打开工作区搜索，或先回状态中心。",
+    )
 
 
-def _unsupported_message_subject(message) -> tuple[str, str]:
+def _unsupported_message_subject(message) -> tuple[str, str, str]:
     if getattr(message, "sticker", None) is not None:
-        return "Stickers", "aren't"
+        return "Stickers", "aren't", "贴纸"
     if getattr(message, "location", None) is not None:
-        return "Locations", "aren't"
+        return "Locations", "aren't", "位置"
     if getattr(message, "contact", None) is not None:
-        return "Contacts", "aren't"
+        return "Contacts", "aren't", "联系人"
     if getattr(message, "venue", None) is not None:
-        return "Venues", "aren't"
+        return "Venues", "aren't", "地点卡片"
     if getattr(message, "poll", None) is not None:
-        return "Polls", "aren't"
+        return "Polls", "aren't", "投票"
     if getattr(message, "animation", None) is not None:
-        return "GIFs and animations", "aren't"
+        return "GIF 或动图", "aren't", "GIF 或动图"
     if getattr(message, "video_note", None) is not None:
-        return "Video notes", "aren't"
+        return "Video notes", "aren't", "视频圆消息"
     if getattr(message, "dice", None) is not None:
-        return "Dice messages", "aren't"
-    return "This Telegram message type", "isn't"
+        return "Dice messages", "aren't", "骰子消息"
+    return "This Telegram message type", "isn't", "这种 Telegram 消息类型"
 
 
 def _unsupported_message_text(message, *, bundle_chat_active: bool) -> str:
-    subject, verb = _unsupported_message_subject(message)
+    subject, verb, subject_cn = _unsupported_message_subject(message)
     if bundle_chat_active:
-        return (
+        return _with_cn_hint(
             f"{subject} {verb} supported in this chat yet. Send plain text next to keep using "
             "the current context bundle, or send a photo, document, audio, or video instead. "
-            "Use /help for supported flows, or use /start to reopen the main keyboard."
+            "Use /help for supported flows, or use /start to reopen the main keyboard.",
+            f"当前暂不支持发送{subject_cn}。如果你想继续沿用当前上下文包，下一条请改发纯文本；"
+            "或者改发图片、文档、音频或视频。需要查看支持流程请用 /help；"
+            "想恢复主键盘请用 /start。",
         )
-    return (
+    return _with_cn_hint(
         f"{subject} {verb} supported in this chat yet. Send plain text, photo, document, "
         "audio, or video instead, use /help for supported flows, or use /start to reopen the "
-        "main keyboard."
+        "main keyboard.",
+        f"当前暂不支持发送{subject_cn}。请改发纯文本、图片、文档、音频或视频；"
+        "需要查看支持流程请用 /help；想恢复主键盘请用 /start。",
     )
 
 
 def _empty_text_message() -> str:
-    return (
+    return _with_cn_hint(
         "This message was empty after trimming whitespace. "
-        "Send text or an attachment when ready. Nothing was sent to the agent."
+        "Send text or an attachment when ready. Nothing was sent to the agent.",
+        "这条消息去掉空白后是空的。准备好后请发送文本或附件；"
+        "这次没有任何内容发给 agent。",
     )
 
 
@@ -1439,18 +2024,45 @@ def _pending_text_action_waiting_hint(pending_text_action: _PendingTextAction | 
     return "Send the text next"
 
 
+def _pending_text_action_waiting_hint_cn(pending_text_action: _PendingTextAction | None) -> str:
+    if pending_text_action is None:
+        return "下一条直接发文本"
+
+    action = pending_text_action.action
+    if action == "rename_history":
+        return "下一条发送新的会话标题"
+    if action == "run_agent_command":
+        return "下一条发送命令参数"
+    if action == "workspace_search":
+        return "下一条发送搜索词"
+    if action == "workspace_file_agent_prompt":
+        return "下一条发送你想围绕这个文件提的问题"
+    if action == "workspace_change_agent_prompt":
+        return "下一条发送你想围绕这条变更提的问题"
+    if action == "context_bundle_agent_prompt":
+        return "下一条发送你想围绕这份上下文包提的问题"
+    if action == "context_items_agent_prompt":
+        return "下一条发送你想围绕这组选定上下文提的问题"
+    return "下一条发送文本"
+
+
 def _waiting_for_plain_text_notice(
     pending_text_action: _PendingTextAction | None = None,
 ) -> str:
     if pending_text_action is None:
-        return (
+        return _with_cn_hint(
             "The current action is waiting for plain text. Send text or send /cancel to back "
-            "out. Nothing was sent to the agent."
+            "out. Nothing was sent to the agent.",
+            "当前动作正在等待纯文本。请继续发送文本，或用 /cancel 退出；"
+            "这次没有任何内容发给 agent。",
         )
-    return (
+    return _with_cn_hint(
         f"{_pending_text_action_label(pending_text_action)} is waiting for plain text. "
         f"{_pending_text_action_waiting_hint(pending_text_action)}, or send /cancel to back out. "
-        "Nothing was sent to the agent."
+        "Nothing was sent to the agent.",
+        f"{_pending_text_action_label_cn(pending_text_action)} 正在等待纯文本。"
+        f"{_pending_text_action_waiting_hint_cn(pending_text_action)}，或用 /cancel 退出；"
+        "这次没有任何内容发给 agent。",
     )
 
 
@@ -1460,21 +2072,36 @@ def _pending_media_group_summary(stats: _PendingMediaGroupStats) -> str:
     return f"{stats.group_count} {group_label} ({stats.item_count} {item_label})"
 
 
+def _pending_media_group_summary_cn(stats: _PendingMediaGroupStats) -> str:
+    return f"{stats.group_count} 组附件（{stats.item_count} 项）"
+
+
 def _pending_media_group_status_line(stats: _PendingMediaGroupStats) -> str:
     item_label = "attachment" if stats.item_count == 1 else "attachments"
     if stats.group_count == 1:
-        return f"Status: collecting {stats.item_count} {item_label} from a pending Telegram album."
-    return (
+        return _with_cn_hint(
+            f"Status: collecting {stats.item_count} {item_label} from a pending Telegram album.",
+            f"当前状态：正在收集这个 Telegram 相册里的 {stats.item_count} 个附件。",
+        )
+    return _with_cn_hint(
         "Status: collecting "
-        f"{stats.item_count} {item_label} across {_pending_media_group_summary(stats)}."
+        f"{stats.item_count} {item_label} across {_pending_media_group_summary(stats)}.",
+        (
+            "当前状态：正在收集待发送附件，"
+            f"共 {_pending_media_group_summary_cn(stats)}。"
+        ),
     )
 
 
 def _pending_media_group_next_step_line(stats: _PendingMediaGroupStats) -> str:
     item_label = "it" if stats.item_count == 1 else "them"
-    return (
+    return _with_cn_hint(
         "Recommended next step: wait for the attachments to finish collecting, or use /cancel "
-        f"or Cancel / Stop to discard {item_label} before anything reaches the agent."
+        f"or Cancel / Stop to discard {item_label} before anything reaches the agent.",
+        (
+            "建议下一步：先等附件收齐；如果你想止损，"
+            f"就在真正发给 agent 之前用 /cancel 或主键盘“取消 / 停止”丢弃{ '它' if stats.item_count == 1 else '它们'}。"
+        ),
     )
 
 
@@ -1485,21 +2112,73 @@ def _pending_media_group_blocked_input_text(stats: _PendingMediaGroupStats) -> s
         if stats.group_count == 1
         else "pending Telegram albums"
     )
-    return (
+    return _with_cn_hint(
         f"Still collecting {_pending_media_group_summary(stats)} from {album_label}. "
         f"Wait for {item_label} to finish, or use /cancel or Cancel / Stop to discard the "
-        "pending uploads first. This new message was not sent to the agent."
+        "pending uploads first. This new message was not sent to the agent.",
+        "待发送附件仍在收集中。"
+        f"当前共 {_pending_media_group_summary_cn(stats)}；"
+        "请等它们收齐，或先用 /cancel / 主键盘“取消 / 停止”把待上传内容丢弃。"
+        "这条新消息没有发给 agent。",
     )
 
 
 def _pending_media_group_cancelled_text(stats: _PendingMediaGroupStats) -> str:
     if stats.group_count == 1:
-        return (
+        return _with_cn_hint(
             "Discarded pending attachment group "
             f"({stats.item_count} {'item' if stats.item_count == 1 else 'items'}). "
-            "Nothing was sent to the agent."
+            "Nothing was sent to the agent.",
+            "已丢弃待发送附件组"
+            f"（{stats.item_count} {'项' if stats.item_count == 1 else '项'}）。"
+            "没有任何内容发给 agent。",
         )
-    return f"Discarded pending {_pending_media_group_summary(stats)}. Nothing was sent to the agent."
+    return _with_cn_hint(
+        f"Discarded pending {_pending_media_group_summary(stats)}. Nothing was sent to the agent.",
+        f"已丢弃待发送附件（共 {stats.group_count} 组、{stats.item_count} 项）。"
+        "没有任何内容发给 agent。",
+    )
+
+
+def _cancelled_pending_input_text(
+    pending_text_action: _PendingTextAction,
+    *,
+    nothing_sent: bool,
+) -> str:
+    en_text = f"Cancelled pending input: {_pending_text_action_label(pending_text_action)}."
+    cn_text = f"已取消待输入：{_pending_text_action_label(pending_text_action)}。"
+    if nothing_sent:
+        en_text = f"{en_text} Nothing was sent to the agent."
+        cn_text = f"{cn_text} 这次没有任何内容发给 agent。"
+    return _with_cn_hint(en_text, cn_text)
+
+
+def _stop_requested_notice_text() -> str:
+    return _with_cn_hint(
+        "Stop requested for the current turn.",
+        "已请求停止当前回合。",
+    )
+
+
+def _bundle_chat_disabled_text() -> str:
+    return _with_cn_hint(
+        "Bundle chat disabled. New plain text messages will use the normal session again.",
+        "Bundle Chat 已关闭。后续新的纯文本消息会回到普通会话。",
+    )
+
+
+def _bundle_chat_already_off_text() -> str:
+    return _with_cn_hint(
+        "Bundle chat is already off.",
+        "Bundle Chat 本来就是关闭状态。",
+    )
+
+
+def _search_cancelled_notice_text() -> str:
+    return _with_cn_hint(
+        "Search cancelled.",
+        "搜索已取消。",
+    )
 
 
 def _format_elapsed_duration(seconds: float) -> str:
@@ -1541,24 +2220,45 @@ def _interaction_status_line(
     if active_turn is not None:
         title = _status_text_snippet(active_turn.title_hint, limit=120) or "current request"
         if active_turn.stop_requested:
-            return f"Status: stopping {title}."
-        return f"Status: running {title}."
+            return _with_cn_hint(
+                f"Status: stopping {title}.",
+                f"当前状态：正在停止 {title}。",
+            )
+        return _with_cn_hint(
+            f"Status: running {title}.",
+            f"当前状态：正在处理 {title}。",
+        )
     if pending_text_action is not None:
-        return (
+        return _with_cn_hint(
             "Status: waiting for plain text for "
-            f"{_pending_text_action_label(pending_text_action)}."
+            f"{_pending_text_action_label(pending_text_action)}.",
+            (
+                "当前状态：等待你继续发送纯文本，"
+                f"用于{_pending_text_action_label_cn(pending_text_action)}。"
+            ),
         )
     if pending_media_group_stats is not None:
         return _pending_media_group_status_line(pending_media_group_stats)
     if bundle_chat_active and bundle_count > 0:
         item_summary = _status_item_count_summary(bundle_count) or "current bundle"
-        return (
+        item_summary_cn = _status_item_count_summary_cn(bundle_count) or "当前上下文包"
+        return _with_cn_hint(
             "Status: bundle chat is on. "
-            f"Your next plain text message will use the current context bundle ({item_summary})."
+            f"Your next plain text message will use the current context bundle ({item_summary}).",
+            (
+                "当前状态：Bundle Chat 已开启。"
+                f"你下一条纯文本会自动带上当前上下文包（{item_summary_cn}）。"
+            ),
         )
     if session is None:
-        return "Status: ready. Your first text or attachment will start a session."
-    return "Status: ready. The current live session is idle."
+        return _with_cn_hint(
+            "Status: ready. Your first text or attachment will start a session.",
+            "当前状态：已就绪。你发送的第一条文本或附件会自动启动会话。",
+        )
+    return _with_cn_hint(
+        "Status: ready. The current live session is idle.",
+        "当前状态：已就绪。当前 live session 正空闲，随时可以继续。",
+    )
 
 
 def _recommended_next_step_line(
@@ -1574,84 +2274,105 @@ def _recommended_next_step_line(
     entrypoint_shortcuts: bool = False,
 ) -> str:
     if active_turn is not None:
-        return (
+        return _with_cn_hint(
             "Recommended next step: wait for the reply, or use /cancel or Cancel / Stop to "
-            "interrupt."
+            "interrupt.",
+            "建议下一步：先等回复，或用 /cancel / 主键盘“取消 / 停止”立即打断。",
         )
     if pending_text_action is not None:
-        return (
+        return _with_cn_hint(
             "Recommended next step: send the plain text for "
-            f"{_pending_text_action_label(pending_text_action)}, or use /cancel to back out."
+            f"{_pending_text_action_label(pending_text_action)}, or use /cancel to back out.",
+            (
+                "建议下一步：继续发送当前所需的纯文本，"
+                f"用于{_pending_text_action_label_cn(pending_text_action)}；如果不想继续，用 /cancel 退出。"
+            ),
         )
     if pending_media_group_stats is not None:
         return _pending_media_group_next_step_line(pending_media_group_stats)
     if bundle_chat_active and bundle_count > 0:
         if last_request_available:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: send plain text to continue with this bundle, or tap "
-                "Bundle + Last Request to replay the previous request with the same context."
+                "Bundle + Last Request to replay the previous request with the same context.",
+                "建议下一步：直接发纯文本继续当前上下文，或点 Bundle + Last Request 用同一份上下文重放上一条请求。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: send plain text to continue with this bundle, or stop "
-            "bundle chat if you want a normal turn."
+            "bundle chat if you want a normal turn.",
+            "建议下一步：直接发纯文本继续当前上下文；如果想回到普通回合，先停掉 Bundle Chat。",
         )
     if bundle_count > 0:
         if last_request_available:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: tap Ask Agent With Context or Bundle + Last Request, "
-                "or send a fresh request."
+                "or send a fresh request.",
+                "建议下一步：优先点 Ask Agent With Context 或 Bundle + Last Request，也可以直接发一条全新请求。",
             )
-        return "Recommended next step: tap Ask Agent With Context, or send a fresh request."
+        return _with_cn_hint(
+            "Recommended next step: tap Ask Agent With Context, or send a fresh request.",
+            "建议下一步：先点 Ask Agent With Context，或直接发送一条新请求。",
+        )
     if last_request_available and last_turn_available:
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: use Quick actions below to run the last request again "
-                "or reuse the previous turn, or send a fresh request."
+                "or reuse the previous turn, or send a fresh request.",
+                "建议下一步：优先用下方 Quick actions 重跑上一条请求或复用上一轮，再决定是否发一条新请求。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: run the last request again from Bot Status, reuse the "
-            "previous turn with Retry Last Turn / Fork Last Turn, or send a fresh request."
+            "previous turn with Retry Last Turn / Fork Last Turn, or send a fresh request.",
+            "建议下一步：去 Bot Status 里重跑上一条请求，或用 Retry / Fork Last Turn 复用上一轮；也可以直接开始新请求。",
         )
     if last_request_available:
         if session is None:
             if entrypoint_shortcuts:
-                return (
+                return _with_cn_hint(
                     "Recommended next step: use Quick actions below to run the last request "
                     "again, send text or an attachment, or use Workspace Search / Context "
-                    "Bundle before you ask."
+                    "Bundle before you ask.",
+                    "建议下一步：优先用下方 Quick actions 重跑上一条请求；也可以直接发文本 / 附件，或先做工作区搜索 / 整理上下文包。",
                 )
-            return (
+            return _with_cn_hint(
                 "Recommended next step: run the last request again from Bot Status, send text "
-                "or an attachment, or use Workspace Search / Context Bundle before you ask."
+                "or an attachment, or use Workspace Search / Context Bundle before you ask.",
+                "建议下一步：去 Bot Status 重跑上一条请求，或直接发文本 / 附件；如果想准备得更充分，就先用工作区搜索 / 上下文包。",
             )
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: use Quick actions below to run the last request again, "
                 "send text or an attachment, or open Bot Status if you want files, changes, "
-                "or history first."
+                "or history first.",
+                "建议下一步：优先用下方 Quick actions 重跑上一条请求；如果你想先看文件、变更或历史，再打开 Bot Status。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: run the last request again from Bot Status, send text or "
-            "an attachment, or open Bot Status if you want files, changes, or history first."
+            "an attachment, or open Bot Status if you want files, changes, or history first.",
+            "建议下一步：去 Bot Status 重跑上一条请求，或直接发文本 / 附件；如果要先看文件、变更或历史，也还是从 Bot Status 进入。",
         )
     if last_turn_available:
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: send a fresh request, or reuse the previous turn from "
-                "Quick actions below."
+                "Quick actions below.",
+                "建议下一步：直接发一条全新请求，或用下方 Quick actions 复用上一轮。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: send a fresh request, or reuse the previous turn with "
-            "Retry Last Turn / Fork Last Turn."
+            "Retry Last Turn / Fork Last Turn.",
+            "建议下一步：直接发一条全新请求，或用 Retry / Fork Last Turn 复用上一轮。",
         )
     if session is None:
-        return (
+        return _with_cn_hint(
             "Recommended next step: send text or an attachment, or use Workspace Search / "
-            "Context Bundle before you ask."
+            "Context Bundle before you ask.",
+            "建议下一步：直接发文本或附件；如果你想先准备上下文，就先用工作区搜索或上下文包。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: send text or an attachment, or open Bot Status if you want "
-        "files, changes, or history first."
+        "files, changes, or history first.",
+        "建议下一步：直接发文本或附件继续；如果你想先看文件、变更或历史，就先打开 Bot Status。",
     )
 
 
@@ -1669,102 +2390,135 @@ def _primary_controls_line(
 ) -> str:
     if active_turn is not None:
         if entrypoint_shortcuts:
-            return "Primary controls right now: Stop Turn below, or use /cancel from chat."
-        return "Primary controls right now: Stop Turn in Bot Status, or use /cancel from chat."
+            return _with_cn_hint(
+                "Primary controls right now: Stop Turn below, or use /cancel from chat.",
+                "当前优先操作：直接点下方 Stop Turn，或在聊天里用 /cancel。",
+            )
+        return _with_cn_hint(
+            "Primary controls right now: Stop Turn in Bot Status, or use /cancel from chat.",
+            "当前优先操作：去 Bot Status 点 Stop Turn，或在聊天里用 /cancel。",
+        )
     if pending_text_action is not None:
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: send the expected text next, or use Cancel Pending "
-                "Input below."
+                "Input below.",
+                "当前优先操作：先补上这条应发送的纯文本，或直接点下方“取消待输入”。",
             )
-        return (
+        return _with_cn_hint(
             "Primary controls right now: send the expected text next, or use Cancel Pending Input "
-            "in Bot Status."
+            "in Bot Status.",
+            "当前优先操作：先补上这条应发送的纯文本，或去 Bot Status 里点“取消待输入”。",
         )
     if pending_media_group_stats is not None:
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: wait for the album to finish, or use Discard Pending "
-                "Uploads below."
+                "Uploads below.",
+                "当前优先操作：先等相册收齐，或直接点下方 Discard Pending Uploads。",
             )
-        return (
+        return _with_cn_hint(
             "Primary controls right now: wait for the album to finish, or use Discard Pending "
-            "Uploads in Bot Status."
+            "Uploads in Bot Status.",
+            "当前优先操作：先等相册收齐，或去 Bot Status 里点 Discard Pending Uploads。",
         )
     if bundle_chat_active and bundle_count > 0:
         if last_request_available:
             if entrypoint_shortcuts:
-                return (
+                return _with_cn_hint(
                     "Primary controls right now: send plain text, use Bundle + Last Request "
-                    "below, or stop bundle chat below."
+                    "below, or stop bundle chat below.",
+                    "当前优先操作：直接发纯文本、点下方 Bundle + Last Request，或直接停掉 Bundle Chat。",
                 )
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: send plain text, use Bundle + Last Request, or stop "
-                "bundle chat from Bot Status."
+                "bundle chat from Bot Status.",
+                "当前优先操作：直接发纯文本、使用 Bundle + Last Request，或去 Bot Status 停掉 Bundle Chat。",
             )
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: send plain text, Ask Agent With Context below, or "
-                "stop bundle chat below."
+                "stop bundle chat below.",
+                "当前优先操作：直接发纯文本、点下方 Ask Agent With Context，或直接停掉 Bundle Chat。",
             )
-        return (
+        return _with_cn_hint(
             "Primary controls right now: send plain text, Ask Agent With Context, or stop bundle "
-            "chat from Bot Status."
+            "chat from Bot Status.",
+            "当前优先操作：直接发纯文本、使用 Ask Agent With Context，或去 Bot Status 停掉 Bundle Chat。",
         )
     if bundle_count > 0:
         if last_request_available:
             if entrypoint_shortcuts:
-                return (
+                return _with_cn_hint(
                     "Primary controls right now: Ask Agent With Context, Bundle + Last Request, "
-                    "or Context Bundle below."
+                    "or Context Bundle below.",
+                    "当前优先操作：先点 Ask Agent With Context、Bundle + Last Request，或打开下方 Context Bundle。",
                 )
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: Ask Agent With Context, Bundle + Last Request, or "
-                "Context Bundle."
+                "Context Bundle.",
+                "当前优先操作：先用 Ask Agent With Context、Bundle + Last Request，或打开 Context Bundle。",
             )
         if entrypoint_shortcuts:
-            return "Primary controls right now: Ask Agent With Context or Context Bundle below."
-        return "Primary controls right now: Ask Agent With Context or Context Bundle."
+            return _with_cn_hint(
+                "Primary controls right now: Ask Agent With Context or Context Bundle below.",
+                "当前优先操作：先点下方 Ask Agent With Context 或 Context Bundle。",
+            )
+        return _with_cn_hint(
+            "Primary controls right now: Ask Agent With Context or Context Bundle.",
+            "当前优先操作：先用 Ask Agent With Context 或打开 Context Bundle。",
+        )
     if last_request_available and last_turn_available:
-        return (
+        return _with_cn_hint(
             "Primary controls right now: Run Last Request, Retry Last Turn, Fork Last Turn, "
-            "or send a fresh request."
+            "or send a fresh request.",
+            "当前优先操作：Run Last Request、Retry Last Turn、Fork Last Turn 都可直接继续，也可以发一条全新请求。",
         )
     if last_request_available:
         if session is None:
             if entrypoint_shortcuts:
-                return (
+                return _with_cn_hint(
                     "Primary controls right now: Run Last Request below, send text or an "
-                    "attachment, or use Workspace Search / Context Bundle first."
+                    "attachment, or use Workspace Search / Context Bundle first.",
+                    "当前优先操作：点下方 Run Last Request，或直接发文本 / 附件；想准备上下文时先用工作区搜索 / 上下文包。",
                 )
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: Run Last Request, send text or an attachment, or "
-                "use Workspace Search / Context Bundle first."
+                "use Workspace Search / Context Bundle first.",
+                "当前优先操作：Run Last Request、直接发文本 / 附件都可以；想准备上下文时先用工作区搜索 / 上下文包。",
             )
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: Run Last Request below, send text or an attachment, "
-                "or open Bot Status for files, changes, and context prep."
+                "or open Bot Status for files, changes, and context prep.",
+                "当前优先操作：点下方 Run Last Request，或直接发文本 / 附件；如果要先看文件、变更或准备上下文，就打开 Bot Status。",
             )
-        return (
+        return _with_cn_hint(
             "Primary controls right now: Run Last Request, send text or an attachment, or "
-            "open Bot Status for files, changes, and context prep."
+            "open Bot Status for files, changes, and context prep.",
+            "当前优先操作：Run Last Request、直接发文本 / 附件都可以；如果要先看文件、变更或准备上下文，就打开 Bot Status。",
         )
     if last_turn_available:
         if entrypoint_shortcuts:
-            return (
+            return _with_cn_hint(
                 "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh "
-                "request."
+                "request.",
+                "当前优先操作：Retry Last Turn、Fork Last Turn 都能继续，也可以直接发一条新请求。",
             )
-        return "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh request."
-    if session is None:
-        return (
-            "Primary controls right now: send text or an attachment, or use Workspace Search "
-            "/ Context Bundle first."
+        return _with_cn_hint(
+            "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh request.",
+            "当前优先操作：Retry Last Turn、Fork Last Turn 都能继续，也可以直接发一条新请求。",
         )
-    return (
+    if session is None:
+        return _with_cn_hint(
+            "Primary controls right now: send text or an attachment, or use Workspace Search "
+            "/ Context Bundle first.",
+            "当前优先操作：直接发文本 / 附件，或先用工作区搜索 / 上下文包准备上下文。",
+        )
+    return _with_cn_hint(
         "Primary controls right now: send text or an attachment, or open Bot Status for files, "
-        "changes, and context prep."
+        "changes, and context prep.",
+        "当前优先操作：直接发文本 / 附件，或先打开 Bot Status 查看文件、变更和上下文准备入口。",
     )
 
 
@@ -1779,40 +2533,74 @@ def _resume_snapshot_lines(
     if last_request is None and last_turn is None and bundle_count <= 0:
         return []
 
-    lines = ["Resume snapshot:"]
+    lines = ["Resume snapshot:", "恢复快照：这里列出当前 workspace 里可直接继续复用的内容。"]
     if last_request is not None:
         lines.append(
-            f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}"
+            _with_cn_hint(
+                f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}",
+                f"上次请求：{_status_text_snippet(last_request.text, limit=120) or '[empty]'}",
+            )
         )
-        lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
         lines.append(
-            "Replay text only: "
-            + _last_request_replay_note(
-                last_request=last_request,
-                current_provider=provider,
+            _with_cn_hint(
+                f"Last request source: {_last_request_source_summary(last_request)}",
+                f"请求来源：{_last_request_source_summary_cn(last_request)}",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Replay text only: "
+                + _last_request_replay_note(
+                    last_request=last_request,
+                    current_provider=provider,
+                ),
+                "仅重放文本："
+                + _last_request_replay_note_cn(
+                    last_request=last_request,
+                    current_provider=provider,
+                ),
             )
         )
     if last_turn is not None:
         replay_snippet = _status_text_snippet(last_turn.title_hint) or "untitled turn"
-        lines.append(f"Last turn replay: available ({replay_snippet})")
         lines.append(
-            "Replay full payload: "
-            + _last_turn_replay_note(
-                replay_turn=last_turn,
-                current_provider=provider,
+            _with_cn_hint(
+                f"Last turn replay: available ({replay_snippet})",
+                f"上一轮回放：可用（{replay_snippet}）",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Replay full payload: "
+                + _last_turn_replay_note(
+                    replay_turn=last_turn,
+                    current_provider=provider,
+                ),
+                "完整回放："
+                + _last_turn_replay_note_cn(
+                    replay_turn=last_turn,
+                    current_provider=provider,
+                ),
             )
         )
     if bundle_count > 0:
         bundle_summary = _status_item_count_summary(bundle_count) or "current bundle"
+        bundle_summary_cn = _status_item_count_summary_cn(bundle_count) or "当前上下文包"
         if bundle_chat_active:
             lines.append(
-                "Context bundle ready: "
-                f"{bundle_summary}; bundle chat is on, so your next plain text message will include it."
+                _with_cn_hint(
+                    "Context bundle ready: "
+                    f"{bundle_summary}; bundle chat is on, so your next plain text message will include it.",
+                    f"上下文包已就绪：{bundle_summary_cn}；Bundle Chat 已开启，你下一条纯文本会自动带上它。",
+                )
             )
         else:
             lines.append(
-                "Context bundle ready: "
-                f"{bundle_summary}; use Context Bundle or Bot Status to send it with your next request."
+                _with_cn_hint(
+                    "Context bundle ready: "
+                    f"{bundle_summary}; use Context Bundle or Bot Status to send it with your next request.",
+                    f"上下文包已就绪：{bundle_summary_cn}；下一次提问前可从 Context Bundle 或 Bot Status 里把它带上。",
+                )
             )
     return lines
 
@@ -1836,21 +2624,24 @@ def _status_primary_action_guide_entry(
     bundle_chat_active: bool,
     last_request_available: bool,
     last_turn_available: bool,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     if active_turn is not None:
         return (
             "Stop Turn",
             "interrupts the request that's already running without leaving Bot Status.",
+            "会在不离开状态中心的前提下，立即打断当前正在运行的请求。",
         )
     if pending_text_action is not None:
         return (
             "Cancel Pending Input",
             "clears the waiting plain-text action before you choose another path.",
+            "会先清掉当前等待中的纯文本输入，再让你改走别的路径。",
         )
     if pending_media_group_stats is not None:
         return (
             "Discard Pending Uploads",
             "drops the still-collecting Telegram album before anything reaches the agent.",
+            "会在附件组真正发给 Agent 之前，直接丢弃仍在收集中的 Telegram 相册。",
         )
     if bundle_count > 0:
         labels = []
@@ -1862,58 +2653,68 @@ def _status_primary_action_guide_entry(
             return (
                 _join_label_series(labels),
                 "let you keep working with the current bundle, either by reusing the saved request or by sending fresh text.",
+                "让你围绕当前上下文包继续工作，可以复用已保存请求，也可以直接发送新文本。",
             )
         return (
             _join_label_series(labels),
             "let you start a bundled turn right away or control whether the next plain-text message carries that bundle automatically.",
+            "让你立刻带着上下文包发起新回合，或控制下一条纯文本是否自动携带这份上下文。",
         )
     if last_request_available and last_turn_available:
         return (
             _join_label_series(["Run Last Request", "Retry Last Turn", "Fork Last Turn"]),
             "let you choose between replaying only the saved text or restoring the full saved payload.",
+            "让你在“只重跑已保存文本”和“恢复完整保存 payload”之间快速做选择。",
         )
     if last_request_available:
         return (
             "Run Last Request",
             "replays only the saved request text in the current provider and workspace.",
+            "只会在当前 Provider 和工作区里重跑已保存的请求文本。",
         )
     if last_turn_available:
         return (
             _join_label_series(["Retry Last Turn", "Fork Last Turn"]),
             "let you replay the full saved payload in the current or a forked live session.",
+            "让你在当前 live session 或新分叉的 live session 里重放完整保存 payload。",
         )
     return None
 
 
-def _status_navigation_action_guide_entry(*, is_admin: bool) -> tuple[str, str]:
+def _status_navigation_action_guide_entry(*, is_admin: bool) -> tuple[str, str, str]:
     labels = ["Refresh", "Session History"]
     if is_admin:
         labels.append("Provider Sessions")
     return (
         _join_label_series(labels),
         "let you refresh this snapshot or open saved sessions when you want to resume existing work.",
+        "让你刷新当前快照，或在想接回已有工作时打开已保存会话。",
     )
 
 
-def _status_lifecycle_action_guide_entry(*, can_fork_session: bool) -> tuple[str, str]:
+def _status_lifecycle_action_guide_entry(*, can_fork_session: bool) -> tuple[str, str, str]:
     labels = ["New Session", "Restart Agent"]
     if can_fork_session:
         labels.append("Fork Session")
         summary = "give you a clean path when you want to reset, restart, or branch the current session."
+        cn_summary = "在你想重置、重启，或从当前会话分出新分支时，给你一条更干净的继续路径。"
     else:
         summary = "give you a clean path when you want to reset or restart the current session."
-    return _join_label_series(labels), summary
+        cn_summary = "在你想重置或重启当前会话时，给你一条更干净的继续路径。"
+    return _join_label_series(labels), summary, cn_summary
 
 
-def _status_tuning_action_guide_entry(*, live_session_available: bool) -> tuple[str, str]:
+def _status_tuning_action_guide_entry(*, live_session_available: bool) -> tuple[str, str, str]:
     if live_session_available:
         return (
             _join_label_series(["Model / Mode", "Agent Commands"]),
             "let you adjust the live session setup or run agent-exposed commands without leaving the control center.",
+            "让你不离开控制中心，就能调整 live session 的模型 / 模式，或执行 Agent 暴露的命令。",
         )
     return (
         _join_label_series(["Model / Mode", "Agent Commands"]),
         "open the live-session tuning and command surfaces once a session is available.",
+        "在 live session 可用之后，打开模型 / 模式调优与命令入口。",
     )
 
 
@@ -1924,7 +2725,7 @@ def _status_inspection_action_guide_entry(
     last_turn_available: bool,
     plan_count: int,
     tool_activity_count: int,
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     labels = ["Session Info", "Workspace Runtime"]
     if usage_available:
         labels.append("Usage")
@@ -1939,22 +2740,25 @@ def _status_inspection_action_guide_entry(
     return (
         _join_label_series(labels),
         "keep you in read-only views while you inspect runtime state, saved replays, plans, or recent tool use.",
+        "让你在只读视图里排查运行态、回放数据、计划和近期工具活动，不会误触发新会话。",
     )
 
 
-def _status_workspace_action_guide_entry() -> tuple[str, str]:
+def _status_workspace_action_guide_entry() -> tuple[str, str, str]:
     return (
         _join_label_series(
             ["Workspace Files", "Workspace Search", "Workspace Changes", "Context Bundle"]
         ),
         "open focused workspace surfaces so you can browse local context or carry it into the next turn.",
+        "打开工作区专项视图，方便你浏览本地上下文，或把它们带入下一轮提问。",
     )
 
 
-def _status_admin_switch_action_guide_entry() -> tuple[str, str]:
+def _status_admin_switch_action_guide_entry() -> tuple[str, str, str]:
     return (
         _join_label_series(["Switch Agent", "Switch Workspace"]),
         "change the shared runtime for every Telegram user, so treat them as global admin controls.",
+        "会改动所有 Telegram 用户共用的运行时，所以必须当作全局管理员开关来使用。",
     )
 
 
@@ -1973,8 +2777,8 @@ def _status_action_guide_entries(
     usage_available: bool,
     plan_count: int,
     tool_activity_count: int,
-) -> tuple[tuple[str, str], ...]:
-    entries: list[tuple[str, str]] = []
+) -> tuple[tuple[str, ...], ...]:
+    entries: list[tuple[str, ...]] = []
     primary_entry = _status_primary_action_guide_entry(
         active_turn=active_turn,
         pending_text_action=pending_text_action,
@@ -2037,7 +2841,25 @@ def _workspace_reuse_summary_line(
     )
     if not labels:
         return None
-    return f"Reusable in this workspace: {_join_label_series(labels)}."
+    localized_labels = [
+        {
+            "Last Request": "上次请求",
+            "Last Turn": "上一轮回放",
+            "Context Bundle": "上下文包",
+        }.get(label, label)
+        for label in labels
+    ]
+    localized_summary = "、".join(localized_labels[:-1])
+    if len(localized_labels) == 1:
+        localized_summary = localized_labels[0]
+    elif len(localized_labels) == 2:
+        localized_summary = f"{localized_labels[0]} 和 {localized_labels[1]}"
+    else:
+        localized_summary = f"{localized_summary} 和 {localized_labels[-1]}"
+    return _with_cn_hint(
+        f"Reusable in this workspace: {_join_label_series(labels)}.",
+        f"当前工作区仍可复用：{localized_summary}。",
+    )
 
 
 def _workspace_recovery_actions(
@@ -2082,13 +2904,21 @@ def _workspace_recovery_actions(
     if reuse_summary is not None:
         lines.append(reuse_summary)
     lines.append(recommendation)
-    lines.append("Recovery options:")
+    lines.append(
+        _with_cn_hint(
+            "Recovery options:",
+            "恢复选项：下面这些按钮就是当前 workspace 里还能直接继续工作的最短路径。",
+        )
+    )
 
     buttons: list[list[InlineKeyboardButton]] = []
     if last_request is not None:
         lines.append(
-            "Run Last Request reuses the saved text in the current provider and workspace, "
-            "starting a live session if needed."
+            _with_cn_hint(
+                "Run Last Request reuses the saved text in the current provider and workspace, "
+                "starting a live session if needed.",
+                "Run Last Request 会在当前 Provider 和工作区里复用已保存文本；如果需要，也会自动重新拉起 live session。",
+            )
         )
         buttons.append(
             [
@@ -2102,7 +2932,12 @@ def _workspace_recovery_actions(
             ]
         )
     if last_turn is not None:
-        lines.append("Retry / Fork Last Turn can rebuild the saved payload in this workspace.")
+        lines.append(
+            _with_cn_hint(
+                "Retry / Fork Last Turn can rebuild the saved payload in this workspace.",
+                "Retry / Fork Last Turn 可以在当前工作区里重建保存下来的上一轮 payload。",
+            )
+        )
         buttons.append(
             [
                 _callback_button(
@@ -2125,19 +2960,30 @@ def _workspace_recovery_actions(
         bundle_summary = _status_item_count_summary(bundle_count) or "current bundle"
         if last_request is not None:
             lines.append(
-                "Context bundle ready: "
-                f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message, "
-                "and Bundle + Last Request reuses the saved text with that bundle."
+                _with_cn_hint(
+                    "Context bundle ready: "
+                    f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message, "
+                    "and Bundle + Last Request reuses the saved text with that bundle.",
+                    f"上下文包已就绪：{bundle_summary}。Ask Agent With Context 会等待你下一条纯文本，"
+                    "Bundle + Last Request 则会用这份上下文包复用已保存请求。",
+                )
             )
         else:
             lines.append(
-                "Context bundle ready: "
-                f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message "
-                "and uses that bundle."
+                _with_cn_hint(
+                    "Context bundle ready: "
+                    f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message "
+                    "and uses that bundle.",
+                    f"上下文包已就绪：{bundle_summary}。Ask Agent With Context 会等待你下一条纯文本，"
+                    "并自动带上这份上下文包。",
+                )
             )
         if bundle_chat_active:
             lines.append(
-                "Bundle chat is already on, so a fresh plain text message would include that bundle automatically."
+                _with_cn_hint(
+                    "Bundle chat is already on, so a fresh plain text message would include that bundle automatically.",
+                    "Bundle Chat 已开启，所以你直接发送新的纯文本消息时也会自动带上这份上下文包。",
+                )
             )
             buttons.append(
                 [
@@ -2151,7 +2997,10 @@ def _workspace_recovery_actions(
             )
         else:
             lines.append(
-                "Start Bundle Chat keeps this bundle attached to later plain-text messages until you stop it."
+                _with_cn_hint(
+                    "Start Bundle Chat keeps this bundle attached to later plain-text messages until you stop it.",
+                    "Start Bundle Chat 会让后续纯文本持续携带这份上下文包，直到你主动停掉它。",
+                )
             )
             buttons.append(
                 [
@@ -2220,52 +3069,62 @@ def _workspace_recovery_next_step_line(
 ) -> str:
     if bundle_chat_active and bundle_count > 0:
         if has_last_request:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: send plain text to continue with the current bundle, or "
-                "use Bundle + Last Request if you want to replay the saved request with it."
+                "use Bundle + Last Request if you want to replay the saved request with it.",
+                "建议下一步：直接发纯文本继续当前上下文包，或用 Bundle + Last Request 重放已保存请求。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: send plain text to continue with the current bundle, or Ask "
-            "Agent With Context if you want to keep reusing it deliberately."
+            "Agent With Context if you want to keep reusing it deliberately.",
+            "建议下一步：直接发纯文本继续当前上下文包，或用 Ask Agent With Context 更明确地带着它继续。",
         )
     if has_last_request and bundle_count > 0:
         if has_last_turn:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: use Bundle + Last Request to reuse the saved request with "
-                "the current bundle, or Retry / Fork Last Turn if you need the saved payload back."
+                "the current bundle, or Retry / Fork Last Turn if you need the saved payload back.",
+                "建议下一步：先用 Bundle + Last Request 把已保存请求和当前上下文包一起复用；如果你需要完整 payload，再用 Retry / Fork Last Turn。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
-            "current bundle, or Ask Agent With Context if you want to send new text with it."
+            "current bundle, or Ask Agent With Context if you want to send new text with it.",
+            "建议下一步：先用 Bundle + Last Request 复用已保存请求；如果你想带着当前上下文包发新问题，就用 Ask Agent With Context。",
         )
     if has_last_turn and bundle_count > 0:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Retry / Fork Last Turn if you need the saved payload back, or "
-            "Ask Agent With Context to keep working with the current bundle."
+            "Ask Agent With Context to keep working with the current bundle.",
+            "建议下一步：如果你需要完整 payload，就用 Retry / Fork Last Turn；如果想带着当前上下文包继续，就用 Ask Agent With Context。",
         )
     if has_last_request and has_last_turn:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Run Last Request if the saved text is enough, or Retry / Fork "
-            "Last Turn if you need the full saved payload."
+            "Last Turn if you need the full saved payload.",
+            "建议下一步：如果保存下来的文本已经够用，就点 Run Last Request；如果你要完整 payload，就用 Retry / Fork Last Turn。",
         )
     if has_last_turn:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Retry / Fork Last Turn to reuse the saved payload, or send a "
-            "fresh request if you want a clean turn."
+            "fresh request if you want a clean turn.",
+            "建议下一步：用 Retry / Fork Last Turn 复用已保存 payload；如果你想彻底开新问题，就直接发送新请求。",
         )
     if has_last_request:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Run Last Request to reuse the saved text, or send a fresh "
-            "request if you want to branch."
+            "request if you want to branch.",
+            "建议下一步：用 Run Last Request 复用已保存文本；如果你想走一条新分支，就直接发送新请求。",
         )
     if bundle_count > 0:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Ask Agent With Context to keep working with the current "
-            "bundle, or open Context Bundle to review it first."
+            "bundle, or open Context Bundle to review it first.",
+            "建议下一步：用 Ask Agent With Context 带着当前上下文继续，或先打开 Context Bundle 复查内容。",
         )
-    return empty_recommendation or (
+    return empty_recommendation or _with_cn_hint(
         "Recommended next step: send text or an attachment from chat to start a live session, or "
-        "use the buttons below to go back."
+        "use the buttons below to go back.",
+        "建议下一步：直接发送文本或附件启动 live session，或用下方按钮回到其他入口。",
     )
 
 
@@ -2292,7 +3151,10 @@ def _session_ready_extra_lines(
         and ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
     ):
         lines.append(
-            "Bundle chat is still on, so your next plain text message will include the current context bundle."
+            _with_cn_hint(
+                "Bundle chat is still on, so your next plain text message will include the current context bundle.",
+                "Bundle Chat 仍处于开启状态，所以下一条纯文本会自动带上当前上下文包。",
+            )
         )
     return tuple(lines)
 
@@ -2315,71 +3177,119 @@ def _session_ready_notice_for_runtime(
 
 def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
     lines = [
-        "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn.",
-        "Context prep row: Workspace Search and Context Bundle stay one tap away before you ask.",
-        (
-            "Advanced actions live in Bot Status: Session History, Model / Mode, Agent "
-            "Commands, Workspace Files/Changes, Restart Agent, and admin-only runtime "
-            "switches."
+        _with_cn_hint(
+            "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn.",
+            "主键盘优先保留高频入口：先新建会话和打开状态中心，再处理上一轮的重试 / 分叉。",
         ),
-        (
-            "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
-            "/help, and /cancel still work if Telegram hides it."
+        _with_cn_hint(
+            "Context prep row: Workspace Search and Context Bundle stay one tap away before you ask.",
+            "上下文准备单独占一行：在真正发问前，工作区搜索和上下文包都保持一跳可达。",
+        ),
+        _with_cn_hint(
+            (
+                "Advanced actions live in Bot Status: Session History, Model / Mode, Agent "
+                "Commands, Workspace Files/Changes, Restart Agent, and admin-only runtime "
+                "switches."
+            ),
+            "高阶动作统一收进 Bot Status：会话历史、模型 / 模式、Agent 命令、工作区文件 / 变更、重启 Agent，以及管理员专用的运行态切换都不再塞进常驻键盘。",
+        ),
+        _with_cn_hint(
+            (
+                "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
+                "/help, and /cancel still work if Telegram hides it."
+            ),
+            "恢复行固定保留帮助和取消 / 停止；即使 Telegram 把主键盘折叠了，/start、/status、/help、/cancel 也始终可用。",
         ),
     ]
     if is_admin:
         lines.append(
-            "Admin-only shared-runtime switches live in Bot Status so they stay reachable "
-            "without turning the persistent keyboard into a dangerous control surface."
+            _with_cn_hint(
+                "Admin-only shared-runtime switches live in Bot Status so they stay reachable "
+                "without turning the persistent keyboard into a dangerous control surface.",
+                "管理员专用的共享运行态切换仍放在 Bot Status，既保证可达，也避免把常驻键盘做成高风险控制面板。",
+            )
         )
     return lines
 
 
 def _start_quick_path_lines() -> list[str]:
     return [
-        "1. Ask right now: send plain text or an attachment.",
-        "2. Prepare context first: use Workspace Search or Context Bundle.",
-        (
-            "3. Recover or branch work: open Bot Status for Last Request, Last Turn, "
-            "history, model / mode, and session actions."
+        _with_cn_hint(
+            "1. Ask right now: send plain text or an attachment.",
+            "1. 现在就提问：直接发送文本或附件。",
+        ),
+        _with_cn_hint(
+            "2. Prepare context first: use Workspace Search or Context Bundle.",
+            "2. 先准备上下文：用工作区搜索或上下文包。",
+        ),
+        _with_cn_hint(
+            (
+                "3. Recover or branch work: open Bot Status for Last Request, Last Turn, "
+                "history, model / mode, and session actions."
+            ),
+            "3. 恢复或分叉已有工作：打开 Bot Status 查看 Last Request、Last Turn、历史、模型 / 模式和会话动作。",
         ),
     ]
 
 
 def _help_common_task_lines() -> list[str]:
     return [
-        "1. Ask a fresh question: send text or an attachment.",
-        (
-            "2. Prepare reusable local context: use Workspace Search or Workspace Files / "
-            "Changes, then keep it in Context Bundle if you want to reuse it."
+        _with_cn_hint(
+            "1. Ask a fresh question: send text or an attachment.",
+            "1. 发起一条新问题：直接发送文本或附件。",
         ),
-        "3. Replay only the saved request text: Run Last Request.",
-        (
-            "4. Replay the full saved turn payload: Retry Last Turn. Use Fork Last Turn to do "
-            "that in a new session."
+        _with_cn_hint(
+            (
+                "2. Prepare reusable local context: use Workspace Search or Workspace Files / "
+                "Changes, then keep it in Context Bundle if you want to reuse it."
+            ),
+            "2. 准备可复用的本地上下文：先用工作区搜索或工作区文件 / 变更，再把需要反复使用的内容放进 Context Bundle。",
         ),
-        (
-            "5. Recover, inspect, or switch setup: Bot Status for history, model / mode, "
-            "agent commands, new session, and restart."
+        _with_cn_hint(
+            "3. Replay only the saved request text: Run Last Request.",
+            "3. 只重跑上一条请求文本：使用 Run Last Request。",
+        ),
+        _with_cn_hint(
+            (
+                "4. Replay the full saved turn payload: Retry Last Turn. Use Fork Last Turn to do "
+                "that in a new session."
+            ),
+            "4. 重放上一整轮 payload：使用 Retry Last Turn；如果想另开一条分支，就用 Fork Last Turn。",
+        ),
+        _with_cn_hint(
+            (
+                "5. Recover, inspect, or switch setup: Bot Status for history, model / mode, "
+                "agent commands, new session, and restart."
+            ),
+            "5. 做恢复、检查或调整设置：统一从 Bot Status 进入历史、模型 / 模式、Agent 命令、新建会话和重启。",
         ),
     ]
 
 
 def _help_core_concept_lines() -> list[str]:
     return [
-        "Context Bundle keeps selected files, changes, and fallback attachments ready across turns.",
-        (
-            "Bundle chat means your next plain text message will automatically include the "
-            "current context bundle until you stop it."
+        _with_cn_hint(
+            "Context Bundle keeps selected files, changes, and fallback attachments ready across turns.",
+            "Context Bundle 会把你选中的文件、变更和降级保存的附件持续保留，供后续多轮复用。",
+        ),
+        _with_cn_hint(
+            (
+                "Bundle chat means your next plain text message will automatically include the "
+                "current context bundle until you stop it."
+            ),
+            "Bundle Chat 的意思是：从现在起，你后续发送的纯文本都会自动带上当前上下文包，直到你主动停掉它。",
         ),
     ]
 
 
 def _session_ready_notice_text(*, extra_lines: tuple[str, ...] = ()) -> str:
     lines = [
-        (
-            "You're ready for the next request. Old bot buttons and pending inputs tied to the "
-            "previous session were cleared."
+        _with_cn_hint(
+            (
+                "You're ready for the next request. Old bot buttons and pending inputs tied to "
+                "the previous session were cleared."
+            ),
+            "已为下一次请求准备就绪。上一会话遗留的旧按钮和待输入状态都已清理。",
         )
     ]
     lines.extend(line for line in extra_lines if line)
@@ -2391,7 +3301,14 @@ def _new_session_success_text(
     *,
     extra_lines: tuple[str, ...] = (),
 ) -> str:
-    return f"Started new session: {session_id}\n{_session_ready_notice_text(extra_lines=extra_lines)}"
+    return (
+        _with_cn_hint(
+            f"Started new session: {session_id}",
+            f"已新建会话：{session_id}",
+        )
+        + "\n"
+        + _session_ready_notice_text(extra_lines=extra_lines)
+    )
 
 
 def _restart_agent_success_text(
@@ -2399,7 +3316,14 @@ def _restart_agent_success_text(
     *,
     extra_lines: tuple[str, ...] = (),
 ) -> str:
-    return f"Restarted agent: {session_id}\n{_session_ready_notice_text(extra_lines=extra_lines)}"
+    return (
+        _with_cn_hint(
+            f"Restarted agent: {session_id}",
+            f"已重启 Agent：{session_id}",
+        )
+        + "\n"
+        + _session_ready_notice_text(extra_lines=extra_lines)
+    )
 
 
 def _build_start_text(
@@ -2427,9 +3351,22 @@ def _build_start_text(
     last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
     last_turn_available = last_turn is not None
 
+    provider_label = resolve_provider_profile(provider).display_name
+
     lines = [
-        f"Welcome to Talk2Agent for {resolve_provider_profile(provider).display_name} in {workspace_label}.",
-        f"Workspace ID: {workspace_id}",
+        _with_cn_hint(
+            f"Welcome to Talk2Agent for {provider_label} in {workspace_label}.",
+            f"欢迎使用 {workspace_label} 中的 Talk2Agent（{provider_label}）。",
+        ),
+        _with_cn_hint(
+            f"Workspace ID: {workspace_id}",
+            f"当前工作区：{workspace_label}（ID: {workspace_id}）。",
+        ),
+        _with_cn_hint(
+            "This entry page does not create a session implicitly. It helps you resume work, "
+            "recover controls, or prepare context before you ask.",
+            "欢迎页说明：这里不会隐式创建新会话，而是优先帮你接回上一段工作、找回控制入口，或先准备上下文。",
+        ),
         _interaction_status_line(
             session=session,
             active_turn=active_turn,
@@ -2464,12 +3401,27 @@ def _build_start_text(
     ]
 
     if session is None:
-        lines.append("Session: none yet. Your first text or attachment will start one.")
+        lines.append(
+            _with_cn_hint(
+                "Session: none yet. Your first text or attachment will start one.",
+                "会话概览：还没有 live session；你发出的第一条文本或附件会自动开始。",
+            )
+        )
     else:
-        lines.append(f"Session: {session.session_id or 'pending'}")
+        lines.append(
+            _with_cn_hint(
+                f"Session: {session.session_id or 'pending'}",
+                f"会话概览：当前 live session 为 {session.session_id or 'pending'}，除非你主动新建或重启，否则会继续沿用。",
+            )
+        )
         session_title = _status_text_snippet(getattr(session, "session_title", None), limit=120)
         if session_title is not None:
-            lines.append(f"Session title: {session_title}")
+            lines.append(
+                _with_cn_hint(
+                    f"Session title: {session_title}",
+                    f"会话标题：{session_title}",
+                )
+            )
 
     lines.extend(_status_active_turn_lines(active_turn))
 
@@ -2490,16 +3442,33 @@ def _build_start_text(
         if mode_summary is not None:
             lines.append(mode_summary)
 
-    lines.append(f"Pending input: {_pending_text_action_label(pending_text_action)}")
+    lines.append(
+        _with_cn_hint(
+            f"Pending input: {_pending_text_action_label(pending_text_action)}",
+            f"待输入状态：{_pending_text_action_label_cn(pending_text_action)}",
+        )
+    )
     if pending_media_group_stats is not None:
-        lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
+        pending_upload_summary = _pending_media_group_summary(pending_media_group_stats)
+        lines.append(
+            _with_cn_hint(
+                f"Pending uploads: {pending_upload_summary}",
+                f"待上传附件：{_pending_media_group_summary_cn(pending_media_group_stats)}",
+            )
+        )
 
     if bundle_count == 0:
-        lines.append("Context bundle: empty")
+        lines.append(_with_cn_hint("Context bundle: empty", "上下文包：当前为空。"))
     else:
         bundle_chat_state = "bundle chat on" if bundle_chat_active else "bundle chat off"
         lines.append(
-            f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''} ({bundle_chat_state})"
+            _with_cn_hint(
+                f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''} ({bundle_chat_state})",
+                (
+                    "上下文包："
+                    f"{bundle_count} 项（Bundle Chat 已{_cn_on_off(bundle_chat_active)}）。"
+                ),
+            )
         )
 
     resume_lines = _resume_snapshot_lines(
@@ -2514,10 +3483,20 @@ def _build_start_text(
         lines.extend(resume_lines)
 
     lines.append("")
-    lines.append("Quick paths:")
+    lines.append(
+        _with_cn_hint(
+            "Quick paths:",
+            "快速路径：如果你不确定先点哪里，就按下面三条最短路径走。",
+        )
+    )
     lines.extend(_start_quick_path_lines())
     lines.append("")
-    lines.append("Keyboard layout:")
+    lines.append(
+        _with_cn_hint(
+            "Keyboard layout:",
+            "主键盘说明：主键盘只保留手机端最高频动作，避免把整屏都占满。",
+        )
+    )
     lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
 
     return "\n".join(lines)
@@ -2548,9 +3527,22 @@ def _build_help_text(
     last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
     last_turn_available = last_turn is not None
 
+    provider_label = resolve_provider_profile(provider).display_name
+
     lines = [
-        f"Talk2Agent help for {resolve_provider_profile(provider).display_name} in {workspace_label}.",
-        f"Workspace ID: {workspace_id}",
+        _with_cn_hint(
+            f"Talk2Agent help for {provider_label} in {workspace_label}.",
+            f"帮助页：{workspace_label} 中 {provider_label} 的快速使用说明。",
+        ),
+        _with_cn_hint(
+            f"Workspace ID: {workspace_id}",
+            f"当前工作区：{workspace_label}（ID: {workspace_id}）。",
+        ),
+        _with_cn_hint(
+            "Use this page when you're new here, forgot the terms, or just want to confirm the "
+            "next step quickly.",
+            "页面用途：第一次使用、忘了术语，或不确定下一步怎么走时，都先回来这里。",
+        ),
         _interaction_status_line(
             session=session,
             active_turn=active_turn,
@@ -2585,15 +3577,41 @@ def _build_help_text(
     ]
 
     if session is None:
-        lines.append("Session: none yet. Send text or an attachment to start one.")
+        lines.append(
+            _with_cn_hint(
+                "Session: none yet. Send text or an attachment to start one.",
+                "会话概览：当前还没有 live session，直接发文本或附件即可开始。",
+            )
+        )
     else:
-        lines.append(f"Session: {session.session_id or 'pending'}")
+        lines.append(
+            _with_cn_hint(
+                f"Session: {session.session_id or 'pending'}",
+                f"会话概览：当前 live session 为 {session.session_id or 'pending'}；帮助页只做说明，不会改动它。",
+            )
+        )
 
     lines.extend(_status_active_turn_lines(active_turn))
-    lines.append(f"Pending input: {_pending_text_action_label(pending_text_action)}")
+    lines.append(
+        _with_cn_hint(
+            f"Pending input: {_pending_text_action_label(pending_text_action)}",
+            f"待输入状态：{_pending_text_action_label_cn(pending_text_action)}",
+        )
+    )
     if pending_media_group_stats is not None:
-        lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
-    lines.append(f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}")
+        pending_upload_summary = _pending_media_group_summary(pending_media_group_stats)
+        lines.append(
+            _with_cn_hint(
+                f"Pending uploads: {pending_upload_summary}",
+                f"待上传附件：{_pending_media_group_summary_cn(pending_media_group_stats)}",
+            )
+        )
+    lines.append(
+        _with_cn_hint(
+            f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}",
+            f"上下文包：{bundle_count} 项。",
+        )
+    )
 
     resume_lines = _resume_snapshot_lines(
         provider=provider,
@@ -2607,22 +3625,60 @@ def _build_help_text(
         lines.extend(resume_lines)
 
     lines.append("")
-    lines.append("Common tasks:")
+    lines.append(
+        _with_cn_hint(
+            "Common tasks:",
+            "常见任务：先按目标选路径，不必先把所有运行时细节看完。",
+        )
+    )
     lines.extend(_help_common_task_lines())
     lines.append("")
-    lines.append("Core concepts:")
+    lines.append(
+        _with_cn_hint(
+            "Core concepts:",
+            "核心概念：下面这两个词最影响你之后的恢复方式和上下文复用。",
+        )
+    )
     lines.extend(_help_core_concept_lines())
     lines.append("")
-    lines.append("Keyboard:")
+    lines.append(
+        _with_cn_hint(
+            "Keyboard:",
+            "主键盘：高频按钮常驻；低频但重要的高级动作统一放进 Bot Status。",
+        )
+    )
     lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
     lines.append("")
-    lines.append("Recovery:")
-    lines.append("/start restores the welcome screen and the full keyboard.")
-    lines.append("/status opens Bot Status even when the keyboard is hidden.")
-    lines.append("Help or /help reopens this guide without changing the current session.")
     lines.append(
-        "Cancel / Stop or /cancel backs out of pending input, stops a running turn, or leaves "
-        "bundle chat."
+        _with_cn_hint(
+            "Recovery:",
+            "恢复提醒：这些 slash 命令在 Telegram 折叠主键盘时依然可靠。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "/start restores the welcome screen and the full keyboard.",
+            "/start 会恢复欢迎页和完整主键盘。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "/status opens Bot Status even when the keyboard is hidden.",
+            "/status 会在主键盘被折叠时直接打开状态中心。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "Help or /help reopens this guide without changing the current session.",
+            "帮助按钮或 /help 会重新打开这份指南，但不会改动当前会话。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "Cancel / Stop or /cancel backs out of pending input, stops a running turn, or leaves "
+            "bundle chat.",
+            "取消 / 停止或 /cancel 会退出待输入、打断运行中回合，或离开 Bundle Chat。",
+        )
     )
 
     return "\n".join(lines)
@@ -2643,26 +3699,44 @@ def _entrypoint_quick_actions_view(
     if active_turn is not None:
         title = _status_text_snippet(active_turn.title_hint, limit=120) or "current request"
         return (
-            "Quick actions for the current turn:\n"
-            f"{title} is still running. Stop it here, or open Bot Status to watch progress.",
+            _with_cn_hint(
+                "Quick actions for the current turn:\n"
+                f"{title} is still running. Stop it here, or open Bot Status to watch progress.",
+                (
+                    "当前回合快捷操作：\n"
+                    f"{title} 仍在运行。如果你现在最想止损，就直接在这里停掉；如果想先看运行进度，再进状态中心。"
+                ),
+            ),
             _active_turn_notice_markup(ui_state, user_id),
         )
 
     pending_text_action = ui_state.get_pending_text_action(user_id)
     if pending_text_action is not None:
         return (
-            "Quick actions for pending input:\n"
-            f"{_pending_text_action_label(pending_text_action)} is waiting for plain text. "
-            "Cancel it here, or send the expected text next.",
+            _with_cn_hint(
+                "Quick actions for pending input:\n"
+                f"{_pending_text_action_label(pending_text_action)} is waiting for plain text. "
+                "Cancel it here, or send the expected text next.",
+                (
+                    "待输入快捷操作：\n"
+                    f"{_pending_text_action_label(pending_text_action)} 正在等你补充纯文本。你可以直接取消，也可以立刻补上这条消息。"
+                ),
+            ),
             _pending_input_notice_markup(ui_state, user_id),
         )
 
     pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
     if pending_media_group_stats is not None:
         return (
-            "Quick actions for pending uploads:\n"
-            f"{_pending_media_group_summary(pending_media_group_stats)} is still collecting. "
-            "Discard it here, or open Bot Status for the full runtime view.",
+            _with_cn_hint(
+                "Quick actions for pending uploads:\n"
+                f"{_pending_media_group_summary(pending_media_group_stats)} is still collecting. "
+                "Discard it here, or open Bot Status for the full runtime view.",
+                (
+                    "待上传附件快捷操作：\n"
+                    f"{_pending_media_group_summary(pending_media_group_stats)} 仍在收集中；如果不想继续，现在就丢弃，否则去状态中心看完整运行态。"
+                ),
+            ),
             _pending_uploads_notice_markup(ui_state, user_id),
         )
 
@@ -2674,12 +3748,20 @@ def _entrypoint_quick_actions_view(
     if last_request is None and last_turn is None and bundle_count <= 0:
         return None
 
-    lines = ["Quick actions for getting back to work:"]
+    lines = [
+        _with_cn_hint(
+            "Quick actions for getting back to work:",
+            "恢复快捷操作：这里优先放继续上一段工作的最短路径，完整控制台仍在状态中心。",
+        )
+    ]
     rows: list[tuple[tuple[str, str, dict[str, Any]], ...]] = []
 
     if last_turn is not None:
         lines.append(
-            "Retry / Fork Last Turn replays the full saved payload in the current workspace."
+            _with_cn_hint(
+                "Retry / Fork Last Turn replays the full saved payload in the current workspace.",
+                "Retry / Fork Last Turn：会在当前工作区里重放整轮保存下来的 payload。",
+            )
         )
         rows.append(
             (
@@ -2689,7 +3771,12 @@ def _entrypoint_quick_actions_view(
         )
 
     if last_request is not None:
-        lines.append("Run Last Request replays only the saved request text.")
+        lines.append(
+            _with_cn_hint(
+                "Run Last Request replays only the saved request text.",
+                "Run Last Request：只会重跑保存下来的请求文本，不会自动带回原附件或原上下文。",
+            )
+        )
         if bundle_count > 0:
             rows.append(
                 (
@@ -2708,7 +3795,10 @@ def _entrypoint_quick_actions_view(
 
     if bundle_count > 0:
         lines.append(
-            "Ask Agent With Context waits for your next plain-text question and adds the current context bundle."
+            _with_cn_hint(
+                "Ask Agent With Context waits for your next plain-text question and adds the current context bundle.",
+                "Ask Agent With Context：会等待你输入下一条纯文本问题，并自动附上当前上下文包。",
+            )
         )
         rows.append(
             (
@@ -2718,17 +3808,26 @@ def _entrypoint_quick_actions_view(
         )
         if bundle_chat_active:
             lines.append(
-                "Bundle chat is already on, so the next plain text message will include that bundle automatically."
+                _with_cn_hint(
+                    "Bundle chat is already on, so the next plain text message will include that bundle automatically.",
+                    "Bundle Chat 已开启，所以你下一条纯文本会自动带上当前上下文包。",
+                )
             )
             rows.append((("Stop Bundle Chat", "runtime_status_stop_bundle_chat", {}),))
         else:
             lines.append(
-                "Start Bundle Chat if you want later plain-text messages to keep carrying that bundle until you stop it."
+                _with_cn_hint(
+                    "Start Bundle Chat if you want later plain-text messages to keep carrying that bundle until you stop it.",
+                    "如果你想让后续纯文本持续携带这份上下文包，直到你主动停掉，就开启 Bundle Chat。",
+                )
             )
             rows.append((("Start Bundle Chat", "runtime_status_start_bundle_chat", {}),))
 
     lines.append(
-        "Open Bot Status if you need history, files, changes, model / mode, or the full control center."
+        _with_cn_hint(
+            "Open Bot Status if you need history, files, changes, model / mode, or the full control center.",
+            "如果你需要历史、文件、变更、模型 / 模式，或更完整的控制视图，就打开状态中心。",
+        )
     )
     rows.append((("Open Bot Status", "runtime_status_page", {}),))
 
@@ -2760,9 +3859,15 @@ def _post_cancel_fallback_view(
     user_id: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
     return (
-        "Quick actions for getting back to work:\n"
-        "Send text or an attachment when ready, open Bot Status for the full control center, "
-        "or start a New Session if you want a clean slate.",
+        _with_cn_hint(
+            "Quick actions for getting back to work:\n"
+            "Send text or an attachment when ready, open Bot Status for the full control center, "
+            "or start a New Session if you want a clean slate.",
+            (
+                "恢复快捷操作：\n"
+                "准备好后就直接发文本或附件；如果你需要完整控制台，就打开状态中心；如果你想彻底重来，就新建会话。"
+            ),
+        ),
         _inline_notice_markup(
             ui_state,
             user_id,
@@ -2779,8 +3884,14 @@ def _stop_requested_follow_up_view(
     user_id: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
     return (
-        "Quick action while the turn winds down:\n"
-        "Open Bot Status to watch the stop request and confirm when the session is ready again.",
+        _with_cn_hint(
+            "Quick action while the turn winds down:\n"
+            "Open Bot Status to watch the stop request and confirm when the session is ready again.",
+            (
+                "停止请求已发出：\n"
+                "打开状态中心查看停止过程，并在会话重新可用时确认下一步。"
+            ),
+        ),
         _status_only_notice_markup(ui_state, user_id),
     )
 
@@ -2836,9 +3947,11 @@ async def handle_start(
     ui_state: TelegramUiState,
 ) -> None:
     del context
+    _bind_services_ui_state(services, ui_state)
 
     if update.message is None:
         return
+    _log_telegram_event("start_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -2849,7 +3962,8 @@ async def handle_start(
             services,
             lambda store: store.peek(user_id),
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("start_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
 
@@ -2883,9 +3997,11 @@ async def handle_help(
     ui_state: TelegramUiState,
 ) -> None:
     del context
+    _bind_services_ui_state(services, ui_state)
 
     if update.message is None:
         return
+    _log_telegram_event("help_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -2896,7 +4012,8 @@ async def handle_help(
             services,
             lambda store: store.peek(user_id),
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("help_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
 
@@ -2930,6 +4047,8 @@ async def handle_status(
     ui_state: TelegramUiState,
 ) -> None:
     del context
+    _bind_services_ui_state(services, ui_state)
+    _log_telegram_event("status_received", update=update)
     await _show_runtime_status(update, services, ui_state)
 
 
@@ -2958,8 +4077,10 @@ async def handle_cancel(
     services,
     ui_state: TelegramUiState,
 ) -> None:
+    _bind_services_ui_state(services, ui_state)
     if update.message is None:
         return
+    _log_telegram_event("cancel_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -2970,13 +4091,12 @@ async def handle_cancel(
     if pending_text_action is not None or pending_media_group_stats is not None:
         notice_parts = []
         if pending_text_action is not None:
-            pending_input_notice = (
-                "Cancelled pending input: "
-                f"{_pending_text_action_label(pending_text_action)}."
+            notice_parts.append(
+                _cancelled_pending_input_text(
+                    pending_text_action,
+                    nothing_sent=pending_media_group_stats is None,
+                )
             )
-            if pending_media_group_stats is None:
-                pending_input_notice = f"{pending_input_notice} Nothing was sent to the agent."
-            notice_parts.append(pending_input_notice)
         if pending_media_group_stats is not None:
             notice_parts.append(_pending_media_group_cancelled_text(pending_media_group_stats))
         await _reply_with_menu(
@@ -3003,14 +4123,23 @@ async def handle_cancel(
                 user_id=user_id,
                 active_turn=active_turn,
             )
-        except Exception:
+        except Exception as exc:
+            _log_telegram_exception(
+                "cancel_stop_requested_failed",
+                exc,
+                update=update,
+                session=active_turn.session,
+            )
             await _reply_request_failed(update, services)
             return
         await _reply_with_menu(
             update.message,
             services,
             user_id,
-            "Stop requested for the current turn. Open Bot Status to track progress.",
+            _with_cn_hint(
+                "Stop requested for the current turn. Open Bot Status to track progress.",
+                "已请求停止当前回合。你可以打开状态中心继续观察停止进度。",
+            ),
         )
         await _reply_cancel_follow_up(
             update.message,
@@ -3023,10 +4152,11 @@ async def handle_cancel(
 
     try:
         state = await services.snapshot_runtime_state()
-    except Exception:
+    except Exception as exc:
         if ui_state.resolve_agent_command(user_id, CANCEL_COMMAND) is not None:
             await handle_agent_command(update, context, services, ui_state)
             return
+        _log_telegram_exception("cancel_runtime_snapshot_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
 
@@ -3036,7 +4166,7 @@ async def handle_cancel(
             update.message,
             services,
             user_id,
-            "Bundle chat disabled. New plain text messages will use the normal session again.",
+            _bundle_chat_disabled_text(),
         )
         await _reply_cancel_follow_up(
             update.message,
@@ -3070,8 +4200,10 @@ async def handle_text(
     services,
     ui_state: TelegramUiState,
 ) -> None:
+    _bind_services_ui_state(services, ui_state)
     if update.message is None:
         return
+    _log_telegram_event("text_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -3165,7 +4297,8 @@ async def handle_text(
                 pending_text_action,
                 text,
             )
-        except Exception:
+        except Exception as exc:
+            _log_telegram_exception("pending_text_action_failed", exc, update=update)
             await _reply_request_failed(update, services)
             return
         if handled_pending_text:
@@ -3202,7 +4335,8 @@ async def handle_text(
 
     try:
         state = await services.snapshot_runtime_state()
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("text_runtime_snapshot_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
     if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
@@ -3213,7 +4347,10 @@ async def handle_text(
                 update.message,
                 services,
                 user_id,
-                "Context bundle chat was turned off because the current bundle is empty.",
+                _with_cn_hint(
+                    "Context bundle chat was turned off because the current bundle is empty.",
+                    "当前上下文包已经为空，所以 Bundle Chat 已自动关闭。",
+                ),
             )
             return
 
@@ -3257,8 +4394,10 @@ async def handle_attachment(
     services,
     ui_state: TelegramUiState,
 ) -> None:
+    _bind_services_ui_state(services, ui_state)
     if update.message is None:
         return
+    _log_telegram_event("attachment_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -3342,7 +4481,8 @@ async def handle_attachment(
             reply_markup=_status_only_notice_markup(ui_state, user_id),
         )
         return
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("attachment_prompt_build_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
 
@@ -3363,9 +4503,11 @@ async def handle_unsupported_message(
     ui_state: TelegramUiState,
 ) -> None:
     del context
+    _bind_services_ui_state(services, ui_state)
 
     if update.message is None:
         return
+    _log_telegram_event("unsupported_message_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -3407,7 +4549,13 @@ async def handle_unsupported_message(
     bundle_chat_active = False
     try:
         state = await services.snapshot_runtime_state()
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "unsupported_message_runtime_snapshot_failed",
+            exc,
+            update=update,
+            level=logging.WARNING,
+        )
         state = None
     if state is not None:
         bundle_chat_active = ui_state.context_bundle_chat_active(
@@ -3431,8 +4579,10 @@ async def handle_agent_command(
     services,
     ui_state: TelegramUiState,
 ) -> None:
+    _bind_services_ui_state(services, ui_state)
     if update.message is None:
         return
+    _log_telegram_event("agent_command_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -3461,6 +4611,7 @@ async def handle_debug_status(
 
     if update.message is None:
         return
+    _log_telegram_event("debug_status_received", update=update)
     if not _is_authorized(update, services):
         await _reply_unauthorized(update)
         return
@@ -3470,7 +4621,8 @@ async def handle_debug_status(
             services,
             lambda store: store.peek(update.effective_user.id),
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("debug_status_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
 
@@ -3533,7 +4685,8 @@ async def _show_runtime_status(
             services,
             update.effective_user.id,
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception("status_view_failed", exc, update=update)
         await _reply_request_failed(update, services)
         return
 
@@ -3725,7 +4878,10 @@ async def _show_workspace_runtime_server_from_callback(
             ui_state,
             user_id=user_id,
             back_target=back_target,
-            notice="MCP server is no longer available in this workspace runtime.",
+            notice=_with_cn_hint(
+                "MCP server is no longer available in this workspace runtime.",
+                "这个 MCP server 在当前工作区运行时里已经不可用了。",
+            ),
         )
         return
     text, markup = _build_workspace_runtime_server_view(
@@ -3791,7 +4947,10 @@ async def _show_last_turn_item_from_callback(
             user_id=user_id,
             page=page,
             back_target=back_target,
-            notice="Selected replay item is no longer available.",
+            notice=_with_cn_hint(
+                "Selected replay item is no longer available.",
+                "你刚选中的重放条目已经不可用了。",
+            ),
         )
         return
 
@@ -3864,7 +5023,10 @@ async def _show_plan_detail_from_callback(
             user_id=user_id,
             page=page,
             back_target=back_target,
-            notice="Selected plan entry is no longer available.",
+            notice=_with_cn_hint(
+                "Selected plan entry is no longer available.",
+                "你刚选中的计划项已经不可用了。",
+            ),
         )
         return
 
@@ -3936,7 +5098,10 @@ async def _show_tool_activity_detail_from_callback(
             user_id=user_id,
             page=page,
             back_target=back_target,
-            notice="Selected tool activity is no longer available.",
+            notice=_with_cn_hint(
+                "Selected tool activity is no longer available.",
+                "你刚选中的工具活动已经不可用了。",
+            ),
         )
         return
 
@@ -4007,6 +5172,52 @@ def _pending_text_action_label(pending_text_action: _PendingTextAction | None) -
     return action
 
 
+def _pending_text_action_label_cn(pending_text_action: _PendingTextAction | None) -> str:
+    if pending_text_action is None:
+        return "无"
+
+    action = pending_text_action.action
+    payload = pending_text_action.payload
+    if action == "rename_history":
+        return _status_summary_with_details(
+            "重命名会话标题",
+            _status_text_snippet(str(payload.get("session_id", ""))),
+        )
+    if action == "run_agent_command":
+        return _status_summary_with_details(
+            "填写命令参数",
+            _agent_command_name(str(payload.get("command_name", "command"))),
+        )
+    if action == "workspace_search":
+        return "工作区搜索"
+    if action == "workspace_file_agent_prompt":
+        return _status_summary_with_details(
+            "针对工作区文件提问",
+            _status_text_snippet(str(payload.get("relative_path", ""))),
+        )
+    if action == "workspace_change_agent_prompt":
+        return _status_summary_with_details(
+            "针对工作区变更提问",
+            _status_text_snippet(str(payload.get("relative_path", ""))),
+        )
+    if action == "context_bundle_agent_prompt":
+        items = payload.get("items")
+        item_count = len(items) if isinstance(items, (list, tuple)) else 0
+        return _status_summary_with_details(
+            "针对上下文包提问",
+            _status_item_count_summary_cn(item_count),
+        )
+    if action == "context_items_agent_prompt":
+        items = payload.get("items")
+        item_count = len(items) if isinstance(items, (list, tuple)) else 0
+        return _status_summary_with_details(
+            "针对选定上下文提问",
+            _status_text_snippet(str(payload.get("prompt_label", ""))),
+            _status_item_count_summary_cn(item_count),
+        )
+    return action
+
+
 def _status_text_snippet(text: str | None, *, limit: int = STATUS_TEXT_SNIPPET_LIMIT) -> str | None:
     if text is None:
         return None
@@ -4022,16 +5233,22 @@ def _status_text_snippet(text: str | None, *, limit: int = STATUS_TEXT_SNIPPET_L
 
 def _turn_busy_notice(active_turn: _ActiveTurn | None) -> str:
     if active_turn is None:
-        return (
+        return _with_cn_hint(
             "Another request is already running. "
             "Send /cancel to stop it, open Bot Status to inspect progress, or wait for it to "
-            "finish. This new message was not sent to the agent."
+            "finish. This new message was not sent to the agent.",
+            "当前已有另一条请求在运行。"
+            "你可以用 /cancel 停止它，打开状态中心查看进度，或等它自然结束。"
+            "这条新消息没有发给 agent。",
         )
     title = _status_text_snippet(active_turn.title_hint) or "current request"
-    return (
+    return _with_cn_hint(
         f"Another request is already running ({title}). "
         "Send /cancel to stop it, open Bot Status to inspect progress, or wait for it to finish. "
-        "This new message was not sent to the agent."
+        "This new message was not sent to the agent.",
+        f"当前已有另一条请求在运行（{title}）。"
+        "你可以用 /cancel 停止它，打开状态中心查看进度，或等它自然结束。"
+        "这条新消息没有发给 agent。",
     )
 
 
@@ -4041,16 +5258,23 @@ def _status_active_turn_lines(
     now: float | None = None,
 ) -> list[str]:
     if active_turn is None:
-        return ["Turn: idle"]
+        return [_with_cn_hint("Turn: idle", "回合：空闲")]
 
     details = [_status_text_snippet(active_turn.title_hint) or "current request"]
     session_id = None if active_turn.session is None else getattr(active_turn.session, "session_id", None)
     if session_id:
         details.append(session_id)
     status = "stop requested" if active_turn.stop_requested else "running"
-    lines = [f"Turn: {status} ({', '.join(details)})"]
+    status_cn = "停止中" if active_turn.stop_requested else "运行中"
+    lines = [
+        _with_cn_hint(
+            f"Turn: {status} ({', '.join(details)})",
+            f"回合：{status_cn}（{', '.join(details)}）",
+        )
+    ]
     if now is not None:
-        lines.append(f"Turn elapsed: {_format_elapsed_duration(now - active_turn.started_at)}")
+        elapsed = _format_elapsed_duration(now - active_turn.started_at)
+        lines.append(_with_cn_hint(f"Turn elapsed: {elapsed}", f"已运行：{elapsed}"))
     return lines
 
 
@@ -4059,13 +5283,24 @@ def _pending_text_action_hint_line(
 ) -> str | None:
     if pending_text_action is None:
         return None
-    return f"Next plain text: {_pending_text_action_waiting_hint(pending_text_action)}."
+    waiting_hint = _pending_text_action_waiting_hint(pending_text_action)
+    waiting_hint_cn = _pending_text_action_waiting_hint_cn(pending_text_action)
+    return _with_cn_hint(
+        f"Next plain text: {waiting_hint}.",
+        f"下一条纯文本：{waiting_hint_cn}。",
+    )
 
 
 def _status_item_count_summary(count: int) -> str | None:
     if count <= 0:
         return None
     return f"{count} item{'s' if count != 1 else ''}"
+
+
+def _status_item_count_summary_cn(count: int) -> str | None:
+    if count <= 0:
+        return None
+    return f"{count} 项"
 
 
 def _status_summary_with_details(summary: str, *details: str | None) -> str:
@@ -4102,6 +5337,23 @@ def _status_usage_summary(session) -> str | None:
     elif amount is not None:
         parts.append(f"cost={amount:.2f}")
     return " ".join(parts)
+
+
+def _status_usage_summary_cn(session) -> str | None:
+    if session is None:
+        return None
+    usage = getattr(session, "usage", None)
+    if usage is None:
+        return None
+
+    parts = [f"已用 {usage.used}", f"容量 {usage.size}"]
+    amount = getattr(usage, "cost_amount", None)
+    currency = getattr(usage, "cost_currency", None)
+    if amount is not None and currency:
+        parts.append(f"费用 {amount:.2f} {currency}")
+    elif amount is not None:
+        parts.append(f"费用 {amount:.2f}")
+    return "，".join(parts)
 
 
 def _usage_cost_label(usage) -> str:
@@ -4186,6 +5438,29 @@ def _last_request_source_summary(last_request: _LastRequestText | None) -> str:
     return _last_request_plain_text_source_summary()
 
 
+def _last_request_source_summary_cn(last_request: _LastRequestText | None) -> str:
+    summary = _last_request_source_summary(last_request)
+    if summary == "plain text":
+        return "纯文本"
+    if summary == "last request replay":
+        return "上次请求回放"
+    if summary.startswith("bundle chat"):
+        return summary.replace("bundle chat", "Bundle Chat").replace(" items", " 项").replace(" item", " 项")
+    if summary.startswith("workspace file request"):
+        return "工作区文件提问" + summary[len("workspace file request") :]
+    if summary.startswith("workspace change request"):
+        return "工作区变更提问" + summary[len("workspace change request") :]
+    if summary.startswith("selected context request"):
+        detail = summary[len("selected context request") :]
+        detail = detail.replace(" items", " 项").replace(" item", " 项")
+        return "选定上下文提问" + detail
+    if summary.startswith("context bundle request"):
+        detail = summary[len("context bundle request") :]
+        detail = detail.replace(" items", " 项").replace(" item", " 项")
+        return "上下文包提问" + detail
+    return summary
+
+
 def _workspace_runtime_server_target(server) -> str | None:
     if getattr(server, "transport", None) == "stdio":
         command = _status_text_snippet(getattr(server, "command", None), limit=80)
@@ -4225,7 +5500,13 @@ def _status_plan_preview_lines(session, *, limit: int = STATUS_PLAN_PREVIEW_LIMI
     if not entries:
         return []
 
-    lines = [f"Agent plan: {len(entries)} item{'s' if len(entries) != 1 else ''}", "Plan preview:"]
+    lines = [
+        _with_cn_hint(
+            f"Agent plan: {len(entries)} item{'s' if len(entries) != 1 else ''}",
+            f"Agent 计划：{len(entries)} 项",
+        ),
+        _with_cn_hint("Plan preview:", "计划预览："),
+    ]
     visible_entries = entries[:limit]
     for index, entry in enumerate(visible_entries, start=1):
         content = _status_text_snippet(getattr(entry, "content", "")) or "[empty]"
@@ -4239,7 +5520,12 @@ def _status_plan_preview_lines(session, *, limit: int = STATUS_PLAN_PREVIEW_LIMI
         lines.append(f"{index}. {prefix} {content}")
     remaining = len(entries) - len(visible_entries)
     if remaining > 0:
-        lines.append(f"... {remaining} more item{'s' if remaining != 1 else ''}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more item{'s' if remaining != 1 else ''}",
+                f"……另外还有 {remaining} 项",
+            )
+        )
     return lines
 
 
@@ -4267,7 +5553,11 @@ def _selection_summary_line(label: str, selection) -> str | None:
         return None
     current_label = _current_choice_label(selection)
     choice_count = len(tuple(getattr(selection, "choices", ()) or ()))
-    return f"{label}: {current_label} ({choice_count} choice{'s' if choice_count != 1 else ''})"
+    label_cn = {"Model": "模型", "Mode": "模式"}.get(label, label)
+    return _with_cn_hint(
+        f"{label}: {current_label} ({choice_count} choice{'s' if choice_count != 1 else ''})",
+        f"{label_cn}：{current_label}（{choice_count} 个选项）",
+    )
 
 
 def _replay_prompt_items(replay_turn: _ReplayTurn | None) -> tuple[Any, ...]:
@@ -4313,6 +5603,25 @@ def _last_request_replay_note(
     )
 
 
+def _last_request_replay_note_cn(
+    *,
+    last_request: _LastRequestText,
+    current_provider: str,
+) -> str:
+    recorded_provider = _last_request_recorded_provider(
+        last_request,
+        current_provider=current_provider,
+    )
+    current_display = _replay_provider_display_name(current_provider)
+    recorded_display = _replay_provider_display_name(recorded_provider)
+    if recorded_provider == current_provider:
+        return f"Run Last Request 会把这段文本重新发到当前工作区里的 {current_display}。"
+    return (
+        f"这条请求最初记录在 {recorded_display}，但这次 Run Last Request 会把它发到"
+        f"当前工作区里的 {current_display}。"
+    )
+
+
 def _last_turn_replay_note(
     *,
     replay_turn: _ReplayTurn,
@@ -4329,6 +5638,24 @@ def _last_turn_replay_note(
         f"This payload was recorded on {recorded_display}, but Retry Last Turn / Fork Last Turn "
         f"will replay it on {current_display} in the current workspace now. If attachment "
         "support differs, the bot adapts the saved payload first."
+    )
+
+
+def _last_turn_replay_note_cn(
+    *,
+    replay_turn: _ReplayTurn,
+    current_provider: str,
+) -> str:
+    current_display = _replay_provider_display_name(current_provider)
+    recorded_display = _replay_provider_display_name(replay_turn.provider)
+    if replay_turn.provider == current_provider:
+        return (
+            f"Retry Last Turn / Fork Last Turn 会把这轮保存的 payload 重放到"
+            f"当前工作区里的 {current_display}。"
+        )
+    return (
+        f"这轮 payload 最初记录在 {recorded_display}，但这次 Retry Last Turn / Fork Last Turn "
+        f"会把它重放到当前工作区里的 {current_display}；如果附件能力不同，bot 会先做适配。"
     )
 
 
@@ -4430,7 +5757,10 @@ def _status_tool_activity_preview_lines(
     if not activities:
         return []
 
-    lines = [f"Recent tools: {len(activities)}", "Tool preview:"]
+    lines = [
+        _with_cn_hint(f"Recent tools: {len(activities)}", f"最近工具：{len(activities)}"),
+        _with_cn_hint("Tool preview:", "工具预览："),
+    ]
     visible_activities = activities[:limit]
     for index, activity in enumerate(visible_activities, start=1):
         title = _status_text_snippet(getattr(activity, "title", None)) or getattr(
@@ -4450,7 +5780,12 @@ def _status_tool_activity_preview_lines(
 
     remaining = len(activities) - len(visible_activities)
     if remaining > 0:
-        lines.append(f"... {remaining} more item{'s' if remaining != 1 else ''}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more item{'s' if remaining != 1 else ''}",
+                f"……另外还有 {remaining} 项",
+            )
+        )
     return lines
 
 
@@ -4574,14 +5909,19 @@ def _status_context_bundle_preview_lines(
 ) -> list[str]:
     if bundle is None or not bundle.items:
         return []
-    lines = ["Bundle preview:"]
+    lines = [_with_cn_hint("Bundle preview:", "上下文包预览：")]
     visible_items = bundle.items[:limit]
     for index, item in enumerate(visible_items, start=1):
         item_label = _status_text_snippet(_context_bundle_item_label(item))
         lines.append(f"{index}. {item_label or _context_bundle_item_label(item)}")
     remaining = len(bundle.items) - len(visible_items)
     if remaining > 0:
-        lines.append(f"... {remaining} more item{'s' if remaining != 1 else ''}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more item{'s' if remaining != 1 else ''}",
+                f"……另外还有 {remaining} 项",
+            )
+        )
     return lines
 
 
@@ -4592,7 +5932,7 @@ def _status_agent_command_preview_lines(
 ) -> list[str]:
     if not commands:
         return []
-    lines = ["Command preview:"]
+    lines = [_with_cn_hint("Command preview:", "命令预览：")]
     visible_commands = tuple(commands[:limit])
     for index, command in enumerate(visible_commands, start=1):
         label = _agent_command_name(command.name)
@@ -4601,7 +5941,12 @@ def _status_agent_command_preview_lines(
         lines.append(f"{index}. {_status_text_snippet(label) or label}")
     remaining = len(commands) - len(visible_commands)
     if remaining > 0:
-        lines.append(f"... {remaining} more command{'s' if remaining != 1 else ''}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more command{'s' if remaining != 1 else ''}",
+                f"……另外还有 {remaining} 条命令",
+            )
+        )
     return lines
 
 
@@ -4743,6 +6088,17 @@ def _status_workspace_changes_summary(git_status) -> str:
     return f"{change_count} change{'s' if change_count != 1 else ''}"
 
 
+def _status_workspace_changes_summary_cn(git_status) -> str:
+    if git_status is None:
+        return "暂不可用"
+    if not getattr(git_status, "is_git_repo", False):
+        return "不是 Git 仓库"
+    change_count = len(getattr(git_status, "entries", ()))
+    if change_count <= 0:
+        return "工作树干净"
+    return f"{change_count} 条变更"
+
+
 def _status_workspace_changes_available(git_status) -> bool:
     if git_status is None or not getattr(git_status, "is_git_repo", False):
         return False
@@ -4760,7 +6116,7 @@ def _status_workspace_change_preview_lines(
     if not entries:
         return []
 
-    lines = ["Workspace change preview:"]
+    lines = [_with_cn_hint("Workspace change preview:", "工作区变更预览：")]
     visible_entries = entries[:limit]
     for index, entry in enumerate(visible_entries, start=1):
         path_label = _status_text_snippet(entry.display_path)
@@ -4770,7 +6126,12 @@ def _status_workspace_change_preview_lines(
         )
     remaining = len(entries) - len(visible_entries)
     if remaining > 0:
-        lines.append(f"... {remaining} more change{'s' if remaining != 1 else ''}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more change{'s' if remaining != 1 else ''}",
+                f"……另外还有 {remaining} 条变更",
+            )
+        )
     return lines
 
 
@@ -4806,12 +6167,17 @@ def _status_recent_session_preview_lines(
 ) -> list[str]:
     if not entries:
         return []
-    lines = ["Recent sessions:"]
+    lines = [_with_cn_hint("Recent sessions:", "最近会话：")]
     for index, entry in enumerate(entries, start=1):
         lines.append(f"{index}. {_status_recent_session_label(entry)}")
     remaining = total_count - len(entries)
     if remaining > 0:
-        lines.append(f"... {remaining} more session{'s' if remaining != 1 else ''}")
+        lines.append(
+            _with_cn_hint(
+                f"... {remaining} more session{'s' if remaining != 1 else ''}",
+                f"……另外还有 {remaining} 条会话",
+            )
+        )
     return lines
 
 
@@ -4855,10 +6221,13 @@ async def handle_callback_query(
     services,
     ui_state: TelegramUiState,
 ) -> None:
+    _bind_services_ui_state(services, ui_state)
     query = update.callback_query
     if query is None:
         return
+    _log_telegram_event("callback_received", update=update)
     if not _is_authorized(update, services):
+        _log_telegram_event("callback_unauthorized", level=logging.WARNING, update=update)
         await query.answer(_unauthorized_text(), show_alert=True)
         return
 
@@ -4895,15 +6264,41 @@ async def handle_callback_query(
             callback_action,
             application=None if context is None else context.application,
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "callback_dispatch_failed",
+            exc,
+            update=update,
+            action=callback_action.action,
+        )
         try:
             await query.answer(_request_failed_text(), show_alert=True)
         except Exception:
             pass
 
 
+async def _handle_application_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = getattr(context, "error", None)
+    if error is None:
+        _log_telegram_event(
+            "application_error_without_exception",
+            level=logging.ERROR,
+            raw_update_type=None if update is None else type(update).__name__,
+        )
+        return
+    if isinstance(update, Update):
+        _log_telegram_exception("application_error", error, update=update)
+        return
+    _log_telegram_exception(
+        "application_error",
+        error,
+        raw_update_type=None if update is None else type(update).__name__,
+    )
+
+
 def build_telegram_application(config, services) -> Application:
     ui_state = TelegramUiState()
+    _bind_services_ui_state(services, ui_state)
 
     async def _post_init(application: Application) -> None:
         await services.bind_telegram_command_menu_updater(
@@ -4955,6 +6350,7 @@ def build_telegram_application(config, services) -> Application:
             partial(handle_agent_command, services=services, ui_state=ui_state),
         )
     )
+    application.add_error_handler(_handle_application_error)
     return application
 
 
@@ -5024,7 +6420,10 @@ async def _handle_pending_text_action(
             ui_state=ui_state,
             active_session_id=history_state.active_session_id,
             can_fork=can_fork,
-            notice="Renamed session.",
+            notice=_with_cn_hint(
+                "Renamed session.",
+                "会话已重命名。",
+            ),
             show_provider_sessions=update.effective_user.id == services.admin_user_id,
             back_target=str(pending_text_action.payload.get("back_target", "none")),
         )
@@ -6353,6 +7752,8 @@ async def _run_agent_attachment_turn_on_message(
             message,
             ui_state=ui_state,
             user_id=user_id,
+            provider=state.provider,
+            workspace_id=state.workspace_id,
             saved_context_items=saved_context_items,
             recovery=False,
         )
@@ -6370,6 +7771,8 @@ async def _run_agent_attachment_turn_on_message(
             message,
             ui_state=ui_state,
             user_id=user_id,
+            provider=turn_state.provider,
+            workspace_id=turn_state.workspace_id,
             saved_context_items=saved_context_items,
             recovery=True,
         )
@@ -6416,16 +7819,29 @@ async def _run_agent_session_turn_on_message(
     if callable(create_task):
         try:
             runtime_state = await services.snapshot_runtime_state()
-        except Exception:
+        except Exception as exc:
+            _log_telegram_exception(
+                "turn_runtime_snapshot_failed",
+                exc,
+                message=message,
+                user_id=user_id,
+                title_hint=_log_text_snippet(title_hint),
+            )
             if on_prepare_failure is not None:
                 try:
                     await on_prepare_failure()
                     return
-                except Exception:
-                    pass
+                except Exception as callback_exc:
+                    _log_telegram_exception(
+                        "turn_prepare_failure_callback_failed",
+                        callback_exc,
+                        message=message,
+                        user_id=user_id,
+                        title_hint=_log_text_snippet(title_hint),
+                    )
             await message.reply_text(
                 _request_failed_text(),
-                reply_markup=_main_menu_markup(user_id, services),
+                reply_markup=await _main_menu_markup(user_id, services),
             )
             return
         task: asyncio.Task | None = None
@@ -6496,16 +7912,29 @@ async def _execute_agent_session_turn_on_message(
                 time.monotonic(),
             ),
         )
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "turn_prepare_failed",
+            exc,
+            message=message,
+            user_id=user_id,
+            title_hint=_log_text_snippet(title_hint),
+        )
         if on_prepare_failure is not None:
             try:
                 await on_prepare_failure()
                 return
-            except Exception:
-                pass
+            except Exception as callback_exc:
+                _log_telegram_exception(
+                    "turn_prepare_failure_callback_failed",
+                    callback_exc,
+                    message=message,
+                    user_id=user_id,
+                    title_hint=_log_text_snippet(title_hint),
+                )
         await message.reply_text(
             _request_failed_text(),
-            reply_markup=_main_menu_markup(user_id, services),
+            reply_markup=await _main_menu_markup(user_id, services),
         )
         return
 
@@ -6556,21 +7985,56 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
     try:
         response = await turn_runner(session, stream, state)
     except asyncio.CancelledError:
+        _log_telegram_event(
+            "turn_cancelled",
+            message=message,
+            user_id=user_id,
+            state=state,
+            session=session,
+            title_hint=_log_text_snippet(title_hint),
+        )
         await stream.finish(stop_reason="cancelled")
         await _invoke_turn_failure_callback(on_turn_failure)
         return
     except UnsupportedPromptContentError as exc:
+        _log_telegram_exception(
+            "turn_unsupported_prompt_content",
+            exc,
+            message=message,
+            user_id=user_id,
+            state=state,
+            session=session,
+            title_hint=_log_text_snippet(title_hint),
+        )
         await stream.fail(_unsupported_prompt_content_message(state.provider, exc))
         await _invoke_turn_failure_callback(on_turn_failure)
         return
     except AttachmentPromptError as exc:
+        _log_telegram_exception(
+            "turn_attachment_prompt_error",
+            exc,
+            message=message,
+            user_id=user_id,
+            state=state,
+            session=session,
+            title_hint=_log_text_snippet(title_hint),
+        )
         await stream.fail(
             str(exc),
             reply_markup=_status_only_notice_markup(ui_state, user_id),
         )
         await _invoke_turn_failure_callback(on_turn_failure)
         return
-    except Exception:
+    except Exception as exc:
+        _log_telegram_exception(
+            "turn_runner_failed",
+            exc,
+            message=message,
+            user_id=user_id,
+            state=state,
+            session=session,
+            title_hint=_log_text_snippet(title_hint),
+        )
         invalidate = getattr(state.session_store, "invalidate", None)
         session_lost = False
         try:
@@ -6580,8 +8044,17 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
             else:
                 await session.close()
                 session_lost = True
-        except Exception:
-            pass
+        except Exception as invalidate_exc:
+            _log_telegram_exception(
+                "turn_failure_cleanup_failed",
+                invalidate_exc,
+                message=message,
+                user_id=user_id,
+                state=state,
+                session=session,
+                title_hint=_log_text_snippet(title_hint),
+                level=logging.WARNING,
+            )
         if session_lost:
             await _clear_session_bound_ui_after_session_loss(
                 application,
@@ -6610,8 +8083,17 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
             session,
             title_hint=title_hint,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        _log_telegram_exception(
+            "record_session_usage_failed",
+            exc,
+            message=message,
+            user_id=user_id,
+            state=state,
+            session=session,
+            title_hint=_log_text_snippet(title_hint),
+            level=logging.WARNING,
+        )
 
     workspace_changes_follow_up_git_status = _workspace_changes_follow_up_git_status(
         before_workspace_git_status,
@@ -6635,8 +8117,17 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
     if after_success is not None:
         try:
             await after_success(state)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_telegram_exception(
+                "turn_after_success_failed",
+                exc,
+                message=message,
+                user_id=user_id,
+                state=state,
+                session=session,
+                title_hint=_log_text_snippet(title_hint),
+                level=logging.WARNING,
+            )
 
     if workspace_changes_follow_up_git_status is not None:
         await _reply_workspace_changes_follow_up(
@@ -6659,8 +8150,17 @@ async def _run_agent_session_turn_with_prepared_session_on_message(
     if after_turn_success is not None:
         try:
             await after_turn_success(state, session)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log_telegram_exception(
+                "turn_after_turn_success_failed",
+                exc,
+                message=message,
+                user_id=user_id,
+                state=state,
+                session=session,
+                title_hint=_log_text_snippet(title_hint),
+                level=logging.WARNING,
+            )
 
 
 async def _invoke_turn_failure_callback(on_turn_failure) -> None:
@@ -7006,7 +8506,10 @@ async def _show_agent_command_detail_from_callback(
             user_id=user_id,
             page=page,
             back_target=back_target,
-            notice="Agent command is no longer available.",
+            notice=_with_cn_hint(
+                "Agent command is no longer available.",
+                "这个 Agent 命令当前已经不可用了。",
+            ),
         )
         return
     text, markup = _build_agent_command_detail_view(
@@ -7469,18 +8972,26 @@ def _add_workspace_changes_to_context_bundle(
 def _workspace_changes_add_to_bundle_notice(*, added_count: int, duplicate_count: int) -> str:
     total = added_count + duplicate_count
     if total <= 0:
-        return "No workspace changes to add."
-    if added_count == total:
-        return f"Added {added_count} {_count_noun(added_count, 'change', 'changes')} to context bundle."
-    if added_count == 0:
-        return (
-            f"All {duplicate_count} {_count_noun(duplicate_count, 'change', 'changes')} "
-            "are already in the context bundle."
+        return _with_cn_hint(
+            "No workspace changes to add.",
+            "当前没有可加入上下文包的工作区变更。",
         )
-    return (
+    if added_count == total:
+        return _with_cn_hint(
+            f"Added {added_count} {_count_noun(added_count, 'change', 'changes')} to context bundle.",
+            f"已将 {added_count} 项工作区变更加入上下文包。",
+        )
+    if added_count == 0:
+        return _with_cn_hint(
+            f"All {duplicate_count} {_count_noun(duplicate_count, 'change', 'changes')} "
+            "are already in the context bundle.",
+            f"这 {duplicate_count} 项工作区变更本来就在上下文包里。",
+        )
+    return _with_cn_hint(
         f"Added {added_count} {_count_noun(added_count, 'change', 'changes')} to context bundle. "
         f"{duplicate_count} {_count_noun(duplicate_count, 'change', 'changes')} "
-        f"{'was' if duplicate_count == 1 else 'were'} already present."
+        f"{'was' if duplicate_count == 1 else 'were'} already present.",
+        f"已新增 {added_count} 项工作区变更到上下文包；另有 {duplicate_count} 项本来就在里面。",
     )
 
 
@@ -7497,15 +9008,27 @@ def _workspace_changes_start_bundle_chat_notice(
     if added_count + duplicate_count <= 0:
         return base_notice
     if already_active:
-        return f"{base_notice} Bundle chat stays on."
-    return f"{base_notice} Bundle chat enabled."
+        return _with_cn_hint(
+            f"{base_notice} Bundle chat stays on.",
+            "以上变更已就绪，Bundle Chat 会继续保持开启。",
+        )
+    return _with_cn_hint(
+        f"{base_notice} Bundle chat enabled.",
+        "以上变更已就绪，并已开启 Bundle Chat。",
+    )
 
 
 def _single_context_item_add_to_bundle_notice(*, item_kind: str, added: bool) -> str:
     noun = "file" if item_kind == "file" else "change"
     if added:
-        return f"Added {noun} to context bundle."
-    return f"{noun.capitalize()} is already in the context bundle."
+        return _with_cn_hint(
+            f"Added {noun} to context bundle.",
+            f"已将这项{'文件' if item_kind == 'file' else '变更'}加入上下文包。",
+        )
+    return _with_cn_hint(
+        f"{noun.capitalize()} is already in the context bundle.",
+        f"这项{'文件' if item_kind == 'file' else '变更'}本来就在上下文包里。",
+    )
 
 
 def _single_context_item_start_bundle_chat_notice(
@@ -7519,8 +9042,14 @@ def _single_context_item_start_bundle_chat_notice(
         added=added,
     )
     if already_active:
-        return f"{base_notice} Bundle chat stays on."
-    return f"{base_notice} Bundle chat enabled."
+        return _with_cn_hint(
+            f"{base_notice} Bundle chat stays on.",
+            "这项内容已就绪，Bundle Chat 会继续保持开启。",
+        )
+    return _with_cn_hint(
+        f"{base_notice} Bundle chat enabled.",
+        "这项内容已就绪，并已开启 Bundle Chat。",
+    )
 
 
 def _search_result_unique_paths(search_results) -> tuple[str, ...]:
@@ -7565,22 +9094,28 @@ def _add_workspace_search_results_to_context_bundle(
 def _workspace_search_add_to_bundle_notice(*, added_count: int, duplicate_count: int) -> str:
     total = added_count + duplicate_count
     if total <= 0:
-        return "No matching files to add."
+        return _with_cn_hint(
+            "No matching files to add.",
+            "当前没有可加入上下文包的匹配文件。",
+        )
     if added_count == total:
-        return (
+        return _with_cn_hint(
             f"Added {added_count} {_count_noun(added_count, 'file', 'files')} "
-            "from search results to context bundle."
+            "from search results to context bundle.",
+            f"已将搜索结果里的 {added_count} 个文件加入上下文包。",
         )
     if added_count == 0:
-        return (
+        return _with_cn_hint(
             f"All {duplicate_count} {_count_noun(duplicate_count, 'file', 'files')} "
-            "from search results are already in the context bundle."
+            "from search results are already in the context bundle.",
+            f"搜索结果里的这 {duplicate_count} 个文件本来就在上下文包里。",
         )
-    return (
+    return _with_cn_hint(
         f"Added {added_count} {_count_noun(added_count, 'file', 'files')} "
         "from search results to context bundle. "
         f"{duplicate_count} {_count_noun(duplicate_count, 'file', 'files')} "
-        f"{'was' if duplicate_count == 1 else 'were'} already present."
+        f"{'was' if duplicate_count == 1 else 'were'} already present.",
+        f"已将搜索结果里的 {added_count} 个文件加入上下文包；另有 {duplicate_count} 个本来就在里面。",
     )
 
 
@@ -7597,8 +9132,14 @@ def _workspace_search_start_bundle_chat_notice(
     if added_count + duplicate_count <= 0:
         return base_notice
     if already_active:
-        return f"{base_notice} Bundle chat stays on."
-    return f"{base_notice} Bundle chat enabled."
+        return _with_cn_hint(
+            f"{base_notice} Bundle chat stays on.",
+            "以上搜索结果已就绪，Bundle Chat 会继续保持开启。",
+        )
+    return _with_cn_hint(
+        f"{base_notice} Bundle chat enabled.",
+        "以上搜索结果已就绪，并已开启 Bundle Chat。",
+    )
 
 
 def _visible_workspace_entries(listing, page: int):
@@ -7644,22 +9185,28 @@ def _add_workspace_listing_files_to_context_bundle(
 def _workspace_listing_add_to_bundle_notice(*, added_count: int, duplicate_count: int) -> str:
     total = added_count + duplicate_count
     if total <= 0:
-        return "No visible files to add."
+        return _with_cn_hint(
+            "No visible files to add.",
+            "当前页没有可加入上下文包的可见文件。",
+        )
     if added_count == total:
-        return (
+        return _with_cn_hint(
             f"Added {added_count} {_count_noun(added_count, 'file', 'files')} "
-            "from workspace view to context bundle."
+            "from workspace view to context bundle.",
+            f"已将当前页的 {added_count} 个文件加入上下文包。",
         )
     if added_count == 0:
-        return (
+        return _with_cn_hint(
             f"All {duplicate_count} visible {_count_noun(duplicate_count, 'file', 'files')} "
-            f"{'is' if duplicate_count == 1 else 'are'} already in the context bundle."
+            f"{'is' if duplicate_count == 1 else 'are'} already in the context bundle.",
+            f"当前页这 {duplicate_count} 个可见文件本来就在上下文包里。",
         )
-    return (
+    return _with_cn_hint(
         f"Added {added_count} {_count_noun(added_count, 'file', 'files')} "
         "from workspace view to context bundle. "
         f"{duplicate_count} {_count_noun(duplicate_count, 'file', 'files')} "
-        f"{'was' if duplicate_count == 1 else 'were'} already present."
+        f"{'was' if duplicate_count == 1 else 'were'} already present.",
+        f"已将当前页的 {added_count} 个文件加入上下文包；另有 {duplicate_count} 个本来就在里面。",
     )
 
 
@@ -7676,8 +9223,14 @@ def _workspace_listing_start_bundle_chat_notice(
     if added_count + duplicate_count <= 0:
         return base_notice
     if already_active:
-        return f"{base_notice} Bundle chat stays on."
-    return f"{base_notice} Bundle chat enabled."
+        return _with_cn_hint(
+            f"{base_notice} Bundle chat stays on.",
+            "以上文件已就绪，Bundle Chat 会继续保持开启。",
+        )
+    return _with_cn_hint(
+        f"{base_notice} Bundle chat enabled.",
+        "以上文件已就绪，并已开启 Bundle Chat。",
+    )
 
 
 def _build_workspace_changes_follow_up_view(
@@ -7790,31 +9343,122 @@ def _build_session_loss_recovery_view(
 ):
     last_request = ui_state.get_last_request(user_id, workspace_id)
     last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    provider_label = resolve_provider_profile(provider).display_name
+
     lines = [
-        "Request failed. "
-        f"The current live session for {resolve_provider_profile(provider).display_name} "
-        f"in {workspace_label} was closed."
+        _view_heading(
+            f"Request recovery for {provider_label} in {workspace_label}",
+            f"失败恢复：{workspace_label} 中的 {provider_label}",
+        ),
+        _with_cn_hint(
+            "The current live session closed before this request finished. "
+            "Use the recovery assets saved in this workspace to keep going.",
+            "当前 live session 已在这次请求完成前关闭。你仍可以利用这个工作区里保存下来的恢复资产，直接接回工作。",
+        ),
     ]
+    reuse_summary = _workspace_reuse_summary_line(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    if reuse_summary is not None:
+        lines.append(reuse_summary)
     if last_turn is not None:
         lines.append(
-            "Recommended first step: Retry Last Turn to rerun the previous request, or open Bot "
-            "Status if you want to inspect runtime and history first."
+            _with_cn_hint(
+                "Recommended first step: Retry Last Turn to rerun the previous request, or open "
+                "Bot Status if you want to inspect runtime and history first.",
+                "建议第一步：优先用 Retry Last Turn 重放上一轮；如果你想先检查运行态和历史，再打开状态中心。",
+            )
+        )
+    elif last_request is not None and bundle_count > 0:
+        lines.append(
+            _with_cn_hint(
+                "Recommended first step: use Bundle + Last Request to reuse the saved request "
+                "with the current bundle, or Run Last Request if the bundle is no longer needed.",
+                "建议第一步：优先用 Bundle + Last Request 带着当前上下文包复用已保存请求；如果这份上下文已经不需要了，再单独用 Run Last Request。",
+            )
         )
     elif last_request is not None:
         lines.append(
-            "Recommended first step: Run Last Request to replay the saved request text, or open "
-            "Bot Status if you want to inspect runtime and history first."
+            _with_cn_hint(
+                "Recommended first step: Run Last Request to replay the saved request text, or "
+                "open Bot Status if you want to inspect runtime and history first.",
+                "建议第一步：先用 Run Last Request 重放已保存请求文本；如果你想先检查运行态和历史，再打开状态中心。",
+            )
+        )
+    elif bundle_count > 0:
+        lines.append(
+            _with_cn_hint(
+                "Recommended first step: Ask Agent With Context to keep working with the current "
+                "bundle, or open Context Bundle if you want to inspect it first.",
+                "建议第一步：先用 Ask Agent With Context 带着当前上下文继续；如果你想先确认内容，再打开 Context Bundle。",
+            )
         )
     else:
         lines.append(
-            "Recommended first step: Open Bot Status to inspect runtime and history, or start a "
-            "New Session if you want a clean slate."
+            _with_cn_hint(
+                "Recommended first step: Open Bot Status to inspect runtime and history, or "
+                "start a New Session if you want a clean slate.",
+                "建议第一步：先打开状态中心确认运行态和历史；如果你想彻底重来，就新建会话。",
+            )
         )
     if last_request is not None:
         lines.append(
-            f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}"
+            _with_cn_hint(
+                f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}",
+                f"上次请求：{_status_text_snippet(last_request.text, limit=120) or '[empty]'}",
+            )
         )
-        lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
+        lines.append(
+            _with_cn_hint(
+                f"Last request source: {_last_request_source_summary(last_request)}",
+                f"请求来源：{_last_request_source_summary_cn(last_request)}",
+            )
+        )
+    if bundle_count > 0:
+        bundle_summary = _status_item_count_summary(bundle_count) or "current bundle"
+        bundle_summary_cn = _status_item_count_summary_cn(bundle_count) or "当前上下文包"
+        if last_request is not None:
+            lines.append(
+                _with_cn_hint(
+                    "Context bundle ready: "
+                    f"{bundle_summary}. Bundle + Last Request reuses the saved text with it, "
+                    "and Ask Agent With Context waits for your next plain-text message.",
+                    "上下文包已就绪："
+                    f"{bundle_summary_cn}。Bundle + Last Request 会带着它复用已保存请求，"
+                    "Ask Agent With Context 则会等待你输入下一条纯文本问题。",
+                )
+            )
+        else:
+            lines.append(
+                _with_cn_hint(
+                    "Context bundle ready: "
+                    f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message.",
+                    "上下文包已就绪："
+                    f"{bundle_summary_cn}。Ask Agent With Context 会等待你输入下一条纯文本问题。",
+                )
+            )
+        if bundle_chat_active:
+            lines.append(
+                _with_cn_hint(
+                    "Bundle chat is already on, so a fresh plain text message would include that "
+                    "bundle automatically.",
+                    "Bundle Chat 已开启，所以你直接发送新的纯文本时也会自动带上这份上下文包。",
+                )
+            )
+        else:
+            lines.append(
+                _with_cn_hint(
+                    "Start Bundle Chat if you want later plain-text messages to keep carrying "
+                    "this bundle until you stop it.",
+                    "如果你想让后续纯文本持续携带这份上下文包，直到你主动停掉，就开启 Bundle Chat。",
+                )
+            )
     text = "\n".join(lines)
     buttons: list[list[InlineKeyboardButton]] = []
     primary_buttons = []
@@ -7852,6 +9496,24 @@ def _build_session_loss_recovery_view(
                 "recover_new_session",
             )
         )
+    elif bundle_count > 0:
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Ask Agent With Context",
+                "runtime_status_control",
+                target="context_bundle_ask",
+            )
+        )
+        primary_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "New Session",
+                "recover_new_session",
+            )
+        )
     else:
         primary_buttons.append(
             _callback_button(
@@ -7871,6 +9533,60 @@ def _build_session_loss_recovery_view(
                     "Run Last Request",
                     "recover_run_last_request",
                 )
+            ]
+        )
+    if bundle_count > 0:
+        if last_request is not None or last_turn is not None:
+            bundle_buttons = [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Context",
+                    "runtime_status_control",
+                    target="context_bundle_ask",
+                )
+            ]
+        else:
+            bundle_buttons = []
+        if last_request is not None:
+            bundle_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Bundle + Last Request",
+                    "runtime_status_control",
+                    target="context_bundle_ask_last_request",
+                )
+            )
+        elif not bundle_buttons:
+            bundle_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Context Bundle",
+                    "runtime_status_open",
+                    target="bundle",
+                )
+            )
+        if bundle_buttons:
+            buttons.append(bundle_buttons)
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Context Bundle",
+                    "runtime_status_open",
+                    target="bundle",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Stop Bundle Chat" if bundle_chat_active else "Start Bundle Chat",
+                    "runtime_status_stop_bundle_chat"
+                    if bundle_chat_active
+                    else "runtime_status_start_bundle_chat",
+                ),
             ]
         )
     buttons.append(
@@ -7934,13 +9650,26 @@ def _session_action_guide_lines(
     can_fork: bool,
     can_retry_last_turn: bool,
 ) -> list[str]:
-    lines = [f"Actions: Run {run_summary}."]
+    lines = [
+        _with_cn_hint(
+            f"Actions: Run {run_summary}.",
+            f"操作说明：Run 会{run_summary}。",
+        )
+    ]
     if can_fork:
-        lines.append("Fork creates a new live session branched from it.")
+        lines.append(
+            _with_cn_hint(
+                "Fork creates a new live session branched from it.",
+                "Fork 会基于它创建一个新的 live session 分支。",
+            )
+        )
     if can_retry_last_turn:
         retry_labels = "Run+Retry / Fork+Retry" if can_fork else "Run+Retry"
         lines.append(
-            f"{retry_labels} also replay the previous turn immediately after the switch."
+            _with_cn_hint(
+                f"{retry_labels} also replay the previous turn immediately after the switch.",
+                f"{retry_labels} 还会在切换后立刻重放上一轮。",
+            )
         )
     return lines
 
@@ -7952,18 +9681,21 @@ def _session_collection_next_step_line(
 ) -> str:
     if can_retry_last_turn:
         retry_labels = "Run+Retry / Fork+Retry" if can_fork else "Run+Retry"
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the session you want to inspect first, or use "
-            f"{retry_labels} when you already know you want that session plus the previous turn."
+            f"{retry_labels} when you already know you want that session plus the previous turn.",
+            f"建议下一步：先打开你想看的会话；如果你已经确定要切过去并立刻带上上一轮，就直接用 {retry_labels}。",
         )
     if can_fork:
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the session you want to inspect first, or tap Run / "
-            "Fork on the right one when you already know where to continue."
+            "Fork on the right one when you already know where to continue.",
+            "建议下一步：先打开你想看的会话；如果你已经知道接下来要在哪条线上继续，就直接点对应的 Run / Fork。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: open the session you want to inspect first, or tap Run on the "
-        "right one when you already know where to continue."
+        "right one when you already know where to continue.",
+        "建议下一步：先打开你想看的会话；如果你已经知道要在哪里继续，就直接点对应的 Run。",
     )
 
 
@@ -7975,28 +9707,33 @@ def _session_entry_next_step_line(
 ) -> str:
     if is_current:
         if can_fork:
-            return (
+            return _with_cn_hint(
                 "Recommended next step: go back when you're ready to keep chatting here, or use "
-                "Fork Session if you want a clean branch first."
+                "Fork Session if you want a clean branch first.",
+                "建议下一步：准备继续在这里聊天时就返回；如果你想先拉一条干净分支，就用 Fork Session。",
             )
-        return (
+        return _with_cn_hint(
             "Recommended next step: go back when you're ready to keep chatting here, or use "
-            "Refresh if you just needed to verify the saved session details."
+            "Refresh if you just needed to verify the saved session details.",
+            "建议下一步：准备继续在这里聊天时就返回；如果你只是来核对会话详情，就点 Refresh。",
         )
     if can_retry_last_turn:
         retry_labels = "Run+Retry / Fork+Retry" if can_fork else "Run+Retry"
-        return (
+        return _with_cn_hint(
             "Recommended next step: tap Run Session to continue there, or use "
-            f"{retry_labels} if you also want the previous turn replayed immediately."
+            f"{retry_labels} if you also want the previous turn replayed immediately.",
+            f"建议下一步：点 Run Session 继续这个会话；如果你还想立刻重放上一轮，就用 {retry_labels}。",
         )
     if can_fork:
-        return (
+        return _with_cn_hint(
             "Recommended next step: tap Run Session to continue there, or Fork Session if you "
-            "want a clean branch first."
+            "want a clean branch first.",
+            "建议下一步：点 Run Session 继续这个会话；如果你想先拉一条干净分支，就用 Fork Session。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: tap Run Session to continue there, or go back to compare "
-        "another session."
+        "another session.",
+        "建议下一步：点 Run Session 继续这个会话；如果你还想比对其他会话，就先返回。",
     )
 
 
@@ -8010,24 +9747,54 @@ def _append_paged_list_summary_lines(
     page: int,
     page_count: int,
 ) -> None:
-    lines.append(f"{total_label}: {total_count}")
+    lines.append(
+        _with_cn_hint(
+            f"{total_label}: {total_count}",
+            f"{_localized_total_label(total_label)}：{total_count}",
+        )
+    )
     if visible_count > 0 and page_count > 1:
         end_index = start_index + visible_count - 1
-        lines.append(f"Showing: {start_index}-{end_index} of {total_count}")
+        lines.append(
+            _with_cn_hint(
+                f"Showing: {start_index}-{end_index} of {total_count}",
+                f"当前显示：第 {start_index}-{end_index} 项，共 {total_count} 项。",
+            )
+        )
     if page_count > 1:
-        lines.append(f"Page: {page + 1}/{page_count}")
+        lines.append(
+            _with_cn_hint(
+                f"Page: {page + 1}/{page_count}",
+                f"页码：{page + 1}/{page_count}",
+            )
+        )
 
 
 def _append_action_guide_lines(
     lines: list[str],
     *,
-    entries: tuple[tuple[str, str], ...],
+    entries: tuple[tuple[str, ...], ...],
 ) -> None:
     if not entries:
         return
     lines.append("")
-    lines.append("Action guide:")
-    for label, summary in entries:
+    lines.append(
+        _with_cn_hint(
+            "Action guide:",
+            "操作说明：先看每组按钮解决什么问题，再决定点哪个动作。",
+        )
+    )
+    for entry in entries:
+        if len(entry) >= 3:
+            label, en_summary, cn_summary = entry[0], entry[1], entry[2]
+            lines.append(
+                _with_cn_hint(
+                    f"- {label} {en_summary}",
+                    f"- {label} {cn_summary}",
+                )
+            )
+            continue
+        label, summary = entry[0], entry[1]
         lines.append(f"- {label} {summary}")
 
 
@@ -8050,23 +9817,33 @@ def _workspace_collection_action_guide_entries(
     bundle_chat_label: str,
     add_label: str,
     has_last_request: bool,
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, ...], ...]:
     entries = [
-        (ask_label, f"starts a fresh turn using {subject_summary}."),
+        (
+            ask_label,
+            f"starts a fresh turn using {subject_summary}.",
+            f"会基于{subject_summary}发起一条全新的提问。",
+        ),
     ]
     if has_last_request:
         entries.append(
-            ("Ask With Last Request", f"reuses the saved request text with {subject_summary}.")
+            (
+                "Ask With Last Request",
+                f"reuses the saved request text with {subject_summary}.",
+                f"会把已保存的请求文本和{subject_summary}一起复用。",
+            )
         )
     entries.extend(
         [
             (
                 bundle_chat_label,
                 f"keeps {subject_summary} attached to your next plain text messages.",
+                f"会把{subject_summary}持续挂到你接下来发出的纯文本消息上。",
             ),
             (
                 add_label,
                 f"saves {subject_summary} to Context Bundle without sending anything yet.",
+                f"会先把{subject_summary}存进上下文包，但暂时不会发给 Agent。",
             ),
         ]
     )
@@ -8081,13 +9858,15 @@ def _workspace_collection_next_step_line(
     has_last_request: bool,
 ) -> str:
     if has_last_request:
-        return (
+        return _with_cn_hint(
             f"Recommended next step: {inspect_summary}, or use Ask With Last Request / "
-            f"{add_label} when this page already covers what you need."
+            f"{add_label} when this page already covers what you need.",
+            f"建议下一步：先{inspect_summary}；如果这一页已经覆盖了你要的上下文，就直接用 Ask With Last Request / {add_label}。",
         )
-    return (
+    return _with_cn_hint(
         f"Recommended next step: {inspect_summary}, or use {ask_label} / "
-        f"{add_label} when this page already covers what you need."
+        f"{add_label} when this page already covers what you need.",
+        f"建议下一步：先{inspect_summary}；如果这一页已经够用了，就直接用 {ask_label} / {add_label}。",
     )
 
 
@@ -8100,32 +9879,37 @@ def _workspace_item_preview_next_step_line(
     has_last_request: bool,
 ) -> str:
     if has_last_request:
-        return (
+        return _with_cn_hint(
             f"Recommended next step: Ask With Last Request if the saved text already fits "
-            f"{subject_label}, or use {ask_label} when you want to send fresh instructions."
+            f"{subject_label}, or use {ask_label} when you want to send fresh instructions.",
+            f"建议下一步：如果已保存文本已经适合{subject_label}，就用 Ask With Last Request；如果你想补充新指令，再用 {ask_label}。",
         )
-    return (
+    return _with_cn_hint(
         f"Recommended next step: use {ask_label} if {subject_label} already covers what you need, "
-        f"or {secondary_label} if {secondary_summary}."
+        f"or {secondary_label} if {secondary_summary}.",
+        f"建议下一步：如果{subject_label}已经覆盖你要问的内容，就直接用 {ask_label}；如果你想先留作后续复用，就用 {secondary_label}。",
     )
 
 
 def _workspace_runtime_next_step_line(*, has_mcp_servers: bool) -> str:
     if has_mcp_servers:
-        return (
+        return _with_cn_hint(
             "Recommended next step: open an MCP server first if you need transport or config-key "
-            "details, or go back when the runtime wiring already looks right."
+            "details, or go back when the runtime wiring already looks right.",
+            "建议下一步：如果你要核对传输或配置键细节，就先打开具体 MCP server；如果运行时接线看起来没问题，就直接返回。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: go back to Bot Status if the built-in filesystem / terminal "
-        "tools are enough, or reopen this page later when you need to verify runtime wiring."
+        "tools are enough, or reopen this page later when you need to verify runtime wiring.",
+        "建议下一步：如果内建文件系统 / 终端工具已经够用，就返回状态中心；等你真要核对运行时接线时再回来。",
     )
 
 
 def _workspace_runtime_server_next_step_line() -> str:
-    return (
+    return _with_cn_hint(
         "Recommended next step: refresh if you just changed runtime config, or go back to "
-        "compare another MCP server."
+        "compare another MCP server.",
+        "建议下一步：如果你刚改过运行时配置，就先刷新；否则返回去对比其他 MCP server。",
     )
 
 
@@ -8138,17 +9922,37 @@ def _workspace_item_action_guide_entries(
     has_last_request: bool,
     bundle_chat_label: str | None = None,
     bundle_chat_summary: str | None = None,
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, ...], ...]:
     entries = [
-        (ask_label, f"starts a fresh turn about {subject_summary}."),
+        (
+            ask_label,
+            f"starts a fresh turn about {subject_summary}.",
+            f"会围绕{subject_summary}发起一条全新的提问。",
+        ),
     ]
     if has_last_request:
         entries.append(
-            ("Ask With Last Request", f"reuses the saved request text with {subject_summary}.")
+            (
+                "Ask With Last Request",
+                f"reuses the saved request text with {subject_summary}.",
+                f"会把已保存的请求文本和{subject_summary}一起复用。",
+            )
         )
     if bundle_chat_label is not None and bundle_chat_summary is not None:
-        entries.append((bundle_chat_label, bundle_chat_summary))
-    entries.append((secondary_label, secondary_summary))
+        entries.append(
+            (
+                bundle_chat_label,
+                bundle_chat_summary,
+                f"会把{subject_summary}挂到你接下来发出的纯文本消息上。",
+            )
+        )
+    entries.append(
+        (
+            secondary_label,
+            secondary_summary,
+            f"会先把{subject_summary}留在本地上下文包里，方便稍后复用。",
+        )
+    )
     return tuple(entries)
 
 
@@ -8158,108 +9962,133 @@ def _context_bundle_next_step_line(
     has_last_request: bool,
 ) -> str:
     if bundle_chat_active and has_last_request:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Ask With Last Request if you want to reuse the saved text "
-            "with this bundle, or send plain text from chat to keep bundle chat going."
+            "with this bundle, or send plain text from chat to keep bundle chat going.",
+            "建议下一步：如果你想把已保存文本和这份上下文包一起复用，就用 Ask With Last Request；如果你只是继续聊，就直接发送纯文本保持 Bundle Chat 运行。",
         )
     if bundle_chat_active:
-        return (
+        return _with_cn_hint(
             "Recommended next step: send plain text from chat to keep using this bundle, or Ask "
-            "Agent With Context if you want to launch the next turn from here."
+            "Agent With Context if you want to launch the next turn from here.",
+            "建议下一步：直接在聊天里发送纯文本，继续带着这份上下文包；如果你想从这个页面显式发起下一轮，就用 Ask Agent With Context。",
         )
     if has_last_request:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Ask With Last Request to reuse the saved text with this "
-            "bundle, or Ask Agent With Context if you want to send fresh text instead."
+            "bundle, or Ask Agent With Context if you want to send fresh text instead.",
+            "建议下一步：如果你想复用已保存文本，就用 Ask With Last Request；如果你要发一条新的问题，就用 Ask Agent With Context。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: Ask Agent With Context to work with this bundle, or Start Bundle "
-        "Chat if you want the next plain-text message to carry it."
+        "Chat if you want the next plain-text message to carry it.",
+        "建议下一步：用 Ask Agent With Context 带着这份上下文包开始提问；如果你只想让下一条纯文本自动携带它，就开启 Bundle Chat。",
     )
 
 
 def _last_request_next_step_line(*, last_turn_available: bool) -> str:
     if last_turn_available:
-        return (
+        return _with_cn_hint(
             "Recommended next step: Run Last Request if the saved text is enough, or Retry / Fork "
-            "Last Turn if you need the original payload back."
+            "Last Turn if you need the original payload back.",
+            "建议下一步：如果已保存文本已经够用，就用 Run Last Request；如果你需要原始 payload，就用 Retry / Fork Last Turn。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: Run Last Request if the saved text is still enough, or go back to "
-        "Bot Status if you want fresh workspace context first."
+        "Bot Status if you want fresh workspace context first.",
+        "建议下一步：如果已保存文本仍然适用，就直接用 Run Last Request；如果你想先补最新工作区上下文，就回状态中心。",
     )
 
 
 def _last_turn_next_step_line() -> str:
-    return (
+    return _with_cn_hint(
         "Recommended next step: Retry Last Turn if you want the same payload in the current live "
-        "session, or Fork Last Turn if you want a clean branch first."
+        "session, or Fork Last Turn if you want a clean branch first.",
+        "建议下一步：如果你想在当前 live session 里重放同一份 payload，就用 Retry Last Turn；如果你想先开干净分支，就用 Fork Last Turn。",
     )
 
 
 def _agent_commands_next_step_line(*, has_args_commands: bool) -> str:
     if has_args_commands:
-        return (
+        return _with_cn_hint(
             "Recommended next step: run a command directly if you already know it, or open one "
-            "first to confirm its args and example."
+            "first to confirm its args and example.",
+            "建议下一步：如果你已经知道要跑哪个命令，就直接执行；如果还想确认参数和示例，就先点开查看。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: run a command directly if you already know it, or open one first "
-        "if you want to review what it does."
+        "if you want to review what it does.",
+        "建议下一步：如果你已经确认命令，就直接执行；如果还想回顾它的作用，就先点开看详情。",
     )
 
 
 def _agent_command_action_guide_entries(
     *,
     has_args_commands: bool,
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, ...], ...]:
     entries = [
-        ("Run N", "starts that slash command immediately when no extra args are needed."),
+        (
+            "Run N",
+            "starts that slash command immediately when no extra args are needed.",
+            "在命令不需要额外参数时，会立即执行对应 slash 命令。",
+        ),
     ]
     if has_args_commands:
         entries.append(
             (
                 "Args N",
                 "waits for your next plain-text message and uses it as command arguments.",
+                "会等待你下一条纯文本，并把它当作命令参数使用。",
             )
         )
-    entries.append(("Open N", "shows the full description and example before you run it."))
+    entries.append(
+        (
+            "Open N",
+            "shows the full description and example before you run it.",
+            "会先展示完整说明和示例，再决定要不要执行。",
+        )
+    )
     return tuple(entries)
 
 
 def _agent_command_detail_next_step_line(*, requires_args: bool) -> str:
     if requires_args:
-        return (
+        return _with_cn_hint(
             "Recommended next step: tap Enter Args if you already know what to send, or go back "
-            "to compare another command first."
+            "to compare another command first.",
+            "建议下一步：如果你已经知道要传什么参数，就点 Enter Args；如果还想比对其他命令，就先返回。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: tap Run Command if this is the command you need, or go back to "
-        "compare another command first."
+        "compare another command first.",
+        "建议下一步：如果这就是你要的命令，就点 Run Command；如果还想比对其他命令，就先返回。",
     )
 
 
 def _model_mode_next_step_line(*, can_retry_last_turn: bool) -> str:
     if can_retry_last_turn:
-        return (
+        return _with_cn_hint(
             "Recommended next step: open a choice first if you want to compare details, or "
             "switch directly and use ...+Retry when the saved Last Turn should rerun under the "
-            "new setting."
+            "new setting.",
+            "建议下一步：如果你想先比细节，就先打开某个选项；如果已经确定，并且想让保存的上一轮在新设置下重跑，就直接切换并用 ...+Retry。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: open a choice first if you want to compare details, or switch "
-        "directly when you already know the setting you need."
+        "directly when you already know the setting you need.",
+        "建议下一步：如果你想先比细节，就先打开某个选项；如果已经知道自己要哪个设置，就直接切换。",
     )
 
 
 def _model_mode_action_guide_entries(
     *,
     can_retry_last_turn: bool,
-) -> tuple[tuple[str, str], ...]:
+) -> tuple[tuple[str, ...], ...]:
     entries = [
         (
             "Model: ... / Mode: ...",
             "switches the current live session without rerunning anything.",
+            "会切换当前 live session 的设置，但不会自动重跑任何内容。",
         )
     ]
     if can_retry_last_turn:
@@ -8267,12 +10096,14 @@ def _model_mode_action_guide_entries(
             (
                 "Model+Retry: ... / Mode+Retry: ...",
                 "switches first, then reruns the saved Last Turn immediately.",
+                "会先切换设置，再立刻重跑保存下来的上一轮。",
             )
         )
     entries.append(
         (
             "Open Model N / Open Mode N",
             "shows description and scope before you switch.",
+            "会先展示说明和影响范围，再决定是否切换。",
         )
     )
     return tuple(entries)
@@ -8280,30 +10111,35 @@ def _model_mode_action_guide_entries(
 
 def _plan_next_step_line(entries) -> str:
     if any(str(getattr(entry, "status", "pending")) == "in_progress" for entry in entries):
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the in-progress item first if you want the current plan "
-            "focus, or refresh later if the agent is still updating it."
+            "focus, or refresh later if the agent is still updating it.",
+            "建议下一步：如果你要先抓当前计划重点，就先打开进行中的项；如果 Agent 还在更新，就稍后再刷新。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: open the item you want in full, or refresh later if you expect "
-        "the plan to change."
+        "the plan to change.",
+        "建议下一步：先打开你最关心的计划项看全文；如果你预计计划还会变，就稍后再刷新。",
     )
 
 
 def _plan_detail_next_step_line(*, status: str) -> str:
     if status == "in_progress":
-        return (
+        return _with_cn_hint(
             "Recommended next step: refresh if the agent is still working on this step, or go "
-            "back to compare it with the rest of the plan."
+            "back to compare it with the rest of the plan.",
+            "建议下一步：如果 Agent 还在推进这一步，就先刷新；如果你想和其他计划项对比，就返回列表。",
         )
     if status == "completed":
-        return (
+        return _with_cn_hint(
             "Recommended next step: go back to the plan list for unfinished items, or refresh if "
-            "you expect the agent to revise this step."
+            "you expect the agent to revise this step.",
+            "建议下一步：返回计划列表看未完成项；如果你预计 Agent 还会修订这一步，就先刷新。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: go back to the plan list if you want the rest of the sequence, "
-        "or refresh if this step may still update."
+        "or refresh if this step may still update.",
+        "建议下一步：如果你想看完整顺序，就返回计划列表；如果这一步还可能更新，就先刷新。",
     )
 
 
@@ -8312,13 +10148,15 @@ def _tool_activity_next_step_line(activities) -> str:
         str(getattr(activity, "status", "pending")) in {"pending", "in_progress", "running"}
         for activity in activities
     ):
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the item you care about if you need files, diffs, or "
-            "terminal output, or refresh later if the agent is still working."
+            "terminal output, or refresh later if the agent is still working.",
+            "建议下一步：如果你要看文件、diff 或终端输出，就打开对应项；如果 Agent 还在跑，就稍后刷新。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: open the item you care about if you need files, diffs, or "
-        "terminal output, or go back when the summary here is enough."
+        "terminal output, or go back when the summary here is enough.",
+        "建议下一步：如果你要看文件、diff 或终端输出，就打开对应项；如果这里的摘要已经够用，就直接返回。",
     )
 
 
@@ -8331,51 +10169,57 @@ def _tool_activity_detail_next_step_line(
 ) -> str:
     still_running = status in {"pending", "in_progress", "running"}
     if has_openable_paths and has_change_targets:
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the related file or change if you want the concrete "
             "artifact, or refresh if this activity is still moving."
             if still_running
             else "Recommended next step: open the related file or change if you want the concrete "
-            "artifact, or go back to compare another activity."
+            "artifact, or go back to compare another activity.",
+            "建议下一步：如果你要看具体文件或变更，就打开相关项；如果这条活动还在推进，就先刷新，否则返回去比较其他活动。",
         )
     if has_openable_paths:
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the related file if you want the concrete artifact, or "
             "refresh if this activity is still moving."
             if still_running
             else "Recommended next step: open the related file if you want the concrete artifact, "
-            "or go back to compare another activity."
+            "or go back to compare another activity.",
+            "建议下一步：如果你要看具体文件，就打开相关文件；如果这条活动还在推进，就先刷新，否则返回去比较其他活动。",
         )
     if has_change_targets:
-        return (
+        return _with_cn_hint(
             "Recommended next step: open the related change if you want the concrete diff, or "
             "refresh if this activity is still moving."
             if still_running
             else "Recommended next step: open the related change if you want the concrete diff, or "
-            "go back to compare another activity."
+            "go back to compare another activity.",
+            "建议下一步：如果你要看具体 diff，就打开相关变更；如果这条活动还在推进，就先刷新，否则返回去比较其他活动。",
         )
     if has_terminal_preview:
-        return (
+        return _with_cn_hint(
             "Recommended next step: review the terminal preview here, or refresh if this command "
             "is still running."
             if still_running
             else "Recommended next step: review the terminal preview here, or go back to compare "
-            "another activity."
+            "another activity.",
+            "建议下一步：如果你主要关心终端输出，就先看这里的预览；如果命令还在跑就刷新，否则返回去比较其他活动。",
         )
-    return (
+    return _with_cn_hint(
         "Recommended next step: refresh if this activity is still moving, or go back to compare "
         "another activity."
         if still_running
         else "Recommended next step: go back to compare another activity, or return to Bot Status "
-        "if this summary is enough."
+        "if this summary is enough.",
+        "建议下一步：如果这条活动还在推进就先刷新；如果已经看够了，就返回去比较其他活动，或直接回状态中心。",
     )
 
 
 def _no_model_mode_controls_text() -> str:
-    return (
+    return _with_cn_hint(
         "This agent does not expose model or mode controls in the current session. "
         "Keep chatting normally, restart the agent if you expected new controls, or open Bot "
-        "Status for the rest of the runtime tools."
+        "Status for the rest of the runtime tools.",
+        "当前会话里的这个 Agent 没有暴露模型或模式控制。你可以继续正常聊天；如果你本来预期这里该有新控制项，就重启 Agent；否则去状态中心使用其他运行时工具。",
     )
 
 
@@ -8420,7 +10264,7 @@ def _completed_turn_reply_markup(
                 _callback_button(
                     ui_state,
                     user_id,
-                    f"Open {BUTTON_CONTEXT_BUNDLE}",
+                    "Open Context Bundle",
                     "recover_context_bundle",
                 ),
             ]
@@ -9773,7 +11617,10 @@ async def _show_history_entry_from_callback(
             user_id=user_id,
             page=page,
             back_target=back_target,
-            notice="Session no longer exists in local history.",
+            notice=_with_cn_hint(
+                "Session no longer exists in local history.",
+                "这条会话已经不在本地历史里了。",
+            ),
         )
         return
     can_fork = await _resolve_runtime_session_fork_support(
@@ -9877,7 +11724,10 @@ async def _show_provider_session_detail_from_callback(
             history_page=history_page,
             back_target=back_target,
             history_back_target=history_back_target,
-            notice="Provider session no longer exists on this page.",
+            notice=_with_cn_hint(
+                "Provider session no longer exists on this page.",
+                "这条 Provider 会话已经不在当前页里了。",
+            ),
         )
         return
     can_fork = await _resolve_runtime_session_fork_support(
@@ -9920,9 +11770,27 @@ def _build_switch_agent_view(
     lines = []
     if notice:
         lines.append(notice)
-    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
-    lines.append(f"Workspace: {_workspace_label(services, state.workspace_id)}")
-    lines.append("Admin action: this changes the shared agent runtime for every Telegram user.")
+    lines.append(
+        _view_heading(
+            f"Switch agent for {resolve_provider_profile(state.provider).display_name} in "
+            f"{_workspace_label(services, state.workspace_id)}",
+            "切换 Agent：当前共享运行时目标预览",
+        )
+    )
+    lines.append(
+        _kv_hint(
+            "Current provider",
+            resolve_provider_profile(state.provider).display_name,
+            "当前 Provider",
+        )
+    )
+    lines.append(_kv_hint("Workspace", _workspace_label(services, state.workspace_id), "当前工作区"))
+    lines.append(
+        _with_cn_hint(
+            "Admin action: this changes the shared agent runtime for every Telegram user.",
+            "管理员提示：这里改动的是所有 Telegram 用户共享的 Agent 运行时。",
+        )
+    )
     lines.extend(
         _switch_agent_impact_lines(
             state=state,
@@ -9931,15 +11799,23 @@ def _build_switch_agent_view(
             replay_turn=replay_turn,
         )
     )
-    lines.append(f"Available agents: {len(provider_profiles)}")
+    lines.append(_kv_hint("Available agents", len(provider_profiles), "可切换 Agent"))
     if replay_turn is not None:
         lines.append(
-            "Open a provider below to review the switch. The next screen lets you switch now, "
-            "retry the last turn there, or fork it on the new agent."
+            _with_cn_hint(
+                "Open a provider below to review the switch. The next screen lets you switch now, "
+                "retry the last turn there, or fork it on the new agent.",
+                "下一步：先打开下方某个 Provider 看切换影响。进入详情页后，你可以直接切换，也可以在新 Agent 上重试 / 分叉上一轮。",
+            )
         )
     else:
-        lines.append("Open a provider below to review the switch impact before you confirm it.")
-    lines.append("Provider capabilities:")
+        lines.append(
+            _with_cn_hint(
+                "Open a provider below to review the switch impact before you confirm it.",
+                "下一步：先打开下方某个 Provider 看清切换影响，再决定是否确认。",
+            )
+        )
+    lines.append(_with_cn_hint("Provider capabilities:", "Provider 能力概览："))
     buttons = []
     for profile in provider_profiles:
         lines.append(
@@ -9991,27 +11867,54 @@ def _switch_agent_impact_lines(
     replay_turn,
 ) -> list[str]:
     lines = [
-        "Switch impact:",
-        "- Old bot buttons and pending inputs will be cleared.",
+        _with_cn_hint("Switch impact:", "切换影响："),
+        _with_cn_hint(
+            "- Old bot buttons and pending inputs will be cleared.",
+            "- 旧菜单按钮和待输入状态都会被清理。",
+        ),
     ]
     bundle = ui_state.get_context_bundle(user_id, state.provider, state.workspace_id)
     bundle_count = 0 if bundle is None else len(bundle.items)
     if bundle_count > 0:
         lines.append(
-            "- Context bundle "
-            f"({_status_item_count_summary(bundle_count)}) stays with the current agent runtime "
-            "and won't follow the switch."
+            _with_cn_hint(
+                "- Context bundle "
+                f"({_status_item_count_summary(bundle_count)}) stays with the current agent runtime "
+                "and won't follow the switch.",
+                "- 当前上下文包 "
+                f"（{_status_item_count_summary(bundle_count)}）会留在旧 Agent 运行时，不会跟着切过去。",
+            )
         )
     else:
-        lines.append("- Context bundle does not follow an agent switch.")
+        lines.append(
+            _with_cn_hint(
+                "- Context bundle does not follow an agent switch.",
+                "- 上下文包不会跟随 Agent 切换。",
+            )
+        )
     if replay_turn is not None:
         replay_label = _status_text_snippet(replay_turn.title_hint, limit=80) or "untitled turn"
-        lines.append(f"- Last Turn stays available in this workspace: {replay_label}")
+        lines.append(
+            _with_cn_hint(
+                f"- Last Turn stays available in this workspace: {replay_label}",
+                f"- 上一轮详情会继续保留在这个工作区里：{replay_label}",
+            )
+        )
         return lines
     if ui_state.get_last_request_text(user_id, state.workspace_id) is not None:
-        lines.append("- Last Request stays available in this workspace after the switch.")
+        lines.append(
+            _with_cn_hint(
+                "- Last Request stays available in this workspace after the switch.",
+                "- 上次请求会在这个工作区里继续可用，不会因为切 Agent 而丢失。",
+            )
+        )
         return lines
-    lines.append("- After switching, send a fresh request or open Bot Status to keep going.")
+    lines.append(
+        _with_cn_hint(
+            "- After switching, send a fresh request or open Bot Status to keep going.",
+            "- 切换完成后，你可以直接发一条新请求，或先回状态中心继续操作。",
+        )
+    )
     return lines
 
 
@@ -10059,10 +11962,32 @@ def _build_switch_workspace_view(
     lines = []
     if notice:
         lines.append(notice)
-    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
-    lines.append(f"Current workspace: {_workspace_label(services, state.workspace_id)}")
-    lines.append("Admin action: this changes the shared workspace for every Telegram user.")
-    lines.append("Only configured workspaces are listed below.")
+    lines.append(
+        _view_heading(
+            f"Switch workspace for {resolve_provider_profile(state.provider).display_name}",
+            "切换工作区：当前共享运行时目标预览",
+        )
+    )
+    lines.append(
+        _kv_hint(
+            "Current provider",
+            resolve_provider_profile(state.provider).display_name,
+            "当前 Provider",
+        )
+    )
+    lines.append(_kv_hint("Current workspace", _workspace_label(services, state.workspace_id), "当前工作区"))
+    lines.append(
+        _with_cn_hint(
+            "Admin action: this changes the shared workspace for every Telegram user.",
+            "管理员提示：这里改动的是所有 Telegram 用户共享的工作区。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "Only configured workspaces are listed below.",
+            "下方只会显示配置里允许切换的工作区。",
+        )
+    )
     lines.extend(
         _switch_workspace_impact_lines(
             state=state,
@@ -10071,8 +11996,13 @@ def _build_switch_workspace_view(
         )
     )
     workspaces = tuple(services.config.agent.workspaces)
-    lines.append(f"Configured workspaces: {len(workspaces)}")
-    lines.append("Open a workspace below to review what stays behind before you confirm the switch.")
+    lines.append(_kv_hint("Configured workspaces", len(workspaces), "可切换工作区"))
+    lines.append(
+        _with_cn_hint(
+            "Open a workspace below to review what stays behind before you confirm the switch.",
+            "下一步：先打开下方某个工作区，看清哪些内容会留在旧工作区，再决定是否确认切换。",
+        )
+    )
     buttons = []
     for workspace in workspaces:
         if workspace.id == state.workspace_id:
@@ -10110,10 +12040,13 @@ def _build_switch_workspace_view(
 
 
 def _switch_agent_success_detail_text() -> str:
-    return (
+    return _with_cn_hint(
         "Everyone now lands in the selected agent runtime for this workspace. "
         "Context bundle does not follow an agent switch. "
-        "Last Turn and Last Request stay reusable in this workspace when available."
+        "Last Turn and Last Request stay reusable in this workspace when available.",
+        "当前工作区里的所有用户都会进入新选择的 Agent 运行时。"
+        "Context Bundle 不会跟随 Agent 切换；如果有 Last Turn / Last Request，"
+        "它们仍然可以继续在当前工作区复用。",
     )
 
 
@@ -10134,22 +12067,42 @@ def _switch_workspace_impact_lines(
         state_labels.append("Last Turn")
 
     lines = [
-        "Switch impact:",
-        "- Old bot buttons and pending inputs will be cleared.",
+        _with_cn_hint("Switch impact:", "切换影响："),
+        _with_cn_hint(
+            "- Old bot buttons and pending inputs will be cleared.",
+            "- 旧菜单按钮和待输入状态都会被清理。",
+        ),
     ]
     if state_labels:
-        lines.append(f"- Current workspace state that will stay behind: {', '.join(state_labels)}.")
+        lines.append(
+            _with_cn_hint(
+                f"- Current workspace state that will stay behind: {', '.join(state_labels)}.",
+                f"- 会留在当前工作区、不会跟随切走的内容有：{', '.join(state_labels)}。",
+            )
+        )
     else:
-        lines.append("- Any Context Bundle, Last Request, or Last Turn from this workspace will stay behind.")
-    lines.append("- Rebuild context in the target workspace before you ask.")
+        lines.append(
+            _with_cn_hint(
+                "- Any Context Bundle, Last Request, or Last Turn from this workspace will stay behind.",
+                "- 当前工作区里的 Context Bundle、Last Request 和 Last Turn 都不会跟着切过去。",
+            )
+        )
+    lines.append(
+        _with_cn_hint(
+            "- Rebuild context in the target workspace before you ask.",
+            "- 到目标工作区后，请先重新整理上下文，再开始提问。",
+        )
+    )
     return lines
 
 
 def _switch_workspace_success_detail_text() -> str:
-    return (
+    return _with_cn_hint(
         "Everyone now lands in the selected workspace. "
         "Workspace-specific context does not follow the switch. "
-        "Rebuild context in the new workspace before you ask."
+        "Rebuild context in the new workspace before you ask.",
+        "当前所有用户都会进入新选择的工作区。"
+        "工作区相关的上下文不会自动跟着切过去；开始提问前，请先在新工作区重新整理上下文。",
     )
 
 
@@ -10173,11 +12126,27 @@ def _build_switch_provider_review_view(
     lines = []
     if notice:
         lines.append(notice)
-    lines.append(f"Switch agent review: {profile.display_name}")
-    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
-    lines.append(f"Workspace: {_workspace_label(services, state.workspace_id)}")
-    lines.append("Admin action: confirming here changes the shared agent runtime for every Telegram user.")
-    lines.append("Target capability summary:")
+    lines.append(
+        _view_heading(
+            f"Switch agent review: {profile.display_name}",
+            f"切换 Agent 复核：{profile.display_name}",
+        )
+    )
+    lines.append(
+        _kv_hint(
+            "Current provider",
+            resolve_provider_profile(state.provider).display_name,
+            "当前 Provider",
+        )
+    )
+    lines.append(_kv_hint("Workspace", _workspace_label(services, state.workspace_id), "当前工作区"))
+    lines.append(
+        _with_cn_hint(
+            "Admin action: confirming here changes the shared agent runtime for every Telegram user.",
+            "管理员提示：在这里确认后，会立即切换所有 Telegram 用户共享的 Agent 运行时。",
+        )
+    )
+    lines.append(_with_cn_hint("Target capability summary:", "目标能力概览："))
     lines.append(_format_provider_capability_summary(profile, summary, is_current=is_current))
     lines.extend(
         _switch_agent_impact_lines(
@@ -10190,7 +12159,12 @@ def _build_switch_provider_review_view(
 
     buttons = []
     if is_current:
-        lines.append("This agent is already active. Go back if you want to review another target.")
+        lines.append(
+            _with_cn_hint(
+                "This agent is already active. Go back if you want to review another target.",
+                "这个 Agent 已经是当前运行时；如果你想比较别的目标，就返回上一页。",
+            )
+        )
         buttons.append(
             [
                 _callback_button(
@@ -10204,17 +12178,26 @@ def _build_switch_provider_review_view(
         )
     elif not is_available:
         lines.append(
-            "Recommended next step: choose another agent, or fix this provider and reopen Switch Agent."
+            _with_cn_hint(
+                "Recommended next step: choose another agent, or fix this provider and reopen Switch Agent.",
+                "建议下一步：先改选别的 Agent，或修好这个 Provider 后再重新打开 Switch Agent。",
+            )
         )
     else:
         if replay_turn is not None:
             lines.append(
-                "Recommended next step: switch now if you want everyone on this agent, or use "
-                "Retry / Fork to move the shared runtime and immediately replay the last turn."
+                _with_cn_hint(
+                    "Recommended next step: switch now if you want everyone on this agent, or use "
+                    "Retry / Fork to move the shared runtime and immediately replay the last turn.",
+                    "建议下一步：如果你要让所有人都切到这个 Agent，就直接切换；如果你还想立刻重放上一轮，就用 Retry / Fork 一步完成。",
+                )
             )
         else:
             lines.append(
-                "Recommended next step: switch now if you want everyone to move to this agent."
+                _with_cn_hint(
+                    "Recommended next step: switch now if you want everyone to move to this agent.",
+                    "建议下一步：如果你要让所有人都迁到这个 Agent，就直接切换。",
+                )
             )
         buttons.append(
             [
@@ -10284,11 +12267,27 @@ def _build_switch_workspace_review_view(
     lines = []
     if notice:
         lines.append(notice)
-    lines.append(f"Switch workspace review: {workspace.label}")
-    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
-    lines.append(f"Current workspace: {_workspace_label(services, state.workspace_id)}")
-    lines.append("Admin action: confirming here changes the shared workspace for every Telegram user.")
-    lines.append(f"Target workspace ID: {workspace.id}")
+    lines.append(
+        _view_heading(
+            f"Switch workspace review: {workspace.label}",
+            f"切换工作区复核：{workspace.label}",
+        )
+    )
+    lines.append(
+        _kv_hint(
+            "Current provider",
+            resolve_provider_profile(state.provider).display_name,
+            "当前 Provider",
+        )
+    )
+    lines.append(_kv_hint("Current workspace", _workspace_label(services, state.workspace_id), "当前工作区"))
+    lines.append(
+        _with_cn_hint(
+            "Admin action: confirming here changes the shared workspace for every Telegram user.",
+            "管理员提示：在这里确认后，会立即切换所有 Telegram 用户共享的工作区。",
+        )
+    )
+    lines.append(_kv_hint("Target workspace ID", workspace.id, "目标工作区 ID"))
     lines.extend(
         _switch_workspace_impact_lines(
             state=state,
@@ -10299,7 +12298,12 @@ def _build_switch_workspace_review_view(
 
     buttons = []
     if is_current:
-        lines.append("This workspace is already active. Go back if you want to review another target.")
+        lines.append(
+            _with_cn_hint(
+                "This workspace is already active. Go back if you want to review another target.",
+                "这个工作区已经是当前运行时；如果你想比较别的目标，就返回上一页。",
+            )
+        )
         buttons.append(
             [
                 _callback_button(
@@ -10313,7 +12317,10 @@ def _build_switch_workspace_review_view(
         )
     else:
         lines.append(
-            "Recommended next step: switch now if you want everyone to land in this workspace."
+            _with_cn_hint(
+                "Recommended next step: switch now if you want everyone to land in this workspace.",
+                "建议下一步：如果你要让所有人都落到这个工作区，就直接切换。",
+            )
         )
         buttons.append(
             [
@@ -12603,10 +14610,16 @@ async def _dispatch_callback_action(
         if bundle is None or not bundle.items:
             notice = _context_bundle_empty_text()
         elif ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
-            notice = "Bundle chat is already on."
+            notice = _with_cn_hint(
+                "Bundle chat is already on.",
+                "Bundle Chat 已经处于开启状态。",
+            )
         else:
             ui_state.enable_context_bundle_chat(user_id, state.provider, state.workspace_id)
-            notice = "Bundle chat enabled. New plain text messages will use the current context bundle."
+            notice = _with_cn_hint(
+                "Bundle chat enabled. New plain text messages will use the current context bundle.",
+                "Bundle Chat 已开启。后续新的纯文本消息会自动带上当前上下文包。",
+            )
         await _reply_context_bundle_view(
             query.message,
             services,
@@ -12629,9 +14642,9 @@ async def _dispatch_callback_action(
             return
         if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
             ui_state.disable_context_bundle_chat(user_id)
-            notice = "Bundle chat disabled."
+            notice = _bundle_chat_disabled_text()
         else:
-            notice = "Bundle chat is already off."
+            notice = _bundle_chat_already_off_text()
         await _reply_context_bundle_view(
             query.message,
             services,
@@ -12759,7 +14772,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load Bot Status. Try again or use /start.",
+                text=_with_cn_hint(
+                    "Couldn't load Bot Status. Try again or use /start.",
+                    "加载状态中心失败。请重试，或使用 /start 恢复。",
+                ),
                 retry_action="runtime_status_page",
             )
         return
@@ -12920,7 +14936,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't open that view. Try again or go back to Bot Status.",
+                text=_with_cn_hint(
+                    "Couldn't open that view. Try again or go back to Bot Status.",
+                    "打开这个视图失败。请重试，或返回状态中心。",
+                ),
                 retry_action="runtime_status_open",
                 retry_payload={"target": target, "back_target": back_target},
                 back_target="status",
@@ -12944,7 +14963,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load the last turn. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load the last turn. Try again or go back.",
+                    "加载上一轮失败。请重试，或先返回上一层。",
+                ),
                 retry_action="last_turn_page",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -12971,7 +14993,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that replay item. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that replay item. Try again or go back.",
+                    "加载这条重放内容失败。请重试，或先返回上一层。",
+                ),
                 retry_action="last_turn_open",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -12998,7 +15023,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load the agent plan. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load the agent plan. Try again or go back.",
+                    "加载 Agent 计划失败。请重试，或先返回上一层。",
+                ),
                 retry_action="plan_page",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -13025,7 +15053,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that plan entry. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that plan entry. Try again or go back.",
+                    "加载这条计划项失败。请重试，或先返回上一层。",
+                ),
                 retry_action="plan_open",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -13052,7 +15083,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load tool activity. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load tool activity. Try again or go back.",
+                    "加载工具活动失败。请重试，或先返回上一层。",
+                ),
                 retry_action="tool_activity_page",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -13079,7 +15113,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that tool activity entry. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that tool activity entry. Try again or go back.",
+                    "加载这条工具活动失败。请重试，或先返回上一层。",
+                ),
                 retry_action="tool_activity_open",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -13108,7 +15145,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that related file. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that related file. Try again or go back.",
+                    "加载相关文件失败。请重试，或先返回上一层。",
+                ),
                 retry_action="tool_activity_open_file",
                 retry_payload={
                     "relative_path": str(payload["relative_path"]),
@@ -13139,7 +15179,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that related change. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that related change. Try again or go back.",
+                    "加载相关变更失败。请重试，或先返回上一层。",
+                ),
                 retry_action="tool_activity_open_change",
                 retry_payload={
                     "relative_path": str(payload["relative_path"]),
@@ -13168,7 +15211,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load MCP server details. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load MCP server details. Try again or go back.",
+                    "加载 MCP server 详情失败。请重试，或先返回上一层。",
+                ),
                 retry_action="workspace_runtime_open_server",
                 retry_payload={
                     "server_index": int(payload.get("server_index", -1)),
@@ -13204,7 +15250,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Retried last turn.",
+                    notice=_with_cn_hint(
+                        "Retried last turn.",
+                        "已重试上一轮。",
+                    ),
                 )
 
             async def _on_retry_missing_replay_turn() -> None:
@@ -13262,7 +15311,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Ran the last request.",
+                success_notice=_with_cn_hint(
+                    "Ran the last request.",
+                    "已运行上次请求。",
+                ),
             )
             await _run_last_request_on_message(
                 query.message,
@@ -13287,7 +15339,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Forked last turn into a new session.",
+                    notice=_with_cn_hint(
+                        "Forked last turn into a new session.",
+                        "已把上一轮分叉到新会话。",
+                    ),
                 )
 
             async def _on_fork_missing_replay_turn() -> None:
@@ -13383,7 +15438,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No agent command is available.",
+                    notice=_with_cn_hint(
+                        "No agent command is available.",
+                        "当前没有可用的 Agent 命令。",
+                    ),
                 )
                 return
             hint = str(payload.get("hint", "") or "").strip()
@@ -13438,7 +15496,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No workspace changes to ask about.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to ask about.",
+                        "当前没有可提问的工作区变更。",
+                    ),
                 )
                 return
             await _begin_context_items_ask_from_callback(
@@ -13447,15 +15508,24 @@ async def _dispatch_callback_action(
                 user_id=user_id,
                 items=items,
                 prompt_label="current workspace changes",
-                empty_notice="No workspace changes to ask about.",
+                empty_notice=_with_cn_hint(
+                    "No workspace changes to ask about.",
+                    "当前没有可提问的工作区变更。",
+                ),
                 prompt_text=(
                     "Send your request about the current workspace changes as the next plain text message.\n"
                     "The agent will inspect the current Git changes from the local workspace."
                 ),
                 restore_action="runtime_status_page",
                 restore_payload={"back_target": "status"},
-                cancel_notice="Workspace changes request cancelled.",
-                status_success_notice="Asked agent about current workspace changes.",
+                cancel_notice=_with_cn_hint(
+                    "Workspace changes request cancelled.",
+                    "已取消针对当前工作区变更的提问。",
+                ),
+                status_success_notice=_with_cn_hint(
+                    "Asked agent about current workspace changes.",
+                    "已向 Agent 发起关于当前工作区变更的提问。",
+                ),
             )
             return
         if target == "workspace_changes_ask_last_request":
@@ -13468,7 +15538,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No workspace changes to ask about.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to ask about.",
+                        "当前没有可提问的工作区变更。",
+                    ),
                 )
                 return
             last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
@@ -13486,7 +15559,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request about current workspace changes.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request about current workspace changes.",
+                    "已用上次请求向 Agent 询问当前工作区变更。",
+                ),
             )
             await _run_context_items_request_on_message(
                 query.message,
@@ -13511,7 +15587,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No workspace changes to add.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to add.",
+                        "当前没有可加入上下文的工作区变更。",
+                    ),
                 )
                 return
             added_count, duplicate_count = _add_workspace_changes_to_context_bundle(
@@ -13541,7 +15620,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No workspace changes to add.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to add.",
+                        "当前没有可加入上下文的工作区变更。",
+                    ),
                 )
                 return
             already_active = ui_state.context_bundle_chat_active(
@@ -13587,7 +15669,10 @@ async def _dispatch_callback_action(
                 items=tuple(bundle.items),
                 back_target="status",
                 source_message=query.message,
-                status_success_notice="Asked agent with the current context bundle.",
+                status_success_notice=_with_cn_hint(
+                    "Asked agent with the current context bundle.",
+                    "已带着当前上下文包向 Agent 发起提问。",
+                ),
             )
             await _edit_query_message(
                 query,
@@ -13605,7 +15690,10 @@ async def _dispatch_callback_action(
                                 "context_items_ask_cancel",
                                 restore_action="runtime_status_page",
                                 restore_payload={"back_target": "status"},
-                                notice="Context bundle request cancelled.",
+                                notice=_with_cn_hint(
+                                    "Context bundle request cancelled.",
+                                    "已取消这次上下文包提问。",
+                                ),
                             )
                         ]
                     ]
@@ -13639,7 +15727,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request using the current context bundle.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request using the current context bundle.",
+                    "已用上次请求并携带当前上下文包向 Agent 发起提问。",
+                ),
             )
             await _run_context_bundle_request_on_message(
                 query.message,
@@ -13710,7 +15801,7 @@ async def _dispatch_callback_action(
                     query,
                     ui_state=ui_state,
                     user_id=user_id,
-                    text="Couldn't load Model / Mode. Try again or go back to Bot Status.",
+                    text=_model_mode_load_failed_text(),
                     retry_action="runtime_status_control",
                     retry_payload={"target": "model_mode"},
                     back_target="status",
@@ -13730,7 +15821,10 @@ async def _dispatch_callback_action(
                     query,
                     ui_state=ui_state,
                     user_id=user_id,
-                    text="Couldn't load Switch Agent. Try again or go back to Bot Status.",
+                    text=_with_cn_hint(
+                        "Couldn't load Switch Agent. Try again or go back to Bot Status.",
+                        "加载切换 Agent 视图失败。请重试，或返回状态中心。",
+                    ),
                     retry_action="runtime_status_control",
                     retry_payload={"target": "switch_agent"},
                     back_target="status",
@@ -13750,7 +15844,10 @@ async def _dispatch_callback_action(
                     query,
                     ui_state=ui_state,
                     user_id=user_id,
-                    text="Couldn't load Switch Workspace. Try again or go back to Bot Status.",
+                    text=_with_cn_hint(
+                        "Couldn't load Switch Workspace. Try again or go back to Bot Status.",
+                        "加载切换工作区视图失败。请重试，或返回状态中心。",
+                    ),
                     retry_action="runtime_status_control",
                     retry_payload={"target": "switch_workspace"},
                     back_target="status",
@@ -13770,14 +15867,17 @@ async def _dispatch_callback_action(
                 workspace_id=state.workspace_id,
             )
             if active_turn is None:
-                notice = "No active turn to stop."
+                notice = _with_cn_hint(
+                    "No active turn to stop.",
+                    "当前没有可停止的回合。",
+                )
             else:
                 await _request_stop_active_turn(
                     ui_state,
                     user_id=user_id,
                     active_turn=active_turn,
                 )
-                notice = "Stop requested for the current turn."
+                notice = _stop_requested_notice_text()
             await _show_runtime_status_from_callback(
                 query,
                 services,
@@ -13855,10 +15955,16 @@ async def _dispatch_callback_action(
             if bundle is None or not bundle.items:
                 notice = _context_bundle_empty_text()
             elif ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
-                notice = "Bundle chat is already on."
+                notice = _with_cn_hint(
+                    "Bundle chat is already on.",
+                    "Bundle Chat 已经处于开启状态。",
+                )
             else:
                 ui_state.enable_context_bundle_chat(user_id, state.provider, state.workspace_id)
-                notice = "Bundle chat enabled."
+                notice = _with_cn_hint(
+                    "Bundle chat enabled.",
+                    "Bundle Chat 已开启。",
+                )
             await _show_runtime_status_from_callback(
                 query,
                 services,
@@ -13882,9 +15988,9 @@ async def _dispatch_callback_action(
             state = await services.snapshot_runtime_state()
             if ui_state.context_bundle_chat_active(user_id, state.provider, state.workspace_id):
                 ui_state.disable_context_bundle_chat(user_id)
-                notice = "Bundle chat disabled."
+                notice = _bundle_chat_disabled_text()
             else:
-                notice = "Bundle chat is already off."
+                notice = _bundle_chat_already_off_text()
             await _show_runtime_status_from_callback(
                 query,
                 services,
@@ -13904,7 +16010,7 @@ async def _dispatch_callback_action(
     if action == "runtime_status_search_cancel":
         await query.answer()
         ui_state.clear_pending_text_action(user_id)
-        notice = "Search cancelled."
+        notice = _search_cancelled_notice_text()
         try:
             await _show_runtime_status_from_callback(
                 query,
@@ -14047,7 +16153,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that session history entry. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that session history entry. Try again or go back.",
+                    "加载这条会话历史失败。请重试，或先返回上一层。",
+                ),
                 retry_action="history_open",
                 retry_payload={
                     "session_id": str(payload["session_id"]),
@@ -14086,7 +16195,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load Provider Sessions. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load Provider Sessions. Try again or go back.",
+                    "加载 Provider 会话列表失败。请重试，或先返回上一层。",
+                ),
                 retry_action="history_provider_sessions",
                 retry_payload={
                     "cursor": payload.get("cursor"),
@@ -14282,7 +16394,10 @@ async def _dispatch_callback_action(
             ui_state=ui_state,
             active_session_id=history_state.active_session_id,
             can_fork=can_fork,
-            notice="Rename cancelled.",
+            notice=_with_cn_hint(
+                "Rename cancelled.",
+                "已取消重命名。",
+            ),
             show_provider_sessions=user_id == services.admin_user_id,
             back_target=str(payload.get("back_target", "none")),
         )
@@ -14312,7 +16427,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load Provider Sessions. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load Provider Sessions. Try again or go back.",
+                    "加载 Provider 会话列表失败。请重试，或先返回上一层。",
+                ),
                 retry_action="provider_sessions_page",
                 retry_payload={
                     "cursor": payload.get("cursor"),
@@ -14357,7 +16475,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that provider session. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that provider session. Try again or go back.",
+                    "加载这条 Provider 会话失败。请重试，或先返回上一层。",
+                ),
                 retry_action="provider_session_open",
                 retry_payload={
                     "session_id": str(payload["session_id"]),
@@ -14454,7 +16575,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load that agent command. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load that agent command. Try again or go back.",
+                    "加载这个 Agent 命令失败。请重试，或先返回上一层。",
+                ),
                 retry_action="agent_command_open",
                 retry_payload={
                     "page": int(payload.get("page", 0)),
@@ -14534,7 +16658,10 @@ async def _dispatch_callback_action(
             user_id=user_id,
             page=int(payload.get("page", 0)),
             back_target=str(payload.get("back_target", "none")),
-            notice="Command input cancelled.",
+            notice=_with_cn_hint(
+                "Command input cancelled.",
+                "已取消命令输入。",
+            ),
         )
         return
 
@@ -14554,7 +16681,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load Model / Mode. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load Model / Mode. Try again or go back.",
+                    "加载模型 / 模式失败。请重试，或先返回上一层。",
+                ),
                 retry_action="model_mode_page",
                 retry_payload={"back_target": str(payload.get("back_target", "none"))},
                 back_target=str(payload.get("back_target", "none")),
@@ -14579,7 +16709,10 @@ async def _dispatch_callback_action(
                 query,
                 ui_state=ui_state,
                 user_id=user_id,
-                text="Couldn't load selection details. Try again or go back.",
+                text=_with_cn_hint(
+                    "Couldn't load selection details. Try again or go back.",
+                    "加载这个选项详情失败。请重试，或先返回上一层。",
+                ),
                 retry_action="selection_open",
                 retry_payload={
                     "kind": str(payload["kind"]),
@@ -14658,7 +16791,10 @@ async def _dispatch_callback_action(
                 relative_path=payload.get("relative_path", ""),
                 page=page,
                 back_target=str(payload.get("back_target", "none")),
-                notice="No visible files to add.",
+                notice=_with_cn_hint(
+                    "No visible files to add.",
+                    "当前没有可加入上下文的可见文件。",
+                ),
             )
             return
 
@@ -14702,7 +16838,10 @@ async def _dispatch_callback_action(
                 relative_path=payload.get("relative_path", ""),
                 page=page,
                 back_target=str(payload.get("back_target", "none")),
-                notice="No visible files to add.",
+                notice=_with_cn_hint(
+                    "No visible files to add.",
+                    "当前没有可加入上下文的可见文件。",
+                ),
             )
             return
 
@@ -14753,7 +16892,10 @@ async def _dispatch_callback_action(
                 relative_path=payload.get("relative_path", ""),
                 page=page,
                 back_target=str(payload.get("back_target", "none")),
-                notice="No visible files to ask about.",
+                notice=_with_cn_hint(
+                    "No visible files to ask about.",
+                    "当前没有可提问的可见文件。",
+                ),
             )
             return
 
@@ -14763,7 +16905,10 @@ async def _dispatch_callback_action(
             user_id=user_id,
             items=items,
             prompt_label="visible workspace files",
-            empty_notice="No visible files to ask about.",
+            empty_notice=_with_cn_hint(
+                "No visible files to ask about.",
+                "当前没有可提问的可见文件。",
+            ),
             prompt_text=(
                 "Send your request about the visible files as the next plain text message.\n"
                 "The agent will read the currently visible files from the current workspace."
@@ -14774,8 +16919,14 @@ async def _dispatch_callback_action(
                 "page": page,
                 "back_target": str(payload.get("back_target", "none")),
             },
-            cancel_notice="Visible files request cancelled.",
-            status_success_notice="Asked agent about visible workspace files.",
+            cancel_notice=_with_cn_hint(
+                "Visible files request cancelled.",
+                "已取消针对可见文件的提问。",
+            ),
+            status_success_notice=_with_cn_hint(
+                "Asked agent about visible workspace files.",
+                "已向 Agent 发起关于可见文件的提问。",
+            ),
         )
         return
 
@@ -14794,7 +16945,10 @@ async def _dispatch_callback_action(
                 relative_path=payload.get("relative_path", ""),
                 page=page,
                 back_target=back_target,
-                notice="No visible files to ask about.",
+                notice=_with_cn_hint(
+                    "No visible files to ask about.",
+                    "当前没有可提问的可见文件。",
+                ),
             )
             return
         last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
@@ -14821,7 +16975,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request about visible workspace files.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request about visible workspace files.",
+                    "已用上次请求向 Agent 询问可见文件。",
+                ),
             )
         await _run_context_items_request_on_message(
             query.message,
@@ -14891,7 +17048,10 @@ async def _dispatch_callback_action(
                 query_text=payload["query_text"],
                 page=0,
                 back_target=str(payload.get("back_target", "none")),
-                notice="No matching files to add.",
+                notice=_with_cn_hint(
+                    "No matching files to add.",
+                    "当前没有可加入上下文的匹配文件。",
+                ),
             )
             return
 
@@ -14933,7 +17093,10 @@ async def _dispatch_callback_action(
                 query_text=payload["query_text"],
                 page=int(payload.get("page", 0)),
                 back_target=str(payload.get("back_target", "none")),
-                notice="No matching files to add.",
+                notice=_with_cn_hint(
+                    "No matching files to add.",
+                    "当前没有可加入上下文的匹配文件。",
+                ),
             )
             return
 
@@ -14982,7 +17145,10 @@ async def _dispatch_callback_action(
                 query_text=payload["query_text"],
                 page=int(payload.get("page", 0)),
                 back_target=str(payload.get("back_target", "none")),
-                notice="No matching files to ask about.",
+                notice=_with_cn_hint(
+                    "No matching files to ask about.",
+                    "当前没有可提问的匹配文件。",
+                ),
             )
             return
 
@@ -14992,7 +17158,10 @@ async def _dispatch_callback_action(
             user_id=user_id,
             items=items,
             prompt_label="matching workspace files",
-            empty_notice="No matching files to ask about.",
+            empty_notice=_with_cn_hint(
+                "No matching files to ask about.",
+                "当前没有可提问的匹配文件。",
+            ),
             prompt_text=(
                 "Send your request about the matching files as the next plain text message.\n"
                 "The agent will read the files that match the current search from the current workspace."
@@ -15003,8 +17172,14 @@ async def _dispatch_callback_action(
                 "page": int(payload.get("page", 0)),
                 "back_target": str(payload.get("back_target", "none")),
             },
-            cancel_notice="Matching files request cancelled.",
-            status_success_notice="Asked agent about matching workspace files.",
+            cancel_notice=_with_cn_hint(
+                "Matching files request cancelled.",
+                "已取消针对匹配文件的提问。",
+            ),
+            status_success_notice=_with_cn_hint(
+                "Asked agent about matching workspace files.",
+                "已向 Agent 发起关于匹配文件的提问。",
+            ),
         )
         return
 
@@ -15022,7 +17197,10 @@ async def _dispatch_callback_action(
                 query_text=payload["query_text"],
                 page=int(payload.get("page", 0)),
                 back_target=back_target,
-                notice="No matching files to ask about.",
+                notice=_with_cn_hint(
+                    "No matching files to ask about.",
+                    "当前没有可提问的匹配文件。",
+                ),
             )
             return
         last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
@@ -15049,7 +17227,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request about matching workspace files.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request about matching workspace files.",
+                    "已用上次请求向 Agent 询问匹配文件。",
+                ),
             )
         await _run_context_items_request_on_message(
             query.message,
@@ -15135,7 +17316,10 @@ async def _dispatch_callback_action(
                 user_id=user_id,
                 page=int(payload.get("page", 0)),
                 back_target=str(payload.get("back_target", "none")),
-                notice="No workspace changes to add.",
+                notice=_with_cn_hint(
+                    "No workspace changes to add.",
+                    "当前没有可加入上下文的工作区变更。",
+                ),
             )
             return
 
@@ -15175,7 +17359,10 @@ async def _dispatch_callback_action(
                 user_id=user_id,
                 page=int(payload.get("page", 0)),
                 back_target=str(payload.get("back_target", "none")),
-                notice="No workspace changes to add.",
+                notice=_with_cn_hint(
+                    "No workspace changes to add.",
+                    "当前没有可加入上下文的工作区变更。",
+                ),
             )
             return
 
@@ -15224,7 +17411,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No workspace changes to ask about.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to ask about.",
+                        "当前没有可提问的工作区变更。",
+                    ),
                 )
             else:
                 await _show_workspace_changes_from_callback(
@@ -15234,7 +17424,10 @@ async def _dispatch_callback_action(
                     user_id=user_id,
                     page=page,
                     back_target=str(payload.get("back_target", "none")),
-                    notice="No workspace changes to ask about.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to ask about.",
+                        "当前没有可提问的工作区变更。",
+                    ),
                 )
             return
 
@@ -15244,7 +17437,10 @@ async def _dispatch_callback_action(
             user_id=user_id,
             items=items,
             prompt_label="current workspace changes",
-            empty_notice="No workspace changes to ask about.",
+            empty_notice=_with_cn_hint(
+                "No workspace changes to ask about.",
+                "当前没有可提问的工作区变更。",
+            ),
             prompt_text=(
                 "Send your request about the current workspace changes as the next plain text message.\n"
                 "The agent will inspect the current Git changes from the local workspace."
@@ -15258,8 +17454,14 @@ async def _dispatch_callback_action(
                     "back_target": str(payload.get("back_target", "none")),
                 }
             ),
-            cancel_notice="Workspace changes request cancelled.",
-            status_success_notice="Asked agent about current workspace changes.",
+            cancel_notice=_with_cn_hint(
+                "Workspace changes request cancelled.",
+                "已取消针对当前工作区变更的提问。",
+            ),
+            status_success_notice=_with_cn_hint(
+                "Asked agent about current workspace changes.",
+                "已向 Agent 发起关于当前工作区变更的提问。",
+            ),
             source_restore_action="workspace_changes_follow_up" if source == "follow_up" else None,
             source_success_notice=(
                 "Asked agent about current workspace changes." if source == "follow_up" else None
@@ -15281,7 +17483,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="No workspace changes to ask about.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to ask about.",
+                        "当前没有可提问的工作区变更。",
+                    ),
                 )
             else:
                 await _show_workspace_changes_from_callback(
@@ -15291,7 +17496,10 @@ async def _dispatch_callback_action(
                     user_id=user_id,
                     page=page,
                     back_target=back_target,
-                    notice="No workspace changes to ask about.",
+                    notice=_with_cn_hint(
+                        "No workspace changes to ask about.",
+                        "当前没有可提问的工作区变更。",
+                    ),
                 )
             return
         last_request_text = ui_state.get_last_request_text(user_id, state.workspace_id)
@@ -15326,7 +17534,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request about current workspace changes.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request about current workspace changes.",
+                    "已用上次请求向 Agent 询问当前工作区变更。",
+                ),
             )
         elif source == "follow_up":
             async def _after_follow_up_success(_state, _session) -> None:
@@ -15335,7 +17546,10 @@ async def _dispatch_callback_action(
                     services,
                     ui_state,
                     user_id=user_id,
-                    notice="Asked agent with the last request about current workspace changes.",
+                    notice=_with_cn_hint(
+                        "Asked agent with the last request about current workspace changes.",
+                        "已用上次请求向 Agent 询问当前工作区变更。",
+                    ),
                 )
 
             async def _on_follow_up_failure() -> None:
@@ -15521,7 +17735,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request about this file.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request about this file.",
+                    "已用上次请求向 Agent 询问这个文件。",
+                ),
             )
         await _run_workspace_file_request_on_message(
             query.message,
@@ -15589,7 +17806,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request about this change.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request about this change.",
+                    "已用上次请求向 Agent 询问这条变更。",
+                ),
             )
         await _run_workspace_change_request_on_message(
             query.message,
@@ -15737,9 +17957,15 @@ async def _dispatch_callback_action(
             page=int(payload.get("page", 0)),
             back_target=str(payload.get("back_target", "none")),
             notice=(
-                "Removed item from context bundle. Bundle chat was turned off because the bundle is empty."
+                _with_cn_hint(
+                    "Removed item from context bundle. Bundle chat was turned off because the bundle is empty.",
+                    "已从上下文包移除这项内容；由于上下文包已经为空，Bundle Chat 也已自动关闭。",
+                )
                 if bundle is None and was_bundle_chat_active
-                else "Removed item from context bundle."
+                else _with_cn_hint(
+                    "Removed item from context bundle.",
+                    "已从上下文包移除这项内容。",
+                )
             ),
             source_restore_action=source_restore_action,
             source_restore_payload=source_restore_payload,
@@ -15781,9 +18007,15 @@ async def _dispatch_callback_action(
             page=int(payload.get("page", 0)),
             back_target=str(payload.get("back_target", "none")),
             notice=(
-                "Removed item from context bundle. Bundle chat was turned off because the bundle is empty."
+                _with_cn_hint(
+                    "Removed item from context bundle. Bundle chat was turned off because the bundle is empty.",
+                    "已从上下文包移除这项内容；由于上下文包已经为空，Bundle Chat 也已自动关闭。",
+                )
                 if bundle is None and was_bundle_chat_active
-                else "Removed item from context bundle."
+                else _with_cn_hint(
+                    "Removed item from context bundle.",
+                    "已从上下文包移除这项内容。",
+                )
             ),
             source_restore_action=source_restore_action,
             source_restore_payload=source_restore_payload,
@@ -15809,7 +18041,17 @@ async def _dispatch_callback_action(
             user_id=user_id,
             page=0,
             back_target=str(payload.get("back_target", "none")),
-            notice="Cleared context bundle. Bundle chat was turned off." if was_bundle_chat_active else "Cleared context bundle.",
+            notice=(
+                _with_cn_hint(
+                    "Cleared context bundle. Bundle chat was turned off.",
+                    "已清空上下文包，并自动关闭 Bundle Chat。",
+                )
+                if was_bundle_chat_active
+                else _with_cn_hint(
+                    "Cleared context bundle.",
+                    "已清空上下文包。",
+                )
+            ),
             source_restore_action=source_restore_action,
             source_restore_payload=source_restore_payload,
             source_back_label=source_back_label,
@@ -15830,7 +18072,10 @@ async def _dispatch_callback_action(
             user_id=user_id,
             page=int(payload.get("page", 0)),
             back_target=str(payload.get("back_target", "none")),
-            notice="Bundle chat enabled. New plain text messages will use the current context bundle.",
+            notice=_with_cn_hint(
+                "Bundle chat enabled. New plain text messages will use the current context bundle.",
+                "Bundle Chat 已开启。后续新的纯文本消息会自动带上当前上下文包。",
+            ),
             source_restore_action=source_restore_action,
             source_restore_payload=source_restore_payload,
             source_back_label=source_back_label,
@@ -15848,7 +18093,7 @@ async def _dispatch_callback_action(
             user_id=user_id,
             page=int(payload.get("page", 0)),
             back_target=str(payload.get("back_target", "none")),
-            notice="Bundle chat disabled.",
+            notice=_bundle_chat_disabled_text(),
             source_restore_action=source_restore_action,
             source_restore_payload=source_restore_payload,
             source_back_label=source_back_label,
@@ -15954,7 +18199,10 @@ async def _dispatch_callback_action(
                 services,
                 ui_state,
                 user_id=user_id,
-                success_notice="Asked agent with the last request using the current context bundle.",
+                success_notice=_with_cn_hint(
+                    "Asked agent with the last request using the current context bundle.",
+                    "已用上次请求并携带当前上下文包向 Agent 发起提问。",
+                ),
             )
         await _run_context_bundle_request_on_message(
             query.message,
@@ -15981,7 +18229,10 @@ async def _dispatch_callback_action(
             user_id=user_id,
             page=int(payload.get("page", 0)),
             back_target=str(payload.get("back_target", "none")),
-            notice="Context bundle request cancelled.",
+            notice=_with_cn_hint(
+                "Context bundle request cancelled.",
+                "已取消这次上下文包提问。",
+            ),
             source_restore_action=source_restore_action,
             source_restore_payload=source_restore_payload,
             source_back_label=source_back_label,
@@ -16093,7 +18344,10 @@ def _callback_button(
     **payload: Any,
 ) -> InlineKeyboardButton:
     token = ui_state.create(user_id, action, **payload)
-    return InlineKeyboardButton(text=text, callback_data=f"{CALLBACK_PREFIX}{token}")
+    return InlineKeyboardButton(
+        text=_localized_button_text(text),
+        callback_data=f"{CALLBACK_PREFIX}{token}",
+    )
 
 
 def _build_runtime_status_view(
@@ -16143,10 +18397,15 @@ def _build_runtime_status_view(
     if notice:
         lines.append(notice)
     lines.append(
-        f"Bot status for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Bot status for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"状态中心：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Workspace ID: {workspace_id}")
-    lines.append(f"Path: {workspace_path}")
+    lines.append("状态中心：这里是只读总览和高级控制台，不会隐式创建新会话。")
+    lines.append(_kv_hint("Workspace ID", workspace_id, "工作区 ID"))
+    lines.append(_kv_hint("Path", workspace_path, "路径"))
+    lines.append(f"工作区概览：{workspace_label}，路径为 {workspace_path}。")
     lines.append(
         _interaction_status_line(
             session=session,
@@ -16185,11 +18444,26 @@ def _build_runtime_status_view(
 
     runtime_lines: list[str] = []
     if session is None:
-        runtime_lines.append("Session: none (will start on first request)")
+        runtime_lines.append(
+            _with_cn_hint(
+                "Session: none (will start on first request)",
+                "会话：无（第一条请求时自动开始）",
+            )
+        )
     else:
-        runtime_lines.append(f"Session: {session.session_id or 'pending'}")
+        runtime_lines.append(
+            _with_cn_hint(
+                f"Session: {session.session_id or 'pending'}",
+                f"会话：{session.session_id or 'pending'}",
+            )
+        )
         if session_title is not None:
-            runtime_lines.append(f"Session title: {session_title}")
+            runtime_lines.append(
+                _with_cn_hint(
+                    f"Session title: {session_title}",
+                    f"会话标题：{session_title}",
+                )
+            )
     runtime_lines.extend(_status_active_turn_lines(active_turn, now=current_time))
 
     get_selection = None if session is None else getattr(session, "get_selection", None)
@@ -16203,24 +18477,52 @@ def _build_runtime_status_view(
         except Exception:
             mode_selection = None
         if model_selection is not None:
-            runtime_lines.append(f"Model: {_current_choice_label(model_selection)}")
+            runtime_lines.append(
+                _with_cn_hint(
+                    f"Model: {_current_choice_label(model_selection)}",
+                    f"模型：{_current_choice_label(model_selection)}",
+                )
+            )
         if mode_selection is not None:
-            runtime_lines.append(f"Mode: {_current_choice_label(mode_selection)}")
+            runtime_lines.append(
+                _with_cn_hint(
+                    f"Mode: {_current_choice_label(mode_selection)}",
+                    f"模式：{_current_choice_label(mode_selection)}",
+                )
+            )
     usage_summary = _status_usage_summary(session)
+    usage_summary_cn = _status_usage_summary_cn(session)
     if usage_summary is not None:
-        runtime_lines.append(f"Usage: {usage_summary}")
+        runtime_lines.append(
+            _with_cn_hint(
+                f"Usage: {usage_summary}",
+                f"用量：{usage_summary_cn or usage_summary}",
+            )
+        )
     runtime_lines.extend(_status_plan_preview_lines(session))
     plan_count = len(_plan_items(session))
     runtime_lines.extend(_status_tool_activity_preview_lines(session))
     tool_activity_count = len(_tool_activity_items(session))
 
-    memory_lines = [f"Pending input: {_pending_text_action_label(pending_text_action)}"]
+    memory_lines = [
+        _with_cn_hint(
+            f"Pending input: {_pending_text_action_label(pending_text_action)}",
+            f"待输入：{_pending_text_action_label_cn(pending_text_action)}",
+        )
+    ]
     pending_text_hint = _pending_text_action_hint_line(pending_text_action)
     if pending_text_hint is not None:
         memory_lines.append(pending_text_hint)
     if pending_media_group_stats is not None:
-        memory_lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
-    memory_lines.append(f"Local sessions: {history_count}")
+        memory_lines.append(
+            _with_cn_hint(
+                f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}",
+                f"待上传附件：{_pending_media_group_summary_cn(pending_media_group_stats)}",
+            )
+        )
+    memory_lines.append(
+        _with_cn_hint(f"Local sessions: {history_count}", f"本地会话：{history_count}")
+    )
     recent_history_entries, recent_history_total = _status_recent_history_entries(
         history_entries,
         current_session_id=None if session is None else session.session_id,
@@ -16232,25 +18534,45 @@ def _build_runtime_status_view(
         )
     )
     if last_turn is None:
-        memory_lines.append("Last turn replay: none")
+        memory_lines.append(_with_cn_hint("Last turn replay: none", "上一轮回放：无"))
     else:
         replay_snippet = _status_text_snippet(last_turn.title_hint) or "untitled turn"
-        memory_lines.append(f"Last turn replay: available ({replay_snippet})")
+        memory_lines.append(
+            _with_cn_hint(
+                f"Last turn replay: available ({replay_snippet})",
+                f"上一轮回放：可用（{replay_snippet}）",
+            )
+        )
         if last_turn.provider != provider:
             memory_lines.append(
-                "Last turn replay note: "
-                + _last_turn_replay_note(
-                    replay_turn=last_turn,
-                    current_provider=provider,
+                _with_cn_hint(
+                    "Last turn replay note: "
+                    + _last_turn_replay_note(
+                        replay_turn=last_turn,
+                        current_provider=provider,
+                    ),
+                    "上一轮回放提示："
+                    + _last_turn_replay_note_cn(
+                        replay_turn=last_turn,
+                        current_provider=provider,
+                    ),
                 )
             )
     if last_request_text is None:
-        memory_lines.append("Last request text: none")
+        memory_lines.append(_with_cn_hint("Last request text: none", "上次请求文本：无"))
     else:
         memory_lines.append(
-            f"Last request text: {_status_text_snippet(last_request_text) or '[empty]'}"
+            _with_cn_hint(
+                f"Last request text: {_status_text_snippet(last_request_text) or '[empty]'}",
+                f"上次请求文本：{_status_text_snippet(last_request_text) or '[empty]'}",
+            )
         )
-        memory_lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
+        memory_lines.append(
+            _with_cn_hint(
+                f"Last request source: {_last_request_source_summary(last_request)}",
+                f"上次请求来源：{_last_request_source_summary_cn(last_request)}",
+            )
+        )
         if last_request is not None:
             recorded_request_provider = _last_request_recorded_provider(
                 last_request,
@@ -16258,59 +18580,107 @@ def _build_runtime_status_view(
             )
             if recorded_request_provider != provider:
                 memory_lines.append(
-                    "Last request replay note: "
-                    + _last_request_replay_note(
-                        last_request=last_request,
-                        current_provider=provider,
+                    _with_cn_hint(
+                        "Last request replay note: "
+                        + _last_request_replay_note(
+                            last_request=last_request,
+                            current_provider=provider,
+                        ),
+                        "上次请求回放提示："
+                        + _last_request_replay_note_cn(
+                            last_request=last_request,
+                            current_provider=provider,
+                        ),
                     )
                 )
 
     workspace_lines = [
-        f"Workspace changes: {_status_workspace_changes_summary(git_status)}",
+        _with_cn_hint(
+            f"Workspace changes: {_status_workspace_changes_summary(git_status)}",
+            f"工作区变更：{_status_workspace_changes_summary_cn(git_status)}",
+        ),
         *_status_workspace_change_preview_lines(git_status),
-        f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}",
-        f"Bundle chat: {'on' if bundle_chat_active else 'off'}",
+        _with_cn_hint(
+            f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}",
+            f"上下文包：{bundle_count} 项",
+        ),
+        _with_cn_hint(
+            f"Bundle chat: {'on' if bundle_chat_active else 'off'}",
+            f"Bundle Chat：{_cn_on_off(bundle_chat_active)}",
+        ),
         *_status_context_bundle_preview_lines(bundle),
     ]
 
     capability_lines: list[str] = []
     if session is None:
-        capability_lines.append("Agent commands cached: unknown until a live session starts.")
+        capability_lines.append(
+            _with_cn_hint(
+                "Agent commands cached: unknown until a live session starts.",
+                "Agent 命令缓存：要等 live session 启动后才能确定。",
+            )
+        )
     elif session.session_id is None:
-        capability_lines.append("Agent commands cached: waiting for session start.")
+        capability_lines.append(
+            _with_cn_hint(
+                "Agent commands cached: waiting for session start.",
+                "Agent 命令缓存：等待会话真正启动后加载。",
+            )
+        )
     else:
         cached_commands = tuple(getattr(session, "available_commands", ()) or ())
-        capability_lines.append(f"Agent commands cached: {len(cached_commands)}")
+        capability_lines.append(
+            _with_cn_hint(
+                f"Agent commands cached: {len(cached_commands)}",
+                f"Agent 命令缓存：{len(cached_commands)} 条",
+            )
+        )
         capability_lines.extend(_status_agent_command_preview_lines(cached_commands))
         capabilities = getattr(session, "capabilities", None)
         if capabilities is not None:
             capability_lines.append(
-                "Prompt input: "
-                f"img={'yes' if getattr(capabilities, 'supports_image_prompt', False) else 'no'},"
-                f"audio={'yes' if getattr(capabilities, 'supports_audio_prompt', False) else 'no'},"
-                f"docs={'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}"
+                _with_cn_hint(
+                    "Prompt input: "
+                    f"img={'yes' if getattr(capabilities, 'supports_image_prompt', False) else 'no'},"
+                    f"audio={'yes' if getattr(capabilities, 'supports_audio_prompt', False) else 'no'},"
+                    f"docs={'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}",
+                    "输入能力："
+                    f"图片={_cn_yes_no(getattr(capabilities, 'supports_image_prompt', False))}，"
+                    f"音频={_cn_yes_no(getattr(capabilities, 'supports_audio_prompt', False))}，"
+                    f"文档上下文={_cn_yes_no(getattr(capabilities, 'supports_embedded_context_prompt', False))}",
+                )
             )
             capability_lines.append(
-                "Session control: "
-                f"fork={'yes' if getattr(capabilities, 'can_fork', False) else 'no'},"
-                f"list={'yes' if getattr(capabilities, 'can_list', False) else 'no'},"
-                f"resume={'yes' if getattr(capabilities, 'can_resume', False) else 'no'}"
+                _with_cn_hint(
+                    "Session control: "
+                    f"fork={'yes' if getattr(capabilities, 'can_fork', False) else 'no'},"
+                    f"list={'yes' if getattr(capabilities, 'can_list', False) else 'no'},"
+                    f"resume={'yes' if getattr(capabilities, 'can_resume', False) else 'no'}",
+                    "会话控制："
+                    f"分叉={_cn_yes_no(getattr(capabilities, 'can_fork', False))}，"
+                    f"列举={_cn_yes_no(getattr(capabilities, 'can_list', False))}，"
+                    f"接管={_cn_yes_no(getattr(capabilities, 'can_resume', False))}",
+                )
             )
 
     lines.append("")
-    lines.append("Current runtime:")
+    lines.append(_with_cn_hint("Current runtime:", "当前运行态："))
+    lines.append("当前运行态：这里汇总 live session、模型 / 模式、用量，以及正在运行的回合。")
     lines.extend(runtime_lines)
     lines.append("")
-    lines.append("Resume and memory:")
+    lines.append(_with_cn_hint("Resume and memory:", "恢复与记忆："))
+    lines.append("恢复与记忆：这里放的是本地可复用内容，例如历史、Last Request、Last Turn 和待输入状态。")
     lines.extend(memory_lines)
     lines.append("")
-    lines.append("Workspace context:")
+    lines.append(_with_cn_hint("Workspace context:", "工作区上下文："))
+    lines.append("工作区上下文：先看变更和 Context Bundle，再决定是直接提问还是继续整理上下文。")
     lines.extend(workspace_lines)
     lines.append("")
-    lines.append("Agent capabilities:")
+    lines.append(_with_cn_hint("Agent capabilities:", "Agent 能力："))
+    lines.append("Agent 能力：这里说明当前 provider / session 暴露了哪些命令、输入能力和会话控制能力。")
     lines.extend(capability_lines)
     lines.append("")
-    lines.append("Controls:")
+    lines.append(_with_cn_hint("Controls:", "可用操作："))
+    lines.append("控制中心说明：按钮按恢复、检查、调优和工作区动作分组，不需要从头到尾逐个试。")
     lines.append(
         "Control center: use the buttons below for session recovery, history, files, changes, "
         "model / mode, agent commands, and workspace actions."
@@ -16804,14 +19174,31 @@ def _build_history_view(
         lines.append(notice)
 
     lines.append(
-        f"Session history for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Session history for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"会话历史：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "History is bot-local workspace memory for resuming saved checkpoints.",
+            "会话历史：这里保存的是 bot 本地的工作区检查点，适合接回之前的进度。",
+        )
     )
     buttons = []
     if not entries:
-        lines.append("No local session history yet.")
         lines.append(
-            "Start a new session to create reusable checkpoints, or open Bot Status to keep "
-            "working from the current runtime."
+            _with_cn_hint(
+                "No local session history yet.",
+                "当前还没有本地会话历史。",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Start a new session to create reusable checkpoints, or open Bot Status to keep "
+                "working from the current runtime.",
+                "如果你想开始积累可复用检查点，就先新建会话；如果你只是继续当前运行时，就回状态中心。",
+            )
         )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
@@ -16886,15 +19273,18 @@ def _build_history_view(
         )
     )
     lines.append(
-        "Open a session first if you want timestamps or the local-only Rename / Delete actions."
+        _with_cn_hint(
+            "Open a session first if you want timestamps or the local-only Rename / Delete actions.",
+            "如果你要看时间戳，或使用仅本地生效的重命名 / 删除，就先打开具体会话。",
+        )
     )
     for offset, entry in enumerate(visible_entries, start=1):
         is_current = entry.session_id == active_session_id
         label = entry.title or entry.session_id
         if is_current:
-            label = f"{label} [current]"
+            label = f"{label} [当前会话]"
         lines.append(f"{start + offset}. {label}")
-        lines.append(f"updated={entry.updated_at}")
+        lines.append(_kv_hint("Updated", entry.updated_at, "更新时间"))
         history_entry_payload = _history_entry_callback_payload(
             entry=entry,
             page=page,
@@ -17049,20 +19439,36 @@ def _build_history_entry_view(
         lines.append(notice)
 
     lines.append(
-        f"Session history entry for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Session history entry for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"会话历史详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Title: {_status_text_snippet(entry.title, limit=120) or '[untitled]'}")
-    lines.append(f"Session: {entry.session_id}")
+    lines.append(_kv_hint("Title", _status_text_snippet(entry.title, limit=120) or "[untitled]", "标题", _status_text_snippet(entry.title, limit=120) or "[未命名]"))
+    lines.append(_kv_hint("Session", entry.session_id, "会话"))
     lines.append(
-        f"Current runtime session: {'yes' if entry.session_id == active_session_id else 'no'}"
+        _kv_hint(
+            "Current runtime session",
+            "yes" if entry.session_id == active_session_id else "no",
+            "当前运行态会话",
+            _cn_yes_no(entry.session_id == active_session_id),
+        )
     )
-    lines.append(f"Cwd: {entry.cwd}")
-    lines.append(f"Created: {entry.created_at}")
-    lines.append(f"Updated: {entry.updated_at}")
+    lines.append(_kv_hint("Cwd", entry.cwd, "工作目录"))
+    lines.append(_kv_hint("Created", entry.created_at, "创建时间"))
+    lines.append(_kv_hint("Updated", entry.updated_at, "更新时间"))
     lines.append(
-        "Management: Rename updates only this bot-local title. Delete removes only this bot-local checkpoint."
+        _with_cn_hint(
+            "Management: Rename updates only this bot-local title. Delete removes only this bot-local checkpoint.",
+            "管理说明：重命名只会改这个 bot 本地标题；删除也只会移除这个 bot 本地检查点。",
+        )
     )
-    lines.append("Provider-owned sessions are not renamed or deleted from here.")
+    lines.append(
+        _with_cn_hint(
+            "Provider-owned sessions are not renamed or deleted from here.",
+            "这里不会去改名或删除 Provider 侧持有的原始会话。",
+        )
+    )
 
     history_entry_payload = _history_entry_callback_payload(
         entry=entry,
@@ -17196,18 +19602,34 @@ def _build_provider_sessions_view(
         lines.append(notice)
 
     lines.append(
-        f"Provider sessions for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Provider sessions for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"Provider 会话：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
     lines.append(
-        "Only sessions inside the current workspace are shown. "
-        "This list comes from the provider, not the bot's local history."
+        _with_cn_hint(
+            "Only sessions inside the current workspace are shown. "
+            "This list comes from the provider, not the bot's local history.",
+            "这里只显示当前工作区里的 Provider 会话；它来自 Provider，不是 bot 的本地历史。",
+        )
     )
 
     buttons = []
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
     if not supported:
-        lines.append("Provider session browsing is not available for this agent.")
-        lines.append("Use Session History for bot-local checkpoints, or keep working from Bot Status.")
+        lines.append(
+            _with_cn_hint(
+                "Provider session browsing is not available for this agent.",
+                "当前 Agent 不支持浏览 Provider 会话。",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Use Session History for bot-local checkpoints, or keep working from Bot Status.",
+                "如果你要接回 bot 本地检查点，就用会话历史；如果只是继续当前运行态，就回状态中心。",
+            )
+        )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
             user_id=user_id,
@@ -17229,9 +19651,12 @@ def _build_provider_sessions_view(
                 ]
             )
     elif not entries:
-        lines.append("No provider sessions found.")
+        lines.append(_with_cn_hint("No provider sessions found.", "当前没有可浏览的 Provider 会话。"))
         lines.append(
-            "Start or reuse a live session, then refresh here if the provider persists reusable sessions."
+            _with_cn_hint(
+                "Start or reuse a live session, then refresh here if the provider persists reusable sessions.",
+                "先启动或复用一条 live session；如果 Provider 会持久化可复用会话，再回来刷新这里。",
+            )
         )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
@@ -17269,9 +19694,9 @@ def _build_provider_sessions_view(
                 ]
             )
     else:
-        lines.append(f"Loaded sessions on this page: {len(entries)}")
+        lines.append(_kv_hint("Loaded sessions on this page", len(entries), "本页已加载会话"))
         if previous_cursors or next_cursor is not None:
-            lines.append(f"Cursor page: {len(previous_cursors) + 1}")
+            lines.append(_kv_hint("Cursor page", len(previous_cursors) + 1, "游标页"))
         lines.append(
             _session_collection_next_step_line(
                 can_fork=can_fork,
@@ -17289,13 +19714,13 @@ def _build_provider_sessions_view(
             is_current = entry.session_id == active_session_id
             label = entry.title or entry.session_id
             if is_current:
-                label = f"{label} [current]"
+                label = f"{label} [当前会话]"
             lines.append(f"{index}. {label}")
             if entry.cwd_label != ".":
-                lines.append(f"cwd={entry.cwd_label}")
-            lines.append(f"session={entry.session_id}")
+                lines.append(_kv_hint("Cwd", entry.cwd_label, "工作目录"))
+            lines.append(_kv_hint("Session", entry.session_id, "会话"))
             if entry.updated_at:
-                lines.append(f"updated={entry.updated_at}")
+                lines.append(_kv_hint("Updated", entry.updated_at, "更新时间"))
             provider_session_payload = _provider_session_callback_payload(
                 entry=entry,
                 cursor=cursor,
@@ -17432,7 +19857,10 @@ def _build_session_info_view(
         lines.append(notice)
 
     lines.append(
-        f"Session info for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Session info for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"会话信息：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
 
     buttons: list[list[InlineKeyboardButton]] = [
@@ -17461,7 +19889,12 @@ def _build_session_info_view(
     )
 
     if session is None:
-        lines.append("No live session. A session will start on the first request.")
+        lines.append(
+            _with_cn_hint(
+                "No live session. A session will start on the first request.",
+                "当前还没有 live session；首条请求会自动创建。",
+            )
+        )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
             user_id=user_id,
@@ -17481,13 +19914,13 @@ def _build_session_info_view(
         return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
     session_id = getattr(session, "session_id", None)
-    lines.append(f"Session: {session_id or 'pending'}")
+    lines.append(_kv_hint("Session", session_id or "pending", "会话"))
     if session_title is not None:
-        lines.append(f"Title: {session_title}")
+        lines.append(_kv_hint("Title", session_title, "标题"))
 
     session_updated_at = _status_text_snippet(getattr(session, "session_updated_at", None), limit=120)
     if session_updated_at is not None:
-        lines.append(f"Updated: {session_updated_at}")
+        lines.append(_kv_hint("Updated", session_updated_at, "更新时间"))
 
     get_selection = getattr(session, "get_selection", None)
     model_selection = None
@@ -17511,32 +19944,56 @@ def _build_session_info_view(
 
     capabilities = getattr(session, "capabilities", None)
     if capabilities is not None:
-        lines.append("Prompt capabilities:")
+        lines.append(_with_cn_hint("Prompt capabilities:", "输入能力："))
         lines.append(
-            "image="
-            f"{'yes' if getattr(capabilities, 'supports_image_prompt', False) else 'no'}, "
-            "audio="
-            f"{'yes' if getattr(capabilities, 'supports_audio_prompt', False) else 'no'}, "
-            "embedded_context="
-            f"{'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}"
+            _with_cn_hint(
+                "image="
+                f"{'yes' if getattr(capabilities, 'supports_image_prompt', False) else 'no'}, "
+                "audio="
+                f"{'yes' if getattr(capabilities, 'supports_audio_prompt', False) else 'no'}, "
+                "embedded_context="
+                f"{'yes' if getattr(capabilities, 'supports_embedded_context_prompt', False) else 'no'}",
+                "图片="
+                f"{_cn_yes_no(getattr(capabilities, 'supports_image_prompt', False))}，"
+                "音频="
+                f"{_cn_yes_no(getattr(capabilities, 'supports_audio_prompt', False))}，"
+                "嵌入上下文="
+                f"{_cn_yes_no(getattr(capabilities, 'supports_embedded_context_prompt', False))}",
+            )
         )
-        lines.append("Session capabilities:")
+        lines.append(_with_cn_hint("Session capabilities:", "会话能力："))
         lines.append(
-            "load="
-            f"{'yes' if getattr(capabilities, 'can_load', False) else 'no'}, "
-            "fork="
-            f"{'yes' if getattr(capabilities, 'can_fork', False) else 'no'}, "
-            "list="
-            f"{'yes' if getattr(capabilities, 'can_list', False) else 'no'}, "
-            "resume="
-            f"{'yes' if getattr(capabilities, 'can_resume', False) else 'no'}"
+            _with_cn_hint(
+                "load="
+                f"{'yes' if getattr(capabilities, 'can_load', False) else 'no'}, "
+                "fork="
+                f"{'yes' if getattr(capabilities, 'can_fork', False) else 'no'}, "
+                "list="
+                f"{'yes' if getattr(capabilities, 'can_list', False) else 'no'}, "
+                "resume="
+                f"{'yes' if getattr(capabilities, 'can_resume', False) else 'no'}",
+                "加载="
+                f"{_cn_yes_no(getattr(capabilities, 'can_load', False))}，"
+                "分叉="
+                f"{_cn_yes_no(getattr(capabilities, 'can_fork', False))}，"
+                "枚举="
+                f"{_cn_yes_no(getattr(capabilities, 'can_list', False))}，"
+                "恢复="
+                f"{_cn_yes_no(getattr(capabilities, 'can_resume', False))}",
+            )
         )
 
     usage_summary = _status_usage_summary(session)
-    lines.append(f"Usage: {usage_summary or 'none'}")
-    lines.append(f"Cached commands: {len(tuple(getattr(session, 'available_commands', ()) or ()))}")
-    lines.append(f"Cached plan items: {len(_plan_items(session))}")
-    lines.append(f"Cached tool activities: {len(_tool_activity_items(session))}")
+    lines.append(_kv_hint("Usage", usage_summary or "none", "用量", usage_summary or "无"))
+    lines.append(
+        _kv_hint(
+            "Cached commands",
+            len(tuple(getattr(session, "available_commands", ()) or ())),
+            "已缓存命令",
+        )
+    )
+    lines.append(_kv_hint("Cached plan items", len(_plan_items(session)), "已缓存计划项"))
+    lines.append(_kv_hint("Cached tool activities", len(_tool_activity_items(session)), "已缓存工具活动"))
     last_request = ui_state.get_last_request(user_id, workspace_id)
     last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
 
@@ -17553,8 +20010,11 @@ def _build_session_info_view(
         buttons.extend(recovery_buttons)
     else:
         lines.append(
-            "Recommended next step: send text or an attachment from chat to keep working, or "
-            "use Usage / Workspace Runtime below if you want more runtime detail first."
+            _with_cn_hint(
+                "Recommended next step: send text or an attachment from chat to keep working, or "
+                "use Usage / Workspace Runtime below if you want more runtime detail first.",
+                "建议下一步：直接从聊天里继续发文本或附件；如果你想先看更细的运行态，再去下面的用量或工作区运行态。",
+            )
         )
 
     if usage_summary is not None:
@@ -17657,12 +20117,20 @@ def _build_usage_view(
         lines.append(notice)
 
     lines.append(
-        f"Usage for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Usage for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"用量信息：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
 
     buttons: list[list[InlineKeyboardButton]] = []
     if session is None:
-        lines.append("No live session. A session will start on the first request.")
+        lines.append(
+            _with_cn_hint(
+                "No live session. A session will start on the first request.",
+                "当前还没有 live session；首条请求会自动创建。",
+            )
+        )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
             user_id=user_id,
@@ -17705,30 +20173,45 @@ def _build_usage_view(
         )
     buttons.append(usage_nav_buttons)
 
-    lines.append(f"Session: {session_id or 'pending'}")
+    lines.append(_kv_hint("Session", session_id or "pending", "会话"))
     if session_title is not None:
-        lines.append(f"Title: {session_title}")
+        lines.append(_kv_hint("Title", session_title, "标题"))
 
     session_updated_at = _status_text_snippet(getattr(session, "session_updated_at", None), limit=120)
     if session_updated_at is not None:
-        lines.append(f"Updated: {session_updated_at}")
+        lines.append(_kv_hint("Updated", session_updated_at, "更新时间"))
 
     usage = getattr(session, "usage", None)
     if usage is None:
-        lines.append("Snapshot: none")
-        lines.append("No cached usage snapshot for this live session.")
-        lines.append("This view only shows the latest ACP usage_update already cached by the bot.")
+        lines.append(_kv_hint("Snapshot", "none", "快照", "无"))
+        lines.append(
+            _with_cn_hint(
+                "No cached usage snapshot for this live session.",
+                "当前 live session 还没有缓存任何用量快照。",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "This view only shows the latest ACP usage_update already cached by the bot.",
+                "这个页面只展示 bot 目前已经缓存下来的最新 ACP usage_update。",
+            )
+        )
     else:
-        lines.append("Snapshot: cached ACP usage_update")
-        lines.append(f"Used: {usage.used}")
-        lines.append(f"Window size: {usage.size}")
+        lines.append(
+            _with_cn_hint(
+                "Snapshot: cached ACP usage_update",
+                "快照：已缓存 ACP usage_update",
+            )
+        )
+        lines.append(_kv_hint("Used", usage.used, "已用"))
+        lines.append(_kv_hint("Window size", usage.size, "窗口大小"))
         remaining = _usage_remaining(usage)
         if remaining is not None:
-            lines.append(f"Remaining: {remaining}")
+            lines.append(_kv_hint("Remaining", remaining, "剩余"))
         utilization = _usage_utilization_percent(usage)
         if utilization is not None:
-            lines.append(f"Utilization: {utilization:.1f}%")
-        lines.append(f"Cost: {_usage_cost_label(usage)}")
+            lines.append(_kv_hint("Utilization", f"{utilization:.1f}%", "利用率"))
+        lines.append(_kv_hint("Cost", _usage_cost_label(usage), "成本"))
 
     recovery_lines, recovery_buttons = _workspace_recovery_actions(
         ui_state=ui_state,
@@ -17743,13 +20226,19 @@ def _build_usage_view(
         buttons.extend(recovery_buttons)
     elif usage is None:
         lines.append(
-            "Recommended next step: send a request that produces a reply first, or go back to "
-            "Session Info / Bot Status if you want the wider runtime snapshot."
+            _with_cn_hint(
+                "Recommended next step: send a request that produces a reply first, or go back to "
+                "Session Info / Bot Status if you want the wider runtime snapshot.",
+                "建议下一步：先发起一条能产出回复的请求；如果你想看更完整的运行态，再回会话信息或状态中心。",
+            )
         )
     else:
         lines.append(
-            "Recommended next step: keep chatting if you just needed a usage snapshot, or open "
-            "Session Info if you want the wider runtime snapshot."
+            _with_cn_hint(
+                "Recommended next step: keep chatting if you just needed a usage snapshot, or open "
+                "Session Info if you want the wider runtime snapshot.",
+                "建议下一步：如果你只是确认用量，就继续聊天；如果你想看更完整的运行态，再打开会话信息。",
+            )
         )
 
     _append_back_to_status_button(
@@ -17779,12 +20268,20 @@ def _build_last_request_view(
         lines.append(notice)
 
     lines.append(
-        f"Last request for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Last request for {resolve_provider_profile(current_provider).display_name} in {workspace_label}",
+            f"上次请求：{workspace_label} 中的 {resolve_provider_profile(current_provider).display_name}",
+        )
     )
 
     buttons: list[list[InlineKeyboardButton]] = []
     if last_request is None:
-        lines.append("No request text is cached for this workspace.")
+        lines.append(
+            _with_cn_hint(
+                "No request text is cached for this workspace.",
+                "当前工作区还没有缓存任何请求文本。",
+            )
+        )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
             user_id=user_id,
@@ -17792,8 +20289,11 @@ def _build_last_request_view(
             workspace_id=workspace_id,
             back_target=back_target,
             empty_recommendation=(
-                "Recommended next step: send a fresh request from chat, or use the buttons below "
-                "to go back."
+                _with_cn_hint(
+                    "Recommended next step: send a fresh request from chat, or use the buttons below "
+                    "to go back.",
+                    "建议下一步：直接在聊天里发一条新请求，或用下方按钮回到其他入口。",
+                )
             ),
         )
         lines.extend(recovery_lines)
@@ -17808,37 +20308,60 @@ def _build_last_request_view(
         return "\n".join(lines), markup
 
     recorded_provider = last_request.provider or current_provider
-    lines.append("Replay summary:")
-    lines.append(f"Current provider: {_replay_provider_display_name(current_provider)}")
-    lines.append(f"Recorded provider: {_replay_provider_display_name(recorded_provider)}")
-    lines.append(f"Recorded workspace: {last_request.workspace_id}")
-    lines.append(f"Source: {_last_request_source_summary(last_request)}")
+    lines.append(_with_cn_hint("Replay summary:", "重放概览："))
+    lines.append(_kv_hint("Current provider", _replay_provider_display_name(current_provider), "当前 Provider"))
+    lines.append(_kv_hint("Recorded provider", _replay_provider_display_name(recorded_provider), "记录时 Provider"))
+    lines.append(_kv_hint("Recorded workspace", last_request.workspace_id, "记录时工作区"))
+    lines.append(_kv_hint("Source", _last_request_source_summary(last_request), "来源"))
     lines.append(
-        "Replay note: "
-        + _last_request_replay_note(
-            last_request=last_request,
-            current_provider=current_provider,
+        _with_cn_hint(
+            "Replay note: "
+            + _last_request_replay_note(
+                last_request=last_request,
+                current_provider=current_provider,
+            ),
+            "重放说明："
+            + _last_request_replay_note(
+                last_request=last_request,
+                current_provider=current_provider,
+            ),
         )
     )
     lines.append(
-        "Run Last Request sends only this text again in the current provider and workspace. "
-        "It does not restore the original attachments or extra context."
+        _with_cn_hint(
+            "Run Last Request sends only this text again in the current provider and workspace. "
+            "It does not restore the original attachments or extra context.",
+            "Run Last Request 只会在当前 Provider 和工作区重发这段文本，不会自动恢复原附件或额外上下文。",
+        )
     )
     if last_turn_available:
         lines.append(
-            "Use Retry Last Turn or Fork Last Turn if you need the original attachments or "
-            "extra context back."
+            _with_cn_hint(
+                "Use Retry Last Turn or Fork Last Turn if you need the original attachments or "
+                "extra context back.",
+                "如果你需要把原附件或额外上下文一起带回，就用 Retry Last Turn 或 Fork Last Turn。",
+            )
         )
     lines.append(_last_request_next_step_line(last_turn_available=last_turn_available))
     lines.append(
-        f"Text length: {len(last_request.text)} character{'s' if len(last_request.text) != 1 else ''}"
+        _kv_hint(
+            "Text length",
+            f"{len(last_request.text)} character{'s' if len(last_request.text) != 1 else ''}",
+            "文本长度",
+            f"{len(last_request.text)} 字符",
+        )
     )
     content, truncated = _last_turn_render_text_detail(last_request.text)
     lines.append("")
-    lines.append("Request text:")
+    lines.append(_with_cn_hint("Request text:", "请求文本："))
     lines.append(content or "[empty]")
     if truncated:
-        lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
+        lines.append(
+            _with_cn_hint(
+                f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]",
+                f"[内容已截断到 {LAST_TURN_TEXT_DETAIL_LIMIT} 个字符]",
+            )
+        )
 
     buttons.append(
         [
@@ -17896,27 +20419,50 @@ def _build_workspace_runtime_view(
 
     workspace_label = _status_text_snippet(getattr(workspace, "label", None), limit=120) or "Workspace"
     lines.append(
-        f"Workspace runtime for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Workspace runtime for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区运行态：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Workspace ID: {getattr(workspace, 'id', 'unknown')}")
-    lines.append(f"Path: {workspace_path}")
-    lines.append("ACP client tools:")
-    lines.append("filesystem=yes (workspace-scoped text read/write)")
-    lines.append("terminal=yes (workspace-scoped process bridge)")
+    lines.append(_kv_hint("Workspace ID", getattr(workspace, "id", "unknown"), "工作区 ID"))
+    lines.append(_kv_hint("Path", workspace_path, "路径"))
+    lines.append(_with_cn_hint("ACP client tools:", "ACP 客户端工具："))
+    lines.append(
+        _with_cn_hint(
+            "filesystem=yes (workspace-scoped text read/write)",
+            "filesystem=是（受当前工作区约束的文本读写）",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "terminal=yes (workspace-scoped process bridge)",
+            "terminal=是（受当前工作区约束的进程桥接）",
+        )
+    )
 
     mcp_servers = tuple(getattr(workspace, "mcp_servers", ()) or ())
     if not mcp_servers:
-        lines.append("Configured MCP servers: none")
-        lines.append("Sessions in this runtime use only the bot client filesystem/terminal bridges.")
+        lines.append(_kv_hint("Configured MCP servers", "none", "已配置 MCP server", "无"))
+        lines.append(
+            _with_cn_hint(
+                "Sessions in this runtime use only the bot client filesystem/terminal bridges.",
+                "这个运行态中的会话目前只使用 bot 内置的文件系统 / 终端桥接。",
+            )
+        )
     else:
-        lines.append(f"Configured MCP servers: {len(mcp_servers)}")
+        lines.append(_kv_hint("Configured MCP servers", len(mcp_servers), "已配置 MCP server"))
         visible_servers = mcp_servers[:WORKSPACE_RUNTIME_SERVER_PREVIEW_LIMIT]
         for index, server in enumerate(visible_servers, start=1):
             lines.append(f"{index}. {_workspace_runtime_server_summary(server)}")
         remaining = len(mcp_servers) - len(visible_servers)
         if remaining > 0:
             lines.append(f"... {remaining} more server{'s' if remaining != 1 else ''}")
-        lines.append("New, loaded, resumed, and forked sessions inherit this MCP server set.")
+        lines.append(
+            _with_cn_hint(
+                "New, loaded, resumed, and forked sessions inherit this MCP server set.",
+                "新建、加载、恢复和分叉出来的会话都会继承这组 MCP server 配置。",
+            )
+        )
     lines.append(_workspace_runtime_next_step_line(has_mcp_servers=bool(mcp_servers)))
 
     buttons: list[list[InlineKeyboardButton]] = []
@@ -17964,37 +20510,61 @@ def _build_workspace_runtime_server_view(
 
     workspace_label = _status_text_snippet(getattr(workspace, "label", None), limit=120) or "Workspace"
     lines.append(
-        f"Workspace runtime for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Workspace runtime for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区运行态详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Workspace ID: {getattr(workspace, 'id', 'unknown')}")
-    lines.append(f"Path: {workspace_path}")
-    lines.append(f"MCP server: {server_index + 1}/{server_count}")
-    lines.append(f"Name: {_status_text_snippet(getattr(server, 'name', None), limit=120) or 'server'}")
+    lines.append(_kv_hint("Workspace ID", getattr(workspace, "id", "unknown"), "工作区 ID"))
+    lines.append(_kv_hint("Path", workspace_path, "路径"))
+    lines.append(_kv_hint("MCP server", f"{server_index + 1}/{server_count}", "MCP server"))
+    lines.append(
+        _kv_hint(
+            "Name",
+            _status_text_snippet(getattr(server, "name", None), limit=120) or "server",
+            "名称",
+            _status_text_snippet(getattr(server, "name", None), limit=120) or "server",
+        )
+    )
     transport = _status_text_snippet(getattr(server, "transport", None), limit=40) or "unknown"
-    lines.append(f"Transport: {transport}")
+    lines.append(_kv_hint("Transport", transport, "传输方式", transport))
 
     if transport == "stdio":
-        lines.append(f"Command: {_status_text_snippet(getattr(server, 'command', None), limit=200) or '[missing]'}")
+        lines.append(
+            _kv_hint(
+                "Command",
+                _status_text_snippet(getattr(server, "command", None), limit=200) or "[missing]",
+                "命令",
+                _status_text_snippet(getattr(server, "command", None), limit=200) or "[缺失]",
+            )
+        )
         args = tuple(getattr(server, "args", ()) or ())
         if not args:
-            lines.append("Args: none")
+            lines.append(_kv_hint("Args", "none", "参数", "无"))
         else:
-            lines.append(f"Args: {len(args)}")
+            lines.append(_kv_hint("Args", len(args), "参数"))
             for index, arg in enumerate(args, start=1):
                 lines.append(f"{index}. {_status_text_snippet(str(arg), limit=200) or '[empty]'}")
     else:
-        lines.append(f"URL: {_status_text_snippet(getattr(server, 'url', None), limit=200) or '[missing]'}")
+        lines.append(
+            _kv_hint(
+                "URL",
+                _status_text_snippet(getattr(server, "url", None), limit=200) or "[missing]",
+                "URL",
+                _status_text_snippet(getattr(server, "url", None), limit=200) or "[缺失]",
+            )
+        )
 
     env_items = tuple(getattr(server, "env", ()) or ())
     header_items = tuple(getattr(server, "headers", ()) or ())
-    lines.append(f"Env vars: {len(env_items)}")
+    lines.append(_kv_hint("Env vars", len(env_items), "环境变量"))
     if env_items:
-        lines.append("Env keys:")
+        lines.append(_with_cn_hint("Env keys:", "环境变量键："))
         for item in env_items:
             lines.append(_status_text_snippet(getattr(item, "name", None), limit=120) or "[empty]")
-    lines.append(f"Headers: {len(header_items)}")
+    lines.append(_kv_hint("Headers", len(header_items), "请求头"))
     if header_items:
-        lines.append("Header keys:")
+        lines.append(_with_cn_hint("Header keys:", "请求头键："))
         for item in header_items:
             lines.append(_status_text_snippet(getattr(item, "name", None), limit=120) or "[empty]")
     lines.append(_workspace_runtime_server_next_step_line())
@@ -18040,12 +20610,20 @@ def _build_last_turn_view(
         lines.append(notice)
 
     lines.append(
-        f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}",
+            f"上一轮详情：{workspace_label} 中的 {resolve_provider_profile(current_provider).display_name}",
+        )
     )
 
     buttons: list[list[InlineKeyboardButton]] = []
     if replay_turn is None:
-        lines.append("No replayable turn is cached.")
+        lines.append(
+            _with_cn_hint(
+                "No replayable turn is cached.",
+                "当前还没有可重放的上一轮。",
+            )
+        )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
             user_id=user_id,
@@ -18053,8 +20631,11 @@ def _build_last_turn_view(
             workspace_id=workspace_id,
             back_target=back_target,
             empty_recommendation=(
-                "Recommended next step: send a request that finishes a turn, or use the buttons "
-                "below to go back."
+                _with_cn_hint(
+                    "Recommended next step: send a request that finishes a turn, or use the buttons "
+                    "below to go back.",
+                    "建议下一步：先发起一条能够完整结束回合的请求，或用下方按钮回到其他入口。",
+                )
             ),
         )
         lines.extend(recovery_lines)
@@ -18068,34 +20649,59 @@ def _build_last_turn_view(
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
-    lines.append("Replay summary:")
-    lines.append(f"Current provider: {_replay_provider_display_name(current_provider)}")
-    lines.append(f"Recorded provider: {_replay_provider_display_name(replay_turn.provider)}")
-    lines.append(f"Recorded workspace: {replay_turn.workspace_id}")
+    lines.append(_with_cn_hint("Replay summary:", "重放概览："))
+    lines.append(_kv_hint("Current provider", _replay_provider_display_name(current_provider), "当前 Provider"))
+    lines.append(_kv_hint("Recorded provider", _replay_provider_display_name(replay_turn.provider), "记录时 Provider"))
+    lines.append(_kv_hint("Recorded workspace", replay_turn.workspace_id, "记录时工作区"))
     lines.append(
-        "Replay note: "
-        + _last_turn_replay_note(
-            replay_turn=replay_turn,
-            current_provider=current_provider,
+        _with_cn_hint(
+            "Replay note: "
+            + _last_turn_replay_note(
+                replay_turn=replay_turn,
+                current_provider=current_provider,
+            ),
+            "重放说明："
+            + _last_turn_replay_note(
+                replay_turn=replay_turn,
+                current_provider=current_provider,
+            ),
         )
     )
-    lines.append(f"Title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
     lines.append(
-        "Retry Last Turn replays this saved payload, including any saved attachments or extra "
-        "context, in the current live session."
+        _kv_hint(
+            "Title",
+            _status_text_snippet(replay_turn.title_hint, limit=120) or "[empty]",
+            "标题",
+            _status_text_snippet(replay_turn.title_hint, limit=120) or "[空]",
+        )
     )
     lines.append(
-        "Fork Last Turn starts a new session first, then replays the same payload there."
+        _with_cn_hint(
+            "Retry Last Turn replays this saved payload, including any saved attachments or extra "
+            "context, in the current live session.",
+            "Retry Last Turn 会在当前 live session 里重放这份已保存 payload，包括附件和额外上下文。",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "Fork Last Turn starts a new session first, then replays the same payload there.",
+            "Fork Last Turn 会先新建会话，再把同一份 payload 重放到新会话里。",
+        )
     )
     lines.append(_last_turn_next_step_line())
 
     prompt_items = _replay_prompt_items(replay_turn)
     saved_context_items = tuple(getattr(replay_turn, "saved_context_items", ()) or ())
     if not prompt_items:
-        lines.append("Prompt items: 0")
-        lines.append(f"Saved context items: {len(saved_context_items)}")
+        lines.append(_kv_hint("Prompt items", 0, "输入项"))
+        lines.append(_kv_hint("Saved context items", len(saved_context_items), "已保存上下文项"))
         lines.extend(_last_turn_context_preview_lines(saved_context_items))
-        lines.append("No replay payload items are available.")
+        lines.append(
+            _with_cn_hint(
+                "No replay payload items are available.",
+                "当前没有可重放的 payload 条目。",
+            )
+        )
         buttons.append(
             [
                 _callback_button(
@@ -18135,7 +20741,7 @@ def _build_last_turn_view(
         page=page,
         page_count=page_count,
     )
-    lines.append(f"Saved context items: {len(saved_context_items)}")
+    lines.append(_kv_hint("Saved context items", len(saved_context_items), "已保存上下文项"))
     lines.extend(_last_turn_context_preview_lines(saved_context_items))
 
     for offset, item in enumerate(visible_items, start=1):
@@ -18230,44 +20836,78 @@ def _build_last_turn_item_view(
         lines.append(notice)
 
     lines.append(
-        f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}"
-    )
-    lines.append(f"Item: {item_index + 1}/{total_count}")
-    lines.append(f"Current provider: {_replay_provider_display_name(current_provider)}")
-    lines.append(f"Recorded provider: {_replay_provider_display_name(replay_turn.provider)}")
-    lines.append(f"Recorded workspace: {replay_turn.workspace_id}")
-    lines.append(
-        "Replay note: "
-        + _last_turn_replay_note(
-            replay_turn=replay_turn,
-            current_provider=current_provider,
+        _view_heading(
+            f"Last turn for {resolve_provider_profile(current_provider).display_name} in {workspace_label}",
+            f"上一轮条目：{workspace_label} 中的 {resolve_provider_profile(current_provider).display_name}",
         )
     )
-    lines.append(f"Replay title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
-    lines.append(f"Kind: {_last_turn_item_kind_label(item)}")
+    lines.append(_kv_hint("Item", f"{item_index + 1}/{total_count}", "条目"))
+    lines.append(_kv_hint("Current provider", _replay_provider_display_name(current_provider), "当前 Provider"))
+    lines.append(_kv_hint("Recorded provider", _replay_provider_display_name(replay_turn.provider), "记录时 Provider"))
+    lines.append(_kv_hint("Recorded workspace", replay_turn.workspace_id, "记录时工作区"))
+    lines.append(
+        _with_cn_hint(
+            "Replay note: "
+            + _last_turn_replay_note(
+                replay_turn=replay_turn,
+                current_provider=current_provider,
+            ),
+            "重放说明："
+            + _last_turn_replay_note(
+                replay_turn=replay_turn,
+                current_provider=current_provider,
+            ),
+        )
+    )
+    lines.append(
+        _kv_hint(
+            "Replay title",
+            _status_text_snippet(replay_turn.title_hint, limit=120) or "[empty]",
+            "重放标题",
+            _status_text_snippet(replay_turn.title_hint, limit=120) or "[空]",
+        )
+    )
+    lines.append(_kv_hint("Kind", _last_turn_item_kind_label(item), "类型"))
 
     uri = getattr(item, "uri", None)
     if uri:
-        lines.append(f"URI: {uri}")
+        lines.append(_kv_hint("URI", uri, "URI"))
     mime_type = getattr(item, "mime_type", None)
     if mime_type:
-        lines.append(f"MIME type: {mime_type}")
+        lines.append(_kv_hint("MIME type", mime_type, "MIME 类型"))
     payload_size = _last_turn_payload_size_bytes(item)
     if payload_size is not None:
-        lines.append(f"Payload size: {payload_size} byte{'s' if payload_size != 1 else ''}")
+        lines.append(
+            _kv_hint(
+                "Payload size",
+                f"{payload_size} byte{'s' if payload_size != 1 else ''}",
+                "负载大小",
+                f"{payload_size} 字节",
+            )
+        )
 
     if isinstance(item, PromptText):
         content, truncated = _last_turn_render_text_detail(item.text)
-        lines.append("Content:")
+        lines.append(_with_cn_hint("Content:", "内容："))
         lines.append(content or "[empty]")
         if truncated:
-            lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
+            lines.append(
+                _with_cn_hint(
+                    f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]",
+                    f"[内容已截断到 {LAST_TURN_TEXT_DETAIL_LIMIT} 个字符]",
+                )
+            )
     elif isinstance(item, PromptTextResource):
         content, truncated = _last_turn_render_text_detail(item.text)
-        lines.append("Resource content:")
+        lines.append(_with_cn_hint("Resource content:", "资源内容："))
         lines.append(content or "[empty]")
         if truncated:
-            lines.append(f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]")
+            lines.append(
+                _with_cn_hint(
+                    f"[content truncated to {LAST_TURN_TEXT_DETAIL_LIMIT} characters]",
+                    f"[内容已截断到 {LAST_TURN_TEXT_DETAIL_LIMIT} 个字符]",
+                )
+            )
 
     buttons = [
         [
@@ -18328,14 +20968,22 @@ def _build_plan_view(
         lines.append(notice)
 
     lines.append(
-        f"Agent plan for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Agent plan for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"Agent 计划：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Session: {session_id or 'none'}")
+    lines.append(_kv_hint("Session", session_id or "none", "会话", session_id or "无"))
 
     buttons = []
     if not entries:
-        lines.append("No cached agent plan.")
-        lines.append("Plans appear here after the agent publishes structured plan updates for this session.")
+        lines.append(_with_cn_hint("No cached agent plan.", "当前还没有缓存的 Agent 计划。"))
+        lines.append(
+            _with_cn_hint(
+                "Plans appear here after the agent publishes structured plan updates for this session.",
+                "只有当 agent 在这条会话里产出结构化计划更新后，这里才会出现内容。",
+            )
+        )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
             user_id=user_id,
@@ -18343,8 +20991,11 @@ def _build_plan_view(
             workspace_id=workspace_id,
             back_target=back_target,
             empty_recommendation=(
-                "Recommended next step: send a request that needs planning, refresh this page "
-                "later, or use the buttons below to go back."
+                _with_cn_hint(
+                    "Recommended next step: send a request that needs planning, refresh this page "
+                    "later, or use the buttons below to go back.",
+                    "建议下一步：先发起一条需要规划的请求，稍后回来刷新，或用下方按钮返回其他入口。",
+                )
             ),
         )
         lines.extend(recovery_lines)
@@ -18462,21 +21113,24 @@ def _build_plan_detail_view(
         lines.append(notice)
 
     lines.append(
-        f"Agent plan for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Agent plan for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"Agent 计划详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Item: {plan_index + 1}/{total_count}")
-    lines.append(f"Status: {getattr(entry, 'status', 'pending')}")
+    lines.append(_kv_hint("Item", f"{plan_index + 1}/{total_count}", "条目"))
+    lines.append(_kv_hint("Status", getattr(entry, "status", "pending"), "状态"))
     priority = _status_text_snippet(getattr(entry, "priority", None))
     if priority is not None:
-        lines.append(f"Priority: {priority}")
+        lines.append(_kv_hint("Priority", priority, "优先级"))
     lines.append(_plan_detail_next_step_line(status=str(getattr(entry, "status", "pending"))))
-    lines.append("Content:")
+    lines.append(_with_cn_hint("Content:", "内容："))
     content = getattr(entry, "content", None)
     if content is None:
-        lines.append("[empty]")
+        lines.append(_with_cn_hint("[empty]", "[空]"))
     else:
         rendered = str(content)
-        lines.append(rendered if rendered.strip() else "[empty]")
+        lines.append(rendered if rendered.strip() else _with_cn_hint("[empty]", "[空]"))
 
     buttons = [
         [
@@ -18521,16 +21175,22 @@ def _build_tool_activity_view(
         lines.append(notice)
 
     lines.append(
-        f"Tool activity for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Tool activity for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工具活动：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Session: {session_id or 'none'}")
+    lines.append(_kv_hint("Session", session_id or "none", "会话", session_id or "无"))
 
     buttons = []
     if not activities:
-        lines.append("No recent tool activity.")
+        lines.append(_with_cn_hint("No recent tool activity.", "最近还没有工具活动。"))
         lines.append(
-            "Tool activity appears here after the agent uses terminal, files, or other tools in "
-            "this session."
+            _with_cn_hint(
+                "Tool activity appears here after the agent uses terminal, files, or other tools in "
+                "this session.",
+                "只有当 agent 在这条会话里使用了终端、文件或其他工具后，这里才会出现工具活动。",
+            )
         )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
@@ -18539,8 +21199,11 @@ def _build_tool_activity_view(
             workspace_id=workspace_id,
             back_target=back_target,
             empty_recommendation=(
-                "Recommended next step: send a request that needs tool use, refresh this page "
-                "later, or use the buttons below to go back."
+                _with_cn_hint(
+                    "Recommended next step: send a request that needs tool use, refresh this page "
+                    "later, or use the buttons below to go back.",
+                    "建议下一步：先发起一条需要用到工具的请求，稍后回来刷新，或用下方按钮回到其他入口。",
+                )
             ),
         )
         lines.extend(recovery_lines)
@@ -18669,17 +21332,24 @@ def _build_tool_activity_detail_view(
         lines.append(notice)
 
     lines.append(
-        f"Tool activity for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Tool activity for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工具活动详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Item: {activity_index + 1}/{total_count}")
+    lines.append(_kv_hint("Item", f"{activity_index + 1}/{total_count}", "条目"))
     lines.append(
-        f"Title: {_status_text_snippet(getattr(activity, 'title', None)) or getattr(activity, 'tool_call_id', 'tool')}"
+        _kv_hint(
+            "Title",
+            _status_text_snippet(getattr(activity, "title", None)) or getattr(activity, "tool_call_id", "tool"),
+            "标题",
+        )
     )
-    lines.append(f"Status: {getattr(activity, 'status', 'pending')}")
+    lines.append(_kv_hint("Status", getattr(activity, "status", "pending"), "状态"))
     kind = _status_text_snippet(getattr(activity, "kind", None))
     if kind is not None:
-        lines.append(f"Kind: {kind}")
-    lines.append(f"Tool call: {getattr(activity, 'tool_call_id', 'tool')}")
+        lines.append(_kv_hint("Kind", kind, "类型"))
+    lines.append(_kv_hint("Tool call", getattr(activity, "tool_call_id", "tool"), "工具调用"))
     lines.append(
         _tool_activity_detail_next_step_line(
             status=str(getattr(activity, "status", "pending")),
@@ -18691,17 +21361,17 @@ def _build_tool_activity_detail_view(
 
     details = tuple(getattr(activity, "details", ()) or ())
     if details:
-        lines.append("Details:")
+        lines.append(_with_cn_hint("Details:", "详情："))
         for index, detail in enumerate(details, start=1):
             lines.append(f"{index}. {detail}")
 
     content_types = tuple(getattr(activity, "content_types", ()) or ())
     if content_types:
-        lines.append(f"Content: {', '.join(content_types)}")
+        lines.append(_kv_hint("Content", ", ".join(content_types), "内容"))
 
     path_refs = tuple(getattr(activity, "path_refs", ()) or ())
     if path_refs:
-        lines.append("Paths:")
+        lines.append(_with_cn_hint("Paths:", "路径："))
         visible_refs = path_refs[:TOOL_ACTIVITY_PATH_BUTTON_LIMIT]
         for index, path_ref in enumerate(visible_refs, start=1):
             lines.append(f"{index}. {path_ref}")
@@ -18711,19 +21381,19 @@ def _build_tool_activity_detail_view(
 
     terminal_ids = tuple(getattr(activity, "terminal_ids", ()) or ())
     if terminal_ids:
-        lines.append("Terminal preview:")
+        lines.append(_with_cn_hint("Terminal preview:", "终端预览："))
         if not terminal_previews:
-            lines.append("1. Output unavailable.")
+            lines.append(_with_cn_hint("1. Output unavailable.", "1. 当前没有可用输出。"))
         else:
             for index, preview in enumerate(terminal_previews, start=1):
                 lines.append(f"{index}. {preview.terminal_id} [{preview.status_label}]")
                 if preview.output is None:
-                    lines.append("output: [no output]")
+                    lines.append(_with_cn_hint("output: [no output]", "输出：[暂无输出]"))
                 else:
                     output = preview.output
                     if preview.truncated:
-                        output = f"{output}\n[output truncated]"
-                    lines.append(f"output:\n{output}")
+                        output = f"{output}\n{_with_cn_hint('[output truncated]', '[输出已截断]')}"
+                    lines.append(_with_cn_hint(f"output:\n{output}", f"输出：\n{output}"))
             remaining_terminals = len(terminal_ids) - len(terminal_previews)
             if remaining_terminals > 0:
                 lines.append(
@@ -18833,16 +21503,38 @@ def _build_provider_session_detail_view(
         lines.append(notice)
 
     lines.append(
-        f"Provider session for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Provider session for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"Provider 会话详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Title: {_status_text_snippet(entry.title, limit=120) or '[untitled]'}")
-    lines.append(f"Session: {entry.session_id}")
     lines.append(
-        f"Current runtime session: {'yes' if entry.session_id == active_session_id else 'no'}"
+        _kv_hint(
+            "Title",
+            _status_text_snippet(entry.title, limit=120) or "[untitled]",
+            "标题",
+            _status_text_snippet(entry.title, limit=120) or "[未命名]",
+        )
     )
-    lines.append(f"Workspace-relative cwd: {entry.cwd_label}")
-    lines.append(f"Provider cwd: {entry.cwd}")
-    lines.append(f"Updated: {entry.updated_at or 'unknown'}")
+    lines.append(_kv_hint("Session", entry.session_id, "会话"))
+    lines.append(
+        _kv_hint(
+            "Current runtime session",
+            "yes" if entry.session_id == active_session_id else "no",
+            "当前运行态会话",
+            _cn_yes_no(entry.session_id == active_session_id),
+        )
+    )
+    lines.append(_kv_hint("Workspace-relative cwd", entry.cwd_label, "相对工作区目录"))
+    lines.append(_kv_hint("Provider cwd", entry.cwd, "Provider 工作目录"))
+    lines.append(
+        _kv_hint(
+            "Updated",
+            entry.updated_at or "unknown",
+            "更新时间",
+            entry.updated_at or "未知",
+        )
+    )
 
     provider_session_payload = _provider_session_callback_payload(
         entry=entry,
@@ -18959,16 +21651,29 @@ def _build_agent_commands_view(
         lines.append(notice)
 
     lines.append(
-        f"Agent commands for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Agent commands for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"Agent 命令：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Session: {session_id or 'none (will start on first command)'}")
+    lines.append(
+        _kv_hint(
+            "Session",
+            session_id or "none (will start on first command)",
+            "会话",
+            session_id or "无（首条命令会自动创建）",
+        )
+    )
 
     buttons = []
     if not commands:
-        lines.append("No agent commands available.")
+        lines.append(_with_cn_hint("No agent commands available.", "当前没有可用的 Agent 命令。"))
         lines.append(
-            "Command discovery may still be loading, or the current agent may not expose any "
-            "slash commands."
+            _with_cn_hint(
+                "Command discovery may still be loading, or the current agent may not expose any "
+                "slash commands.",
+                "命令发现可能还在进行中，或者当前 Agent 本身就不暴露任何 slash 命令。",
+            )
         )
         recovery_lines, recovery_buttons = _workspace_recovery_actions(
             ui_state=ui_state,
@@ -19023,7 +21728,7 @@ def _build_agent_commands_view(
         if description:
             lines.append(description)
         if command.hint:
-            lines.append(f"args: {command.hint}")
+            lines.append(_kv_hint("Args", command.hint, "参数"))
         command_payload = _agent_command_callback_payload(
             command=command,
             page=page,
@@ -19128,23 +21833,33 @@ def _build_agent_command_detail_view(
         lines.append(notice)
 
     lines.append(
-        f"Agent command for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Agent command for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"Agent 命令详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Command: {command_index + 1}/{total_count}")
-    lines.append(f"Session: {session_id or 'none (will start on first command)'}")
-    lines.append(f"Name: {_agent_command_name(command.name)}")
+    lines.append(_kv_hint("Command", f"{command_index + 1}/{total_count}", "命令"))
+    lines.append(
+        _kv_hint(
+            "Session",
+            session_id or "none (will start on first command)",
+            "会话",
+            session_id or "无（首条命令会自动创建）",
+        )
+    )
+    lines.append(_kv_hint("Name", _agent_command_name(command.name), "名称"))
     description = (command.description or "").strip()
     if description:
-        lines.append("Description:")
+        lines.append(_with_cn_hint("Description:", "说明："))
         lines.append(description)
     else:
-        lines.append("Description: none")
+        lines.append(_kv_hint("Description", "none", "说明", "无"))
     if command.hint:
-        lines.append(f"Args hint: {command.hint}")
-        lines.append(f"Example: {_agent_command_name(command.name)} <args>")
+        lines.append(_kv_hint("Args hint", command.hint, "参数提示"))
+        lines.append(_kv_hint("Example", f"{_agent_command_name(command.name)} <args>", "示例"))
     else:
-        lines.append("Args hint: none")
-        lines.append(f"Example: {_agent_command_name(command.name)}")
+        lines.append(_kv_hint("Args hint", "none", "参数提示", "无"))
+        lines.append(_kv_hint("Example", _agent_command_name(command.name), "示例"))
     lines.append(_agent_command_detail_next_step_line(requires_args=bool(command.hint)))
 
     command_payload = _agent_command_callback_payload(
@@ -19432,16 +22147,35 @@ def _build_workspace_listing_view(
         lines.append(notice)
 
     lines.append(
-        f"Workspace files for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Workspace files for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区文件：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Path: {listing.relative_path or '.'}")
+    lines.append(_kv_hint("Path", listing.relative_path or ".", "路径"))
+    lines.append(
+        _with_cn_hint(
+            "Browse folders first, then decide whether to inspect, ask, or add files to context.",
+            "工作区文件：先浏览目录，再决定是查看、提问，还是把文件加入上下文。",
+        )
+    )
 
     if not listing.entries:
-        lines.append("[empty directory]")
+        lines.append(_with_cn_hint("[empty directory]", "[空目录]"))
         if listing.relative_path:
-            lines.append("Go up, search the workspace, or open Bot Status to continue elsewhere.")
+            lines.append(
+                _with_cn_hint(
+                    "Go up, search the workspace, or open Bot Status to continue elsewhere.",
+                    "你可以先回上一级、改用工作区搜索，或回状态中心从别的入口继续。",
+                )
+            )
         else:
-            lines.append("Search the workspace or open Bot Status to continue elsewhere.")
+            lines.append(
+                _with_cn_hint(
+                    "Search the workspace or open Bot Status to continue elsewhere.",
+                    "你可以改用工作区搜索，或回状态中心从别的入口继续。",
+                )
+            )
         buttons = []
         navigation_buttons = []
         if listing.relative_path:
@@ -19494,8 +22228,11 @@ def _build_workspace_listing_view(
         )
     else:
         lines.append(
-            "Recommended next step: open a folder first if you want to keep browsing, or use "
-            "Workspace Search if you already know what to look for."
+            _with_cn_hint(
+                "Recommended next step: open a folder first if you want to keep browsing, or use "
+                "Workspace Search if you already know what to look for.",
+                "建议下一步：如果你还想继续浏览，就先打开一个目录；如果你已经知道要找什么，就直接用工作区搜索。",
+            )
         )
 
     buttons = []
@@ -19702,14 +22439,31 @@ def _build_workspace_search_results_view(
         lines.append(notice)
 
     lines.append(
-        f"Workspace search for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Workspace search for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区搜索：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Query: {search_results.query}")
+    lines.append(_kv_hint("Query", search_results.query, "搜索词"))
+    lines.append(
+        _with_cn_hint(
+            "Search results help you decide whether to inspect a file, ask directly, or save matching files into context.",
+            "工作区搜索：先用匹配结果缩小范围，再决定是查看文件、直接提问，还是把匹配文件加入上下文。",
+        )
+    )
 
     if not search_results.matches:
-        lines.append("No matches found.")
         lines.append(
-            "Try a broader query, search again, or open Workspace Files to browse manually."
+            _with_cn_hint(
+                "No matches found.",
+                "没有找到匹配结果。",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Try a broader query, search again, or open Workspace Files to browse manually.",
+                "你可以换个更宽的关键词再搜一次，或打开工作区文件手动浏览。",
+            )
         )
         buttons: list[list[InlineKeyboardButton]] = []
         buttons.append(
@@ -19793,7 +22547,7 @@ def _build_workspace_search_results_view(
         )
 
     if search_results.truncated:
-        lines.append("[results truncated]")
+        lines.append(_with_cn_hint("[results truncated]", "[结果已截断]"))
 
     _append_action_guide_lines(
         lines,
@@ -19958,13 +22712,30 @@ def _build_workspace_changes_view(
         lines.append(notice)
 
     lines.append(
-        f"Workspace changes for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Workspace changes for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区变更：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "This page focuses on current Git changes so you can inspect diffs, ask about them, or carry them into context.",
+            "工作区变更：这里专门看当前 Git 变更，方便你查 diff、围绕它提问，或把它们带进上下文。",
+        )
     )
 
     if not git_status.is_git_repo:
-        lines.append("Current workspace is not a Git repository.")
         lines.append(
-            "Use Workspace Files or Workspace Search when you still need local project context."
+            _with_cn_hint(
+                "Current workspace is not a Git repository.",
+                "当前工作区不是 Git 仓库。",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Use Workspace Files or Workspace Search when you still need local project context.",
+                "如果你仍然需要项目本地上下文，可以改用工作区文件或工作区搜索。",
+            )
         )
         buttons: list[list[InlineKeyboardButton]] = []
         buttons.append(
@@ -19994,11 +22765,19 @@ def _build_workspace_changes_view(
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
-    lines.append(f"Branch: {git_status.branch_line or 'unknown'}")
+    lines.append(_kv_hint("Branch", git_status.branch_line or "unknown", "分支", git_status.branch_line or "未知"))
     if not git_status.entries:
-        lines.append("No working tree changes.")
         lines.append(
-            "Browse files, search the workspace, or send a fresh request if you are ready to keep going."
+            _with_cn_hint(
+                "No working tree changes.",
+                "当前工作树没有变更。",
+            )
+        )
+        lines.append(
+            _with_cn_hint(
+                "Browse files, search the workspace, or send a fresh request if you are ready to keep going.",
+                "如果你已经准备继续，可以去看文件、搜工作区，或直接发送一条新请求。",
+            )
         )
         buttons = []
         buttons.append(
@@ -20242,14 +23021,26 @@ def _build_context_bundle_view(
         lines.append(notice)
 
     lines.append(
-        f"Context bundle for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Context bundle for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"上下文包：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
+    )
+    lines.append(
+        _with_cn_hint(
+            "Bundle is reusable local context that you can inspect, trim, or carry into the next turn.",
+            "上下文包：这里放的是可复用的本地上下文，你可以检查、裁剪，或把它带进下一轮提问。",
+        )
     )
 
     if bundle is None or not bundle.items:
         lines.append(_context_bundle_empty_text())
         lines.append(
-            "Add files from Workspace Files or Search, or add current Git changes, then come "
-            "back here to reuse that context."
+            _with_cn_hint(
+                "Add files from Workspace Files or Search, or add current Git changes, then come "
+                "back here to reuse that context.",
+                "先从工作区文件 / 搜索里加文件，或把当前 Git 变更加进来，然后再回这里统一复用。",
+            )
         )
         buttons: list[list[InlineKeyboardButton]] = []
         buttons.append(
@@ -20300,8 +23091,15 @@ def _build_context_bundle_view(
         markup = None if not buttons else InlineKeyboardMarkup(buttons)
         return "\n".join(lines), markup
 
-    lines.append(f"Items: {len(bundle.items)}")
-    lines.append(f"Bundle chat: {'on' if bundle_chat_active else 'off'}")
+    lines.append(_kv_hint("Items", len(bundle.items), "条目数"))
+    lines.append(
+        _kv_hint(
+            "Bundle chat",
+            "on" if bundle_chat_active else "off",
+            "Bundle Chat",
+            "已开启" if bundle_chat_active else "未开启",
+        )
+    )
     page_count = max(1, (len(bundle.items) + CONTEXT_BUNDLE_PAGE_SIZE - 1) // CONTEXT_BUNDLE_PAGE_SIZE)
     page = min(max(page, 0), page_count - 1)
     start = page * CONTEXT_BUNDLE_PAGE_SIZE
@@ -20346,16 +23144,32 @@ def _build_context_bundle_view(
         )
 
     lines.append("")
-    lines.append("Ask Agent With Context starts a fresh turn with these items.")
+    lines.append(
+        _with_cn_hint(
+            "Ask Agent With Context starts a fresh turn with these items.",
+            "Ask Agent With Context：会带着这些上下文项发起一条全新的提问。",
+        )
+    )
     if last_request_text is not None:
-        lines.append("Ask With Last Request reuses the saved request text with this bundle.")
+        lines.append(
+            _with_cn_hint(
+                "Ask With Last Request reuses the saved request text with this bundle.",
+                "Ask With Last Request：会把已保存请求文本和这份上下文包一起复用。",
+            )
+        )
     if bundle_chat_active:
         lines.append(
-            "Bundle chat is on, so your next plain text message will include this bundle automatically."
+            _with_cn_hint(
+                "Bundle chat is on, so your next plain text message will include this bundle automatically.",
+                "Bundle Chat 当前已开启，所以你接下来发送的纯文本会自动带上这份上下文包。",
+            )
         )
     else:
         lines.append(
-            "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
+            _with_cn_hint(
+                "Start Bundle Chat if you want your next plain text message to include this bundle automatically.",
+                "如果你想让下一条纯文本自动带上这份上下文包，就开启 Bundle Chat。",
+            )
         )
 
     primary_buttons = []
@@ -20487,15 +23301,18 @@ def _build_workspace_file_preview_view(
     supplemental_buttons: tuple[tuple[str, str, dict[str, Any]], ...] = (),
 ):
     lines = [
-        f"Workspace file for {resolve_provider_profile(provider).display_name} in {workspace_label}",
-        f"Path: {preview.relative_path}",
+        _view_heading(
+            f"Workspace file for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区文件预览：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        ),
+        _kv_hint("Path", preview.relative_path, "路径"),
     ]
     if preview.is_binary:
         lines.append(preview.text)
     else:
         lines.append(preview.text)
         if preview.truncated:
-            lines.append("[preview truncated]")
+            lines.append(_with_cn_hint("[preview truncated]", "[预览已截断]"))
 
     if next_step_line is not None:
         lines.append(next_step_line)
@@ -20597,13 +23414,16 @@ def _build_workspace_change_preview_view(
     supplemental_buttons: tuple[tuple[str, str, dict[str, Any]], ...] = (),
 ):
     lines = [
-        f"Workspace change for {resolve_provider_profile(provider).display_name} in {workspace_label}",
-        f"Path: {diff_preview.relative_path}",
-        f"Status: {diff_preview.status_code}",
+        _view_heading(
+            f"Workspace change for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"工作区变更预览：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        ),
+        _kv_hint("Path", diff_preview.relative_path, "路径"),
+        _kv_hint("Status", diff_preview.status_code, "状态"),
         diff_preview.text,
     ]
     if diff_preview.truncated:
-        lines.append("[diff preview truncated]")
+        lines.append(_with_cn_hint("[diff preview truncated]", "[diff 预览已截断]"))
 
     if next_step_line is not None:
         lines.append(next_step_line)
@@ -20710,9 +23530,12 @@ def _build_model_mode_view(
     if notice:
         lines.append(notice)
     lines.append(
-        f"Model / Mode for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"Model / Mode for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"模型 / 模式：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Session: {session_id or 'pending'}")
+    lines.append(_kv_hint("Session", session_id or "pending", "会话"))
     current_setup = _model_mode_current_setup_line(
         model_selection=model_selection,
         mode_selection=mode_selection,
@@ -20721,22 +23544,36 @@ def _build_model_mode_view(
         lines.append(current_setup)
     if model_selection is None and mode_selection is not None:
         lines.append(
-            "Model controls are not exposed in this session. Use the available mode controls "
-            "below, or keep chatting normally if you do not need to change it."
+            _with_cn_hint(
+                "Model controls are not exposed in this session. Use the available mode controls "
+                "below, or keep chatting normally if you do not need to change it.",
+                "当前 session 没有暴露模型控制。你可以继续使用下面可用的模式控制，或者直接正常聊天。",
+            )
         )
     if mode_selection is None and model_selection is not None:
         lines.append(
-            "Mode controls are not exposed in this session. Use the available model controls "
-            "below, or keep chatting normally if you do not need to change it."
+            _with_cn_hint(
+                "Mode controls are not exposed in this session. Use the available model controls "
+                "below, or keep chatting normally if you do not need to change it.",
+                "当前 session 没有暴露模式控制。你可以继续使用下面可用的模型控制，或者直接正常聊天。",
+            )
         )
     lines.append(_model_mode_next_step_line(can_retry_last_turn=can_retry_last_turn))
-    lines.append("This updates the current live session in place.")
+    lines.append(_with_cn_hint("This updates the current live session in place.", "这些设置会直接更新当前 live session。"))
     if can_retry_last_turn:
         lines.append(
-            "Shortcut: use ...+Retry to rerun the last turn immediately with the updated setting."
+            _with_cn_hint(
+                "Shortcut: use ...+Retry to rerun the last turn immediately with the updated setting.",
+                "快捷方式：可以直接用 ...+Retry 在新设置下立刻重跑上一轮。",
+            )
         )
     else:
-        lines.append("Open a choice first if you want to inspect its details before switching.")
+        lines.append(
+            _with_cn_hint(
+                "Open a choice first if you want to inspect its details before switching.",
+                "如果你想先比较细节，再点开具体选项。",
+            )
+        )
     lines.append("")
     buttons = []
 
@@ -20796,13 +23633,19 @@ def _build_model_mode_view(
 
 def _model_mode_current_setup_line(*, model_selection, mode_selection) -> str | None:
     parts = []
+    parts_cn = []
     if model_selection is not None:
         parts.append(f"model={_current_choice_label(model_selection)}")
+        parts_cn.append(f"模型={_current_choice_label(model_selection)}")
     if mode_selection is not None:
         parts.append(f"mode={_current_choice_label(mode_selection)}")
+        parts_cn.append(f"模式={_current_choice_label(mode_selection)}")
     if not parts:
         return None
-    return "Current setup: " + ", ".join(parts)
+    return _with_cn_hint(
+        "Current setup: " + ", ".join(parts),
+        "当前设置：" + "，".join(parts_cn),
+    )
 
 
 def _selection_overview_lines(
@@ -20811,17 +23654,26 @@ def _selection_overview_lines(
     selection,
     can_retry_last_turn: bool,
 ) -> list[str]:
-    lines = [f"{prefix} choices:"]
+    prefix_cn = _selection_kind_label_cn(prefix.lower())
+    lines = [_with_cn_hint(f"{prefix} choices:", f"{prefix_cn}选项：")]
     for choice_index, choice in enumerate(selection.choices, start=1):
-        current_suffix = " [current]" if choice.value == selection.current_value else ""
+        current_suffix = " [当前]" if choice.value == selection.current_value else ""
         lines.append(f"{choice_index}. {choice.label}{current_suffix}")
     if can_retry_last_turn:
         lines.append(
-            f"Tap {prefix}: ... to switch now, use {prefix}+Retry: ... to rerun the last turn, "
-            f"or Open {prefix} N for details."
+            _with_cn_hint(
+                f"Tap {prefix}: ... to switch now, use {prefix}+Retry: ... to rerun the last turn, "
+                f"or Open {prefix} N for details.",
+                f"可以直接点 {prefix_cn}：... 立即切换，也可以用 {prefix_cn}+Retry: ... 重跑上一轮，或先打开具体 {prefix_cn} 查看详情。",
+            )
         )
     else:
-        lines.append(f"Tap {prefix}: ... to switch now, or Open {prefix} N for details.")
+        lines.append(
+            _with_cn_hint(
+                f"Tap {prefix}: ... to switch now, or Open {prefix} N for details.",
+                f"可以直接点 {prefix_cn}：... 立即切换，或先打开具体 {prefix_cn} 查看详情。",
+            )
+        )
     return lines
 
 
@@ -20909,6 +23761,14 @@ def _selection_kind_label(kind: str) -> str:
     return kind.title()
 
 
+def _selection_kind_label_cn(kind: str) -> str:
+    if kind == "model":
+        return "模型"
+    if kind == "mode":
+        return "模式"
+    return kind.title()
+
+
 def _build_selection_detail_view(
     *,
     session_id: str | None,
@@ -20928,37 +23788,62 @@ def _build_selection_detail_view(
         lines.append(notice)
 
     kind_label = _selection_kind_label(selection.kind)
+    kind_label_cn = _selection_kind_label_cn(selection.kind)
     is_current = choice.value == selection.current_value
     lines.append(
-        f"{kind_label} choice for {resolve_provider_profile(provider).display_name} in {workspace_label}"
+        _view_heading(
+            f"{kind_label} choice for {resolve_provider_profile(provider).display_name} in {workspace_label}",
+            f"{kind_label_cn}选项详情：{workspace_label} 中的 {resolve_provider_profile(provider).display_name}",
+        )
     )
-    lines.append(f"Session: {session_id or 'pending'}")
-    lines.append(f"Choice: {choice_index + 1}/{len(selection.choices)}")
-    lines.append(f"Current selection: {_current_choice_label(selection)}")
-    lines.append(f"This choice is current: {'yes' if is_current else 'no'}")
-    lines.append(f"Label: {choice.label}")
-    lines.append(f"Value: {choice.value}")
+    lines.append(_kv_hint("Session", session_id or "pending", "会话"))
+    lines.append(_kv_hint("Choice", f"{choice_index + 1}/{len(selection.choices)}", "选项"))
+    lines.append(_kv_hint("Current selection", _current_choice_label(selection), "当前选择"))
+    lines.append(
+        _kv_hint(
+            "This choice is current",
+            "yes" if is_current else "no",
+            "当前是否已生效",
+            _cn_yes_no(is_current),
+        )
+    )
+    lines.append(_kv_hint("Label", choice.label, "标签"))
+    lines.append(_kv_hint("Value", choice.value, "值"))
     if selection.config_id:
-        lines.append(f"Config option: {selection.config_id}")
+        lines.append(_kv_hint("Config option", selection.config_id, "配置项"))
     description = _status_text_snippet(getattr(choice, "description", None), limit=400)
     if description is None:
-        lines.append("Description: none")
+        lines.append(_kv_hint("Description", "none", "说明", "无"))
     else:
-        lines.append("Description:")
+        lines.append(_with_cn_hint("Description:", "说明："))
         lines.append(description)
-    lines.append("Effect: this updates the current live session in place.")
+    lines.append(
+        _with_cn_hint(
+            "Effect: this updates the current live session in place.",
+            "作用：会直接更新当前 live session。",
+        )
+    )
     if is_current:
         lines.append(
-            f"Recommended next step: go back to Model / Mode, or inspect another {kind_label.lower()} choice."
+            _with_cn_hint(
+                f"Recommended next step: go back to Model / Mode, or inspect another {kind_label.lower()} choice.",
+                f"建议下一步：返回模型 / 模式，或继续比较其他{kind_label_cn}选项。",
+            )
         )
     elif can_retry_last_turn:
         lines.append(
-            f"Recommended next step: tap Use {kind_label} to switch now, or Use {kind_label} + Retry "
-            "to rerun the last turn immediately."
+            _with_cn_hint(
+                f"Recommended next step: tap Use {kind_label} to switch now, or Use {kind_label} + Retry "
+                "to rerun the last turn immediately.",
+                f"建议下一步：直接点 Use {kind_label} 立即切换，或用 Use {kind_label} + Retry 立刻重跑上一轮。",
+            )
         )
     else:
         lines.append(
-            f"Recommended next step: tap Use {kind_label} to switch now, or go back to compare another choice."
+            _with_cn_hint(
+                f"Recommended next step: tap Use {kind_label} to switch now, or go back to compare another choice.",
+                f"建议下一步：直接点 Use {kind_label} 立即切换，或返回去比较其他选项。",
+            )
         )
 
     selection_payload = _selection_choice_payload(

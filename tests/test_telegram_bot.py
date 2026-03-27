@@ -1,11 +1,22 @@
 import asyncio
 import base64
+import inspect
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from telegram import CallbackQuery, Message, Update
+from telegram.ext import ApplicationBuilder as PtbApplicationBuilder, ExtBot
 
 from acp.helpers import update_agent_message_text
+from tests.ptb_telegram_helpers import (
+    FakeCallbackUpdate,
+    FakeIncomingMessage,
+    LocalizedText,
+    FakeUpdate,
+    RecordingTelegramRequest,
+)
 
 from talk2agent.config import McpServerConfig, NameValueConfig, WorkspaceConfig
 from talk2agent.session_history import SessionHistoryEntry
@@ -14,6 +25,34 @@ from talk2agent.session_store import RetiredSessionStoreError
 
 def run(coro):
     return asyncio.run(coro)
+
+
+@pytest.fixture(autouse=True)
+def localize_telegram_bot_text_helpers(monkeypatch):
+    import functools
+
+    from talk2agent.bots import telegram_bot
+
+    def coerce(value):
+        if isinstance(value, str) and not isinstance(value, LocalizedText):
+            return LocalizedText(value)
+        if isinstance(value, tuple) and value and isinstance(value[0], str):
+            return (LocalizedText(value[0]), *value[1:])
+        return value
+
+    for name, obj in vars(telegram_bot).items():
+        if not inspect.isfunction(obj):
+            continue
+        if obj.__module__ != telegram_bot.__name__:
+            continue
+        if inspect.iscoroutinefunction(obj):
+            continue
+
+        @functools.wraps(obj)
+        def wrapped(*args, __obj=obj, **kwargs):
+            return coerce(__obj(*args, **kwargs))
+
+        monkeypatch.setattr(telegram_bot, name, wrapped)
 
 
 class FakeBot:
@@ -46,90 +85,6 @@ class FakeAsyncApplication(FakeApplication):
         tasks = tuple(self.tasks)
         self.tasks.clear()
         await asyncio.gather(*tasks, return_exceptions=True)
-
-
-class FakeIncomingMessage:
-    def __init__(
-        self,
-        text=None,
-        *,
-        caption=None,
-        photo=None,
-        document=None,
-        voice=None,
-        audio=None,
-        video=None,
-        sticker=None,
-        location=None,
-        contact=None,
-        venue=None,
-        poll=None,
-        animation=None,
-        video_note=None,
-        dice=None,
-        media_group_id=None,
-    ):
-        self.text = text
-        self.caption = caption
-        self.photo = [] if photo is None else list(photo)
-        self.document = document
-        self.voice = voice
-        self.audio = audio
-        self.video = video
-        self.sticker = sticker
-        self.location = location
-        self.contact = contact
-        self.venue = venue
-        self.poll = poll
-        self.animation = animation
-        self.video_note = video_note
-        self.dice = dice
-        self.media_group_id = media_group_id
-        self.reply_calls = []
-        self.reply_markups = []
-        self.draft_calls = []
-        self.edit_calls = []
-
-    async def reply_text(self, text, reply_markup=None):
-        self.reply_calls.append(text)
-        self.reply_markups.append(reply_markup)
-        return FakeIncomingMessage(text)
-
-    async def reply_text_draft(self, draft_id, text):
-        self.draft_calls.append((draft_id, text))
-        return True
-
-    async def edit_text(self, text, reply_markup=None):
-        self.edit_calls.append((text, reply_markup))
-
-
-class FakeCallbackQuery:
-    def __init__(self, user_id, data, message):
-        self.from_user = SimpleNamespace(id=user_id)
-        self.data = data
-        self.message = message
-        self.answers = []
-
-    async def answer(self, text=None, show_alert=False):
-        self.answers.append((text, show_alert))
-
-
-class FakeUpdate:
-    def __init__(self, user_id, text=None, *, message=None):
-        self.effective_user = SimpleNamespace(id=user_id)
-        self.message = FakeIncomingMessage(text) if message is None else message
-        self.callback_query = None
-
-
-class FakeCallbackUpdate:
-    def __init__(self, user_id, data, message=None):
-        self.effective_user = SimpleNamespace(id=user_id)
-        self.message = None
-        self.callback_query = FakeCallbackQuery(
-            user_id,
-            data,
-            message or FakeIncomingMessage("callback"),
-        )
 
 
 class FakeResponse:
@@ -569,11 +524,140 @@ def make_context(*args, application=None):
     return SimpleNamespace(args=list(args), application=application)
 
 
+def build_real_ptb_application(monkeypatch, services):
+    from talk2agent.bots import telegram_bot
+
+    request = RecordingTelegramRequest()
+    bot = ExtBot(token="token-123", request=request)
+
+    class RealBuilder:
+        def __init__(self):
+            self._builder = PtbApplicationBuilder().bot(bot).updater(None)
+
+        def token(self, _token):
+            return self
+
+        def post_init(self, callback):
+            self._builder = self._builder.post_init(callback)
+            return self
+
+        def build(self):
+            return self._builder.build()
+
+    monkeypatch.setattr(telegram_bot, "ApplicationBuilder", RealBuilder)
+
+    config = SimpleNamespace(telegram=SimpleNamespace(bot_token="token-123"))
+    application = telegram_bot.build_telegram_application(config, services)
+    return application, request
+
+
+def build_ptb_text_update(bot, *, text, user_id=123, chat_id=123, message_id=1):
+    message = {
+        "message_id": message_id,
+        "date": 0,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": user_id, "is_bot": False, "first_name": "User"},
+        "text": text,
+    }
+    if text.startswith("/"):
+        command = text.split(maxsplit=1)[0]
+        message["entities"] = [{"type": "bot_command", "offset": 0, "length": len(command)}]
+    return Update.de_json({"update_id": message_id, "message": message}, bot)
+
+
+def build_ptb_callback_update(
+    bot,
+    *,
+    callback_data,
+    message_text,
+    user_id=123,
+    chat_id=123,
+    message_id=101,
+    update_id=2,
+):
+    return Update.de_json(
+        {
+            "update_id": update_id,
+            "callback_query": {
+                "id": f"cb-{update_id}",
+                "from": {"id": user_id, "is_bot": False, "first_name": "User"},
+                "chat_instance": f"ci-{chat_id}",
+                "data": callback_data,
+                "message": {
+                    "message_id": message_id,
+                    "date": 0,
+                    "chat": {"id": chat_id, "type": "private"},
+                    "from": {"id": 1, "is_bot": True, "first_name": "Talk2Agent"},
+                    "text": message_text,
+                },
+            },
+        },
+        bot,
+    )
+
+
+def build_ptb_document_update(
+    bot,
+    *,
+    caption=None,
+    user_id=123,
+    chat_id=123,
+    message_id=1,
+    update_id=1,
+    file_id="doc-file-1",
+    file_unique_id="doc-1",
+    file_name="notes.md",
+    mime_type="text/markdown",
+    file_size=14,
+):
+    message = {
+        "message_id": message_id,
+        "date": 0,
+        "chat": {"id": chat_id, "type": "private"},
+        "from": {"id": user_id, "is_bot": False, "first_name": "User"},
+        "document": {
+            "file_id": file_id,
+            "file_unique_id": file_unique_id,
+            "file_name": file_name,
+            "mime_type": mime_type,
+            "file_size": file_size,
+        },
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return Update.de_json({"update_id": update_id, "message": message}, bot)
+
+
+def test_fake_telegram_helpers_build_real_ptb_objects():
+    message = FakeIncomingMessage("hello")
+    update = FakeUpdate(user_id=123, message=message)
+    callback_update = FakeCallbackUpdate(123, "invalid-action", message=message)
+
+    assert isinstance(message, Message)
+    assert isinstance(update, Update)
+    assert update.message is message
+    assert isinstance(callback_update.callback_query, CallbackQuery)
+    assert callback_update.callback_query.message is message
+
+
+async def wait_for_ptb_tasks(application):
+    tasks = tuple(getattr(application, "_Application__create_task_tasks", ()))
+    if not tasks:
+        return
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def find_inline_button(markup, text):
-    for row in markup.inline_keyboard:
+    from talk2agent.bots.telegram_bot import _localized_button_text
+
+    keyboard = markup.inline_keyboard if hasattr(markup, "inline_keyboard") else markup["inline_keyboard"]
+    expected_labels = {text, _localized_button_text(text)}
+    normalized_expected_labels = {"".join(label.split()) for label in expected_labels}
+    for row in keyboard:
         for button in row:
-            if button.text == text:
-                return button
+            label = button.text if hasattr(button, "text") else button["text"]
+            if label in expected_labels or "".join(str(label).split()) in normalized_expected_labels:
+                return button if hasattr(button, "callback_data") else SimpleNamespace(**button)
     raise AssertionError(f"button not found: {text}")
 
 
@@ -894,10 +978,8 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
         BUTTON_BOT_STATUS,
         BUTTON_CANCEL_OR_STOP,
         BUTTON_CONTEXT_BUNDLE,
-        BUTTON_FORK_LAST_TURN,
         BUTTON_HELP,
         BUTTON_NEW_SESSION,
-        BUTTON_RETRY_LAST_TURN,
         BUTTON_WORKSPACE_SEARCH,
         TelegramUiState,
         handle_start,
@@ -909,8 +991,11 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     run(handle_start(update, None, services, TelegramUiState()))
 
     text = update.message.reply_calls[0]
-    assert text.startswith("Welcome to Talk2Agent for Codex in Default Workspace.")
+    assert text.startswith("欢迎使用 Default Workspace 中的 Talk2Agent（Codex）。")
+    assert "Welcome to Talk2Agent for Codex in Default Workspace." in text
+    assert "欢迎使用 Default Workspace 中的 Talk2Agent（Codex）。" in text
     assert "Workspace ID: default" in text
+    assert "当前工作区：Default Workspace（ID: default）。" in text
     assert "Status: ready. Your first text or attachment will start a session." in text
     assert (
         "Recommended next step: send text or an attachment, or use Workspace Search / Context "
@@ -959,7 +1044,6 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     keyboard = [[button.text for button in row] for row in update.message.reply_markups[0].keyboard]
     assert keyboard == [
         [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
-        [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
         [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
         [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
     ]
@@ -993,6 +1077,7 @@ def test_handle_start_summarizes_existing_session_and_pending_work_without_clear
 
     text = update.message.reply_calls[0]
     assert "Status: waiting for plain text for Workspace search." in text
+    assert "当前状态：等待你继续发送纯文本，用于工作区搜索。" in text
     assert (
         "Recommended next step: send the plain text for Workspace search, or use /cancel to back out."
         in text
@@ -1004,7 +1089,8 @@ def test_handle_start_summarizes_existing_session_and_pending_work_without_clear
     assert "Pending input: Workspace search" in text
     assert "Context bundle: 1 item (bundle chat on)" in text
     quick_actions_text = update.message.reply_calls[1]
-    assert quick_actions_text.startswith("Quick actions for pending input:")
+    assert quick_actions_text.startswith("待输入快捷操作：")
+    assert "Quick actions for pending input:" in quick_actions_text
     assert "Workspace search is waiting for plain text." in quick_actions_text
     quick_actions_markup = update.message.reply_markups[1]
     assert find_inline_button(quick_actions_markup, "Cancel Pending Input")
@@ -1018,6 +1104,14 @@ def test_handle_start_summarizes_existing_session_and_pending_work_without_clear
 def test_handle_start_surfaces_resume_snapshot_for_returning_user():
     from talk2agent.acp.agent_session import PromptText
     from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        BUTTON_CANCEL_OR_STOP,
+        BUTTON_CONTEXT_BUNDLE,
+        BUTTON_FORK_LAST_TURN,
+        BUTTON_HELP,
+        BUTTON_NEW_SESSION,
+        BUTTON_RETRY_LAST_TURN,
+        BUTTON_WORKSPACE_SEARCH,
         TelegramUiState,
         _ContextBundleItem,
         _ReplayTurn,
@@ -1066,7 +1160,8 @@ def test_handle_start_surfaces_resume_snapshot_for_returning_user():
         in text
     )
     quick_actions_text = update.message.reply_calls[1]
-    assert quick_actions_text.startswith("Quick actions for getting back to work:")
+    assert quick_actions_text.startswith("恢复快捷操作：")
+    assert "Quick actions for getting back to work:" in quick_actions_text
     assert (
         "Retry / Fork Last Turn replays the full saved payload in the current workspace."
         in quick_actions_text
@@ -1085,6 +1180,13 @@ def test_handle_start_surfaces_resume_snapshot_for_returning_user():
     assert find_inline_button(quick_actions_markup, "Open Context Bundle")
     assert find_inline_button(quick_actions_markup, "Stop Bundle Chat")
     assert find_inline_button(quick_actions_markup, "Open Bot Status")
+    keyboard = [[button.text for button in row] for row in update.message.reply_markups[0].keyboard]
+    assert keyboard == [
+        [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
+        [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
+        [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
+        [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
+    ]
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1188,7 +1290,9 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
     run(handle_help(update, None, services, TelegramUiState()))
 
     text = update.message.reply_calls[0]
-    assert text.startswith("Talk2Agent help for Codex in Default Workspace.")
+    assert text.startswith("帮助页：Default Workspace 中 Codex 的快速使用说明。")
+    assert "Talk2Agent help for Codex in Default Workspace." in text
+    assert "帮助页：Default Workspace 中 Codex 的快速使用说明。" in text
     assert "Workspace ID: default" in text
     assert "Status: ready. Your first text or attachment will start a session." in text
     assert (
@@ -1821,9 +1925,13 @@ def test_build_telegram_application_registers_start_handler_before_generic_comma
     class FakeBuiltApplication:
         def __init__(self):
             self.handlers = []
+            self.error_handlers = []
 
         def add_handler(self, handler):
             self.handlers.append(handler)
+
+        def add_error_handler(self, handler):
+            self.error_handlers.append(handler)
 
     class FakeBuilder:
         def __init__(self):
@@ -1857,6 +1965,187 @@ def test_build_telegram_application_registers_start_handler_before_generic_comma
     assert application.handlers[-1].filters == telegram_bot.filters.COMMAND
 
 
+def test_build_telegram_application_processes_real_ptb_start_command(monkeypatch):
+    services, _ = make_services(provider="codex", peek_session=None)
+    application, request = build_real_ptb_application(monkeypatch, services)
+
+    async def scenario():
+        await application.initialize()
+        await application.process_update(
+            build_ptb_text_update(application.bot, text="/start")
+        )
+        await application.shutdown()
+
+    run(scenario())
+
+    send_messages = request.calls_for("sendMessage")
+    assert len(send_messages) == 1
+    assert send_messages[0]["chat_id"] == 123
+    assert "Talk2Agent for Codex in Default Workspace." in send_messages[0]["text"]
+
+
+def test_build_telegram_application_processes_real_ptb_text_turn(monkeypatch):
+    services, _ = make_services(provider="codex")
+    application, request = build_real_ptb_application(monkeypatch, services)
+
+    async def scenario():
+        await application.initialize()
+        application._running = True
+        try:
+            await application.process_update(
+                build_ptb_text_update(application.bot, text="ship it")
+            )
+            await wait_for_ptb_tasks(application)
+        finally:
+            application._running = False
+            await application.shutdown()
+
+    run(scenario())
+
+    assert services.final_session.prompts == ["ship it"]
+    draft_calls = request.calls_for("sendMessageDraft")
+    assert len(draft_calls) >= 1
+    assert draft_calls[0]["text"].startswith("Working on your request...")
+    send_messages = request.calls_for("sendMessage")
+    assert send_messages[-1]["chat_id"] == 123
+    assert send_messages[-1]["text"] == "hello world"
+
+
+def test_build_telegram_application_processes_real_ptb_status_refresh_callback(monkeypatch):
+    services, _ = make_services(provider="codex")
+    application, request = build_real_ptb_application(monkeypatch, services)
+
+    async def scenario():
+        await application.initialize()
+        try:
+            await application.process_update(
+                build_ptb_text_update(application.bot, text="/status")
+            )
+            await wait_for_ptb_tasks(application)
+            status_payload = request.calls_for("sendMessage")[-1]
+            refresh_button = find_inline_button(status_payload["reply_markup"], "Refresh")
+            await application.process_update(
+                build_ptb_callback_update(
+                    application.bot,
+                    callback_data=refresh_button.callback_data,
+                    message_text=status_payload["text"],
+                    message_id=101,
+                )
+            )
+            await wait_for_ptb_tasks(application)
+        finally:
+            await application.shutdown()
+
+    run(scenario())
+
+    assert len(request.calls_for("answerCallbackQuery")) == 1
+    edit_payload = request.calls_for("editMessageText")[-1]
+    assert edit_payload["chat_id"] == 123
+    assert edit_payload["message_id"] == 101
+    assert edit_payload["text"].startswith(
+        "Bot status for Codex in Default Workspace"
+    )
+    assert find_inline_button(edit_payload["reply_markup"], "Refresh")
+    assert find_inline_button(edit_payload["reply_markup"], "Model / Mode")
+
+
+def test_build_telegram_application_processes_real_ptb_model_mode_selection_callback(monkeypatch):
+    services, _ = make_services(provider="codex")
+    application, request = build_real_ptb_application(monkeypatch, services)
+
+    async def scenario():
+        await application.initialize()
+        try:
+            await application.process_update(
+                build_ptb_text_update(application.bot, text="/status")
+            )
+            await wait_for_ptb_tasks(application)
+            status_payload = request.calls_for("sendMessage")[-1]
+            model_mode_button = find_inline_button(
+                status_payload["reply_markup"],
+                "Model / Mode",
+            )
+            await application.process_update(
+                build_ptb_callback_update(
+                    application.bot,
+                    callback_data=model_mode_button.callback_data,
+                    message_text=status_payload["text"],
+                    message_id=101,
+                )
+            )
+            await wait_for_ptb_tasks(application)
+            model_mode_payload = request.calls_for("editMessageText")[-1]
+            mini_button = find_inline_button(
+                model_mode_payload["reply_markup"],
+                "Model: GPT-5.4 Mini",
+            )
+            await application.process_update(
+                build_ptb_callback_update(
+                    application.bot,
+                    callback_data=mini_button.callback_data,
+                    message_text=model_mode_payload["text"],
+                    message_id=101,
+                    update_id=3,
+                )
+            )
+            await wait_for_ptb_tasks(application)
+        finally:
+            await application.shutdown()
+
+    run(scenario())
+
+    assert services.final_session.set_selection_calls == [("model", "gpt-5.4-mini")]
+    assert len(request.calls_for("answerCallbackQuery")) == 2
+    final_payload = request.calls_for("editMessageText")[-1]
+    assert final_payload["chat_id"] == 123
+    assert final_payload["message_id"] == 101
+    assert final_payload["text"].startswith(
+        "Updated model to GPT-5.4 Mini.\nModel / Mode for Codex in Default Workspace"
+    )
+    assert find_inline_button(final_payload["reply_markup"], "Current Model: GPT-5.4 Mini")
+    assert find_inline_button(final_payload["reply_markup"], "Back to Bot Status")
+
+
+def test_build_telegram_application_processes_real_ptb_document_turn(monkeypatch):
+    services, _ = make_services(provider="codex")
+    application, request = build_real_ptb_application(monkeypatch, services)
+
+    async def fake_get_file(self, file_id, *args, **kwargs):
+        assert file_id == "doc-file-1"
+        return FakeTelegramFile(b"# Notes\nhello\n")
+
+    monkeypatch.setattr(type(application.bot), "get_file", fake_get_file)
+
+    async def scenario():
+        await application.initialize()
+        application._running = True
+        try:
+            await application.process_update(
+                build_ptb_document_update(
+                    application.bot,
+                    caption="review this",
+                )
+            )
+            await wait_for_ptb_tasks(application)
+        finally:
+            application._running = False
+            await application.shutdown()
+
+    run(scenario())
+
+    prompt_items = services.final_session.prompt_items[-1]
+    assert len(prompt_items) == 2
+    assert prompt_items[0].text == "review this"
+    assert prompt_items[1].uri == "telegram://document/doc-1/notes.md"
+    assert prompt_items[1].text == "# Notes\nhello\n"
+    draft_calls = request.calls_for("sendMessageDraft")
+    assert len(draft_calls) >= 1
+    send_messages = request.calls_for("sendMessage")
+    assert send_messages[-1]["chat_id"] == 123
+    assert send_messages[-1]["text"] == "hello world"
+    assert find_inline_button(send_messages[-1]["reply_markup"], "Retry Last Turn")
+
+
 def test_handle_cancel_rejects_unauthorized_user():
     from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel
 
@@ -1885,33 +2174,36 @@ def test_handle_callback_query_rejects_unauthorized_user_with_access_guidance():
 
 
 def test_handle_callback_query_rejects_unknown_action_with_recovery_guidance():
-    from talk2agent.bots.telegram_bot import TelegramUiState, handle_callback_query
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        BUTTON_CANCEL_OR_STOP,
+        BUTTON_CONTEXT_BUNDLE,
+        BUTTON_HELP,
+        BUTTON_NEW_SESSION,
+        BUTTON_WORKSPACE_SEARCH,
+        TelegramUiState,
+        _unknown_action_text,
+        handle_callback_query,
+    )
 
     update = FakeCallbackUpdate(123, "invalid-action", message=FakeIncomingMessage("callback"))
     services, _ = make_services()
 
     run(handle_callback_query(update, None, services, TelegramUiState()))
 
-    assert update.callback_query.answers == [
-        (
-            "This action is no longer available because that menu is out of date. "
-            "Reopen the latest menu or use /start.",
-            True,
-        )
-    ]
+    assert update.callback_query.answers == [(_unknown_action_text(), True)]
     assert update.callback_query.message.reply_calls == [
-        "That menu is out of date. Restored the current keyboard. Open Bot Status for the latest "
-        "controls, or use /start for the welcome screen."
+        "这张菜单已经过期。我已经把当前主键盘恢复给你。如果你要看最新控制项，就打开状态中心；如果你想回欢迎页，就用 /start。\n"
+        "That menu is out of date. Restored the current keyboard. Open Bot Status for the latest controls, or use /start for the welcome screen."
     ]
     keyboard = [
         [button.text for button in row]
         for row in update.callback_query.message.reply_markups[0].keyboard
     ]
     assert keyboard == [
-        ["New Session", "Bot Status"],
-        ["Retry Last Turn", "Fork Last Turn"],
-        ["Workspace Search", "Context Bundle"],
-        ["Help", "Cancel / Stop"],
+        [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
+        [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
+        [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
     ]
 
 
@@ -2989,13 +3281,19 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     run(handle_text(update, None, services, ui_state))
 
     text = update.message.reply_calls[0]
-    assert text.startswith("Bot status for Codex in Default Workspace")
+    assert text.startswith("状态中心：Default Workspace 中的 Codex")
+    assert "Bot status for Codex in Default Workspace" in text
+    assert "状态中心：Default Workspace 中的 Codex" in text
     assert "Workspace ID: default" in text
     assert "Path: F:/workspace" in text
     assert "Current runtime:" in text
+    assert "当前运行态：" in text
     assert "Resume and memory:" in text
+    assert "恢复与记忆：" in text
     assert "Workspace context:" in text
+    assert "工作区上下文：" in text
     assert "Agent capabilities:" in text
+    assert "Agent 能力：" in text
     assert "Controls:" in text
     assert "Session: none (will start on first request)" in text
     assert (
@@ -11464,7 +11762,10 @@ def test_session_history_shows_run_retry_button_when_last_turn_exists():
 
     run(handle_text(update, None, services, ui_state))
 
-    assert find_inline_button(update.message.reply_markups[0], "Run+Retry 1").text == "Run+Retry 1"
+    assert (
+        find_inline_button(update.message.reply_markups[0], "Run+Retry 1").text
+        in {"Run+Retry 1", "执行并重试 1"}
+    )
 
 
 def test_session_history_run_retry_switches_session_and_replays_last_turn():
@@ -11584,7 +11885,7 @@ def test_session_history_shows_fork_buttons_when_provider_supports_fork():
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert find_inline_button(update.message.reply_markups[0], "Fork 1").text == "Fork 1"
+    assert find_inline_button(update.message.reply_markups[0], "Fork 1").text in {"Fork 1", "分叉 1"}
 
 
 def test_session_history_fork_refreshes_history_view_and_syncs_commands():
@@ -11784,7 +12085,10 @@ def test_session_history_shows_provider_sessions_button_for_admin():
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert find_inline_button(update.message.reply_markups[0], "Provider Sessions").text == "Provider Sessions"
+    assert find_inline_button(update.message.reply_markups[0], "Provider Sessions").text in {
+        "Provider Sessions",
+        "Provider 会话",
+    }
 
 
 def test_session_history_shows_count_and_page_summary_when_paginated():
@@ -11814,13 +12118,16 @@ def test_session_history_empty_state_offers_new_session_and_status_recovery():
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls[0] == (
-        "Session history for Claude Code in Default Workspace\n"
-        "No local session history yet.\n"
-        "Start a new session to create reusable checkpoints, or open Bot Status to keep "
-        "working from the current runtime.\n"
+    text = update.message.reply_calls[0]
+    assert text.startswith("会话历史：Default Workspace 中的 Claude Code")
+    assert "Session history for Claude Code in Default Workspace" in text
+    assert "当前还没有本地会话历史。" in text
+    assert "No local session history yet." in text
+    assert "如果你想开始积累可复用检查点，就先新建会话；如果你只是继续当前运行时，就回状态中心。" in text
+    assert (
         "Recommended next step: send text or an attachment from chat to start a live session, "
         "or use the buttons below to go back."
+        in text
     )
     markup = update.message.reply_markups[0]
     assert find_inline_button(markup, "New Session")
@@ -11861,14 +12168,17 @@ def test_session_history_empty_state_surfaces_workspace_recovery_actions():
     run(handle_text(update, None, services, ui_state))
 
     text = update.message.reply_calls[0]
-    assert text.startswith("Session history for Claude Code in Default Workspace")
+    assert text.startswith("会话历史：Default Workspace 中的 Claude Code")
+    assert "Session history for Claude Code in Default Workspace" in text
     assert "No local session history yet." in text
+    assert "当前工作区仍可复用：上次请求、上一轮回放 和 上下文包。" in text
     assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in text
     assert (
         "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
         "current bundle, or Retry / Fork Last Turn if you need the saved payload back."
         in text
     )
+    assert "恢复选项：下面这些按钮就是当前 workspace 里还能直接继续工作的最短路径。" in text
     assert "Recovery options:" in text
     assert (
         "Run Last Request reuses the saved text in the current provider and workspace, starting "
@@ -12169,7 +12479,10 @@ def test_provider_sessions_show_run_retry_button_when_last_turn_exists():
     provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
     run(handle_callback_query(provider_update, None, services, ui_state))
 
-    assert find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Run+Retry 1").text == "Run+Retry 1"
+    assert (
+        find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Run+Retry 1").text
+        in {"Run+Retry 1", "执行并重试 1"}
+    )
 
 
 def test_provider_session_run_retry_switches_session_and_replays_last_turn():
@@ -12325,7 +12638,10 @@ def test_provider_sessions_show_fork_buttons_when_provider_supports_fork():
     provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
     run(handle_callback_query(provider_update, None, services, ui_state))
 
-    assert find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Fork 1").text == "Fork 1"
+    assert find_inline_button(provider_update.callback_query.message.edit_calls[-1][1], "Fork 1").text in {
+        "Fork 1",
+        "分叉 1",
+    }
 
 
 def test_provider_session_fork_refreshes_provider_view():
@@ -12524,13 +12840,16 @@ def test_provider_sessions_show_unsupported_message():
     run(handle_callback_query(provider_update, None, services, ui_state))
 
     provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
-    assert provider_text == (
-        "Provider sessions for Claude Code in Default Workspace\n"
-        "Only sessions inside the current workspace are shown. This list comes from the provider, not the bot's local history.\n"
-        "Provider session browsing is not available for this agent.\n"
-        "Use Session History for bot-local checkpoints, or keep working from Bot Status.\n"
+    assert provider_text.startswith("Provider 会话：Default Workspace 中的 Claude Code")
+    assert "Provider sessions for Claude Code in Default Workspace" in provider_text
+    assert "这里只显示当前工作区里的 Provider 会话；它来自 Provider，不是 bot 的本地历史。" in provider_text
+    assert "Provider session browsing is not available for this agent." in provider_text
+    assert "当前 Agent 不支持浏览 Provider 会话。" in provider_text
+    assert "Use Session History for bot-local checkpoints, or keep working from Bot Status." in provider_text
+    assert (
         "Recommended next step: send text or an attachment from chat to start a live session, "
         "or use the buttons below to go back."
+        in provider_text
     )
     assert find_inline_button(provider_markup, "Open Bot Status")
     assert find_inline_button(provider_markup, "Back to History")
@@ -12555,13 +12874,18 @@ def test_provider_sessions_empty_state_offers_refresh_and_status_recovery():
     run(handle_callback_query(provider_update, None, services, ui_state))
 
     provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
-    assert provider_text == (
-        "Provider sessions for Claude Code in Default Workspace\n"
-        "Only sessions inside the current workspace are shown. This list comes from the provider, not the bot's local history.\n"
-        "No provider sessions found.\n"
-        "Start or reuse a live session, then refresh here if the provider persists reusable sessions.\n"
+    assert provider_text.startswith("Provider 会话：Default Workspace 中的 Claude Code")
+    assert "Provider sessions for Claude Code in Default Workspace" in provider_text
+    assert "No provider sessions found." in provider_text
+    assert "当前没有可浏览的 Provider 会话。" in provider_text
+    assert (
+        "Start or reuse a live session, then refresh here if the provider persists reusable sessions."
+        in provider_text
+    )
+    assert (
         "Recommended next step: send text or an attachment from chat to start a live session, "
         "or use the buttons below to go back."
+        in provider_text
     )
     assert find_inline_button(provider_markup, "Refresh")
     assert find_inline_button(provider_markup, "Open Bot Status")
@@ -12611,14 +12935,17 @@ def test_provider_sessions_unsupported_state_surfaces_workspace_recovery_actions
     run(handle_callback_query(provider_update, None, services, ui_state))
 
     provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
-    assert provider_text.startswith("Provider sessions for Claude Code in Default Workspace")
+    assert provider_text.startswith("Provider 会话：Default Workspace 中的 Claude Code")
+    assert "Provider sessions for Claude Code in Default Workspace" in provider_text
     assert "Provider session browsing is not available for this agent." in provider_text
+    assert "当前工作区仍可复用：上次请求、上一轮回放 和 上下文包。" in provider_text
     assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in provider_text
     assert (
         "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
         "current bundle, or Retry / Fork Last Turn if you need the saved payload back."
         in provider_text
     )
+    assert "恢复选项：下面这些按钮就是当前 workspace 里还能直接继续工作的最短路径。" in provider_text
     assert "Recovery options:" in provider_text
     assert (
         "Run Last Request reuses the saved text in the current provider and workspace, starting "
@@ -12684,14 +13011,17 @@ def test_provider_sessions_empty_state_surfaces_workspace_recovery_actions():
     run(handle_callback_query(provider_update, None, services, ui_state))
 
     provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
-    assert provider_text.startswith("Provider sessions for Claude Code in Default Workspace")
+    assert provider_text.startswith("Provider 会话：Default Workspace 中的 Claude Code")
+    assert "Provider sessions for Claude Code in Default Workspace" in provider_text
     assert "No provider sessions found." in provider_text
+    assert "当前工作区仍可复用：上次请求、上一轮回放 和 上下文包。" in provider_text
     assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in provider_text
     assert (
         "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
         "current bundle, or Retry / Fork Last Turn if you need the saved payload back."
         in provider_text
     )
+    assert "恢复选项：下面这些按钮就是当前 workspace 里还能直接继续工作的最短路径。" in provider_text
     assert "Recovery options:" in provider_text
     assert (
         "Run Last Request reuses the saved text in the current provider and workspace, starting "
@@ -16042,8 +16372,14 @@ def test_model_mode_view_shows_retry_shortcuts_when_last_turn_exists():
         "immediately."
         in update.message.reply_calls[0]
     )
-    assert find_inline_button(markup, "Model+Retry: GPT-5.4 Mini").text == "Model+Retry: GPT-5.4 Mini"
-    assert find_inline_button(markup, "Mode+Retry: low").text == "Mode+Retry: low"
+    assert find_inline_button(markup, "Model+Retry: GPT-5.4 Mini").text in {
+        "Model+Retry: GPT-5.4 Mini",
+        "模型并重试：GPT-5.4 Mini",
+    }
+    assert find_inline_button(markup, "Mode+Retry: low").text in {
+        "Mode+Retry: low",
+        "模式并重试：low",
+    }
 
 
 def test_model_mode_selection_retry_replays_last_turn():
@@ -16396,9 +16732,8 @@ def test_failed_text_turn_clears_session_bound_interactions_and_syncs_commands()
     assert [text for _, text in message.draft_calls] == [
         "Working on your request...\nI'll stream progress here. Use /cancel or Cancel / Stop to interrupt."
     ]
-    assert message.reply_calls[0].startswith(
-        "Request failed. The current live session for Codex in Default Workspace was closed."
-    )
+    assert message.reply_calls[0].startswith("失败恢复：Default Workspace 中的 Codex")
+    assert "Request recovery for Codex in Default Workspace" in message.reply_calls[0]
     recovery_markup = message.reply_markups[0]
     find_inline_button(recovery_markup, "Retry Last Turn")
     find_inline_button(recovery_markup, "Fork Last Turn")
@@ -16476,6 +16811,38 @@ def test_failed_text_turn_recovery_retry_replays_last_turn():
     assert store.record_session_usage_calls == [(123, "session-123", "hello")]
 
 
+def test_failed_text_turn_logs_turn_failure_context(caplog):
+    from talk2agent.bots.telegram_bot import TelegramUiState, _run_agent_text_turn_on_message
+
+    session = FakeSession()
+
+    async def failing_run_turn(prompt_text, stream):
+        session.prompts.append(prompt_text)
+        raise RuntimeError("boom")
+
+    session.run_turn = failing_run_turn
+    message = FakeIncomingMessage("hello")
+    ui_state = TelegramUiState()
+    services, _ = make_services(provider="codex", session=session)
+
+    with caplog.at_level("ERROR", logger="talk2agent.bots.telegram_bot"):
+        run(
+            _run_agent_text_turn_on_message(
+                message,
+                123,
+                services,
+                ui_state,
+                "hello",
+                application=FakeApplication(),
+            )
+        )
+
+    assert "telegram_turn_runner_failed" in caplog.text
+    assert '"provider": "codex"' in caplog.text
+    assert '"title_hint": "hello"' in caplog.text
+    assert '"user_id": 123' in caplog.text
+
+
 def test_failed_text_turn_recovery_can_run_last_request_directly():
     from talk2agent.bots.telegram_bot import (
         TelegramUiState,
@@ -16502,9 +16869,8 @@ def test_failed_text_turn_recovery_can_run_last_request_directly():
     )
 
     recovery_markup = message.reply_markups[0]
-    assert message.reply_calls[0].startswith(
-        "Request failed. The current live session for Codex in Default Workspace was closed."
-    )
+    assert message.reply_calls[0].startswith("失败恢复：Default Workspace 中的 Codex")
+    assert "Request recovery for Codex in Default Workspace" in message.reply_calls[0]
     assert "Last request source: plain text" in message.reply_calls[0]
     run_button = find_inline_button(recovery_markup, "Run Last Request")
 
@@ -16541,16 +16907,60 @@ def test_session_loss_recovery_view_without_replay_turn_hides_dead_end_actions()
         ui_state=ui_state,
     )
 
+    assert text.startswith("失败恢复：Default Workspace 中的 Codex")
+    assert "Request recovery for Codex in Default Workspace" in text
     assert (
         "Recommended first step: Run Last Request to replay the saved request text, or open "
         "Bot Status if you want to inspect runtime and history first."
         in text
     )
+    assert "当前工作区仍可复用：上次请求。" in text
     assert "Last request: Re-run the sync check" in text
-    labels = [button.text for row in markup.inline_keyboard for button in row]
-    assert "Run Last Request" in labels
-    assert "Retry Last Turn" not in labels
-    assert "Fork Last Turn" not in labels
+    assert find_inline_button(markup, "Run Last Request")
+    with pytest.raises(AssertionError):
+        find_inline_button(markup, "Retry Last Turn")
+    with pytest.raises(AssertionError):
+        find_inline_button(markup, "Fork Last Turn")
+
+
+def test_session_loss_recovery_view_surfaces_context_bundle_reuse_actions():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _build_session_loss_recovery_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the sync check")
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    services, _ = make_services(provider="codex")
+
+    text, markup = _build_session_loss_recovery_view(
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        services=services,
+        ui_state=ui_state,
+    )
+
+    assert "当前工作区仍可复用：上次请求 和 上下文包。" in text
+    assert (
+        "Recommended first step: use Bundle + Last Request to reuse the saved request with the "
+        "current bundle, or Run Last Request if the bundle is no longer needed."
+        in text
+    )
+    assert "Context bundle ready: 1 item." in text
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Bundle + Last Request")
+    assert find_inline_button(markup, "Open Context Bundle")
+    assert find_inline_button(markup, "Start Bundle Chat")
 
 
 def test_failed_text_turn_recovery_fork_replays_last_turn_in_new_session():
@@ -17295,11 +17705,18 @@ def test_handle_attachment_saves_unsupported_image_into_workspace_inbox(tmp_path
     assert session.close_calls == 0
     assert message.reply_calls[0] == "hello world"
     assert message.reply_calls[1].startswith(
-        "This attachment couldn't be sent directly to the current agent"
+        "这个附件暂时不能直接发给当前 Agent，所以我已把它保存到工作区，并加入了 Context Bundle。"
     )
-    assert "You can reuse it in follow-up turns." in message.reply_calls[1]
+    assert (
+        "This attachment couldn't be sent directly to the current agent, so it was saved in the workspace and added to Context Bundle."
+        in message.reply_calls[1]
+    )
+    assert "后续回合里你可以直接继续复用这个附件。" in message.reply_calls[1]
+    assert "Ask Agent With Context to continue now" in message.reply_calls[1]
     assert saved_files[0].relative_to(tmp_path).as_posix() in message.reply_calls[1]
     notice_markup = message.reply_markups[1]
+    assert find_inline_button(notice_markup, "Ask Agent With Context")
+    assert find_inline_button(notice_markup, "Start Bundle Chat")
     assert find_inline_button(notice_markup, "Open Context Bundle")
     assert find_inline_button(notice_markup, "Open Bot Status")
 
@@ -17522,15 +17939,21 @@ def test_handle_attachment_failed_fallback_turn_preserves_context_bundle_item_an
         )
     ]
     assert store.invalidate_calls == [(123, session)]
-    assert message.reply_calls[0].startswith(
-        "Request failed. The current live session for Codex in Default Workspace was closed."
-    )
+    assert message.reply_calls[0].startswith("失败恢复：Default Workspace 中的 Codex")
+    assert "Request recovery for Codex in Default Workspace" in message.reply_calls[0]
     assert message.reply_calls[1].startswith(
-        "The request did not finish, but this attachment was saved in the workspace"
+        "这次请求虽然没有完整结束，但这个附件已经保存到工作区，并加入了 Context Bundle。"
     )
-    assert "You can retry without uploading it again." in message.reply_calls[1]
+    assert (
+        "This request did not finish, but the attachment was saved in the workspace and added to Context Bundle."
+        in message.reply_calls[1]
+    )
+    assert "后续继续时不需要重新上传这个附件。" in message.reply_calls[1]
+    assert "You can continue without uploading it again." in message.reply_calls[1]
     assert saved_files[0].relative_to(tmp_path).as_posix() in message.reply_calls[1]
     notice_markup = message.reply_markups[1]
+    assert find_inline_button(notice_markup, "Ask Agent With Context")
+    assert find_inline_button(notice_markup, "Start Bundle Chat")
     assert find_inline_button(notice_markup, "Open Context Bundle")
     assert find_inline_button(notice_markup, "Open Bot Status")
 
@@ -17554,4 +17977,518 @@ def test_handle_attachment_respects_pending_plain_text_action():
     markup = message.reply_markups[0]
     assert find_inline_button(markup, "Cancel Pending Input")
     assert find_inline_button(markup, "Open Bot Status")
+
+
+def test_entrypoint_quick_actions_localize_bundle_chat_guidance():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _entrypoint_quick_actions_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.md"),
+    )
+    assert ui_state.enable_context_bundle_chat(123, "codex", "default") is True
+
+    text, markup = _entrypoint_quick_actions_view(
+        provider="codex",
+        workspace_id="default",
+        user_id=123,
+        ui_state=ui_state,
+    )
+
+    assert text.startswith("恢复快捷操作：")
+    assert (
+        "Bundle Chat 已开启，所以你下一条纯文本会自动带上当前上下文包。"
+        in text
+    )
+    assert (
+        "Bundle chat is already on, so the next plain text message will include that bundle automatically."
+        in text
+    )
+    assert find_inline_button(markup, "停止 Bundle Chat")
+    assert find_inline_button(markup, "打开状态中心")
+
+
+def test_session_info_view_is_chinese_first_but_keeps_english_anchor():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _build_session_info_view
+
+    session = FakeSession(session_id="session-abc", session_title="Ship onboarding")
+    text, markup = _build_session_info_view(
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        ui_state=TelegramUiState(),
+        session=session,
+        session_title="Ship onboarding",
+        back_target="status",
+    )
+
+    assert text.startswith("会话信息：Default Workspace 中的 Codex")
+    assert "Session info for Codex in Default Workspace" in text
+    assert "会话：session-abc" in text
+    assert "Session: session-abc" in text
+    assert "输入能力：" in text
+    assert "图片=是，音频=是，嵌入上下文=是" in text
+    assert find_inline_button(markup, "工作区运行态")
+    assert find_inline_button(markup, "返回状态中心")
+
+
+def test_last_request_view_is_chinese_first_but_keeps_english_anchor():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _build_last_request_view
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(
+        123,
+        "default",
+        "Review the rollout summary",
+        provider="claude",
+    )
+    text, markup = _build_last_request_view(
+        last_request=ui_state.get_last_request(123, "default"),
+        last_turn_available=True,
+        current_provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        ui_state=ui_state,
+        back_target="status",
+    )
+
+    assert text.startswith("上次请求：Default Workspace 中的 Codex")
+    assert "Last request for Codex in Default Workspace" in text
+    assert "重放概览：" in text
+    assert "当前 Provider：Codex" in text
+    assert "记录时 Provider：Claude Code" in text
+    assert (
+        "Run Last Request 只会在当前 Provider 和工作区重发这段文本，不会自动恢复原附件或额外上下文。"
+        in text
+    )
+    assert find_inline_button(markup, "重跑上次请求")
+    assert find_inline_button(markup, "返回状态中心")
+
+
+def test_provider_sessions_view_is_chinese_first_but_keeps_english_anchor():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _build_provider_sessions_view
+
+    entry = SimpleNamespace(
+        session_id="session-1",
+        title="Ship branch",
+        cwd_label="src",
+        cwd="/workspace/src",
+        updated_at="2026-03-27T15:00:00Z",
+    )
+
+    text, markup = _build_provider_sessions_view(
+        entries=[entry],
+        next_cursor=None,
+        supported=True,
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        ui_state=TelegramUiState(),
+        active_session_id="session-1",
+        can_fork=True,
+        cursor=None,
+        previous_cursors=(),
+        history_page=0,
+        back_target="status",
+        history_back_target="status",
+    )
+
+    assert text.startswith("Provider 会话：Default Workspace 中的 Codex")
+    assert "Provider sessions for Codex in Default Workspace" in text
+    assert "这里只显示当前工作区里的 Provider 会话；它来自 Provider，不是 bot 的本地历史。" in text
+    assert "1. Ship branch [当前会话]" in text
+    assert "工作目录：src" in text
+    assert "会话：session-1" in text
+    assert find_inline_button(markup, "打开1")
+    assert find_inline_button(markup, "当前 1")
+    assert find_inline_button(markup, "返回状态中心")
+
+
+def test_model_mode_view_is_chinese_first_and_localizes_dynamic_buttons():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _build_model_mode_view
+
+    session = FakeSession(session_id="session-abc")
+    text, markup = _build_model_mode_view(
+        user_id=123,
+        session_id="session-abc",
+        provider="codex",
+        workspace_label="Default Workspace",
+        model_selection=session.get_selection("model"),
+        mode_selection=session.get_selection("mode"),
+        ui_state=TelegramUiState(),
+        can_retry_last_turn=True,
+        back_target="status",
+    )
+
+    assert text.startswith("模型 / 模式：Default Workspace 中的 Codex")
+    assert "Model / Mode for Codex in Default Workspace" in text
+    assert "当前设置：模型=GPT-5.4，模式=xhigh" in text
+    assert "模型选项：" in text
+    assert "模式选项：" in text
+    assert "1. GPT-5.4 [当前]" in text
+    assert "1. xhigh [当前]" in text
+    assert find_inline_button(markup, "当前模型：GPT-5.4")
+    assert find_inline_button(markup, "模型：GPT-5.4 Mini")
+    assert find_inline_button(markup, "模型并重试：GPT-5.4 Mini")
+    assert find_inline_button(markup, "返回状态中心")
+
+
+def test_notice_copy_is_chinese_first_but_keeps_english_anchor():
+    from talk2agent.bots.telegram_bot import (
+        _bundle_chat_disabled_text,
+        _context_bundle_empty_text,
+        _expired_button_text,
+        _no_active_session_text,
+        _no_previous_turn_text,
+        _request_failed_text,
+        _unauthorized_text,
+        _workspace_search_cancelled_text,
+    )
+
+    assert _unauthorized_text().startswith("访问被拒绝")
+    assert "Access denied. Ask the operator to allow your Telegram user ID." in _unauthorized_text()
+    assert _request_failed_text().startswith("请求失败")
+    assert "Request failed. Try again, use /start, or open Bot Status." in _request_failed_text()
+    assert _expired_button_text().startswith("这个按钮已经过期")
+    assert "This button has expired because that menu is out of date." in _expired_button_text()
+    assert _context_bundle_empty_text().startswith("上下文包当前为空")
+    assert "Context bundle is empty. Add files or changes first." in _context_bundle_empty_text()
+    assert _no_previous_turn_text().startswith("当前还没有可复用的上一轮")
+    assert "No previous turn is available yet. Send a new request first, then try again." in _no_previous_turn_text()
+    assert _no_active_session_text().startswith("当前没有活跃会话")
+    assert "No active session. Send text or an attachment to start one." in _no_active_session_text()
+    assert _workspace_search_cancelled_text().startswith("搜索已取消")
+    assert "Search cancelled. Use Workspace Search to search again or open Bot Status when ready." in _workspace_search_cancelled_text()
+    assert _bundle_chat_disabled_text().startswith("Bundle Chat 已关闭")
+    assert "Bundle chat disabled. New plain text messages will use the normal session again." in _bundle_chat_disabled_text()
+
+
+def test_switch_views_are_chinese_first_but_keep_english_anchor():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _build_switch_agent_view,
+        _build_switch_provider_review_view,
+        _build_switch_workspace_review_view,
+        _build_switch_workspace_view,
+    )
+
+    services, _ = make_services(provider="codex")
+    state = run(services.snapshot_runtime_state())
+    capability_summaries = {
+        provider: run(services.discover_provider_capabilities(provider, workspace_id=state.workspace_id))
+        for provider in ("claude", "codex", "gemini")
+    }
+    ui_state = TelegramUiState()
+
+    agent_text, agent_markup = _build_switch_agent_view(
+        state=state,
+        services=services,
+        capability_summaries=capability_summaries,
+        user_id=123,
+        ui_state=ui_state,
+        replay_turn=None,
+        back_target="status",
+    )
+    assert agent_text.startswith("切换 Agent：当前共享运行时目标预览")
+    assert "Switch agent for Codex in Default Workspace" in agent_text
+    assert "当前 Provider：Codex" in agent_text
+    assert "Current provider: Codex" in agent_text
+    assert find_inline_button(agent_markup, "当前：Codex")
+
+    review_text, review_markup = _build_switch_provider_review_view(
+        state=state,
+        services=services,
+        capability_summaries=capability_summaries,
+        provider="claude",
+        user_id=123,
+        ui_state=ui_state,
+        replay_turn=None,
+        back_target="status",
+    )
+    assert review_text.startswith("切换 Agent 复核：Claude Code")
+    assert "Switch agent review: Claude Code" in review_text
+    assert "当前 Provider：Codex" in review_text
+    assert "Current provider: Codex" in review_text
+    assert find_inline_button(review_markup, "切到 Claude Code")
+
+    workspace_text, workspace_markup = _build_switch_workspace_view(
+        state=state,
+        services=services,
+        user_id=123,
+        ui_state=ui_state,
+        back_target="status",
+    )
+    assert workspace_text.startswith("切换工作区：当前共享运行时目标预览")
+    assert "Switch workspace for Codex" in workspace_text
+    assert "当前工作区：Default Workspace" in workspace_text
+    assert "Current workspace: Default Workspace" in workspace_text
+    assert find_inline_button(workspace_markup, "当前：Default Workspace")
+
+    workspace_review_text, workspace_review_markup = _build_switch_workspace_review_view(
+        state=state,
+        services=services,
+        workspace=services.config.agent.workspaces[1],
+        user_id=123,
+        ui_state=ui_state,
+        back_target="status",
+    )
+    assert workspace_review_text.startswith("切换工作区复核：Alt Workspace")
+    assert "Switch workspace review: Alt Workspace" in workspace_review_text
+    assert "目标工作区 ID：alt" in workspace_review_text
+    assert "Target workspace ID: alt" in workspace_review_text
+    assert find_inline_button(workspace_review_markup, "切到 Alt Workspace")
+
+
+def test_plan_and_workspace_views_are_chinese_first_but_keep_english_anchor():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundle,
+        _ContextBundleItem,
+        _build_context_bundle_view,
+        _build_plan_detail_view,
+        _build_plan_view,
+        _build_workspace_changes_view,
+        _build_workspace_listing_view,
+        _build_workspace_search_results_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.add_context_item(123, "codex", "default", _ContextBundleItem(kind="file", relative_path="notes.md"))
+
+    plan_entry = SimpleNamespace(status="in_progress", priority="high", content="Ship the new onboarding flow")
+    plan_text, _ = _build_plan_view(
+        entries=[plan_entry],
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        session_id="session-1",
+        back_target="status",
+    )
+    assert plan_text.startswith("Agent 计划：Default Workspace 中的 Codex")
+    assert "Agent plan for Codex in Default Workspace" in plan_text
+    assert "会话：session-1" in plan_text
+    assert "Session: session-1" in plan_text
+
+    plan_detail_text, _ = _build_plan_detail_view(
+        entry=plan_entry,
+        plan_index=0,
+        total_count=1,
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        back_target="status",
+    )
+    assert plan_detail_text.startswith("Agent 计划详情：Default Workspace 中的 Codex")
+    assert "Agent plan for Codex in Default Workspace" in plan_detail_text
+    assert "条目：1/1" in plan_detail_text
+    assert "Item: 1/1" in plan_detail_text
+
+    listing = SimpleNamespace(
+        relative_path="src",
+        entries=[
+            SimpleNamespace(name="app.py", is_dir=False, relative_path="src/app.py"),
+            SimpleNamespace(name="components", is_dir=True, relative_path="src/components"),
+        ],
+    )
+    listing_text, _ = _build_workspace_listing_view(
+        listing=listing,
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        last_request_text="Review the onboarding copy",
+        back_target="status",
+    )
+    assert listing_text.startswith("工作区文件：Default Workspace 中的 Codex")
+    assert "Workspace files for Codex in Default Workspace" in listing_text
+    assert "路径：src" in listing_text
+    assert "Path: src" in listing_text
+
+    search_results = SimpleNamespace(
+        query="onboarding",
+        matches=[SimpleNamespace(relative_path="docs/plan.md", line_number=7, line_text="onboarding plan")],
+        truncated=False,
+    )
+    search_text, _ = _build_workspace_search_results_view(
+        search_results=search_results,
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        last_request_text="Review the onboarding copy",
+        back_target="status",
+    )
+    assert search_text.startswith("工作区搜索：Default Workspace 中的 Codex")
+    assert "Workspace search for Codex in Default Workspace" in search_text
+    assert "搜索词：onboarding" in search_text
+    assert "Query: onboarding" in search_text
+
+    git_status = SimpleNamespace(
+        is_git_repo=True,
+        branch_line="main",
+        entries=[SimpleNamespace(status_code="M", display_path="src/app.py", relative_path="src/app.py")],
+    )
+    changes_text, _ = _build_workspace_changes_view(
+        git_status=git_status,
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        last_request_text="Review the onboarding copy",
+        back_target="status",
+    )
+    assert changes_text.startswith("工作区变更：Default Workspace 中的 Codex")
+    assert "Workspace changes for Codex in Default Workspace" in changes_text
+    assert "分支：main" in changes_text
+    assert "Branch: main" in changes_text
+
+    bundle_text, _ = _build_context_bundle_view(
+        bundle=_ContextBundle(
+            provider="codex",
+            workspace_id="default",
+            items=[_ContextBundleItem(kind="file", relative_path="notes.md")],
+        ),
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        last_request_text="Review the onboarding copy",
+        bundle_chat_active=False,
+        back_target="status",
+    )
+    assert bundle_text.startswith("上下文包：Default Workspace 中的 Codex")
+    assert "Context bundle for Codex in Default Workspace" in bundle_text
+    assert "条目数：1" in bundle_text
+    assert "Items: 1" in bundle_text
+
+
+def test_workspace_preview_and_bundle_notices_are_chinese_first_but_keep_english_anchor():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _build_workspace_change_preview_view,
+        _build_workspace_file_preview_view,
+        _single_context_item_start_bundle_chat_notice,
+        _workspace_changes_start_bundle_chat_notice,
+        _workspace_listing_start_bundle_chat_notice,
+        _workspace_search_start_bundle_chat_notice,
+    )
+
+    ui_state = TelegramUiState()
+    preview = SimpleNamespace(relative_path="src/app.py", text="print('hi')", is_binary=False, truncated=False)
+    file_text, _ = _build_workspace_file_preview_view(
+        preview=preview,
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        ui_state=ui_state,
+        last_request_text="Review this file",
+        back_label="Back to Folder",
+        back_action="workspace_page",
+        back_payload={"relative_path": "src", "page": 0},
+        ask_payload={"relative_path": "src/app.py"},
+        quick_ask_payload={"relative_path": "src/app.py"},
+        secondary_button_label="Add File to Context",
+        secondary_button_action="workspace_file_add_context",
+        secondary_button_payload={"relative_path": "src/app.py"},
+    )
+    assert file_text.startswith("工作区文件预览：Default Workspace 中的 Codex")
+    assert "Workspace file for Codex in Default Workspace" in file_text
+    assert "路径：src/app.py" in file_text
+    assert "Path: src/app.py" in file_text
+
+    diff_preview = SimpleNamespace(
+        relative_path="src/app.py",
+        status_code="M",
+        text="@@\n-print('old')\n+print('new')",
+        truncated=False,
+    )
+    change_text, _ = _build_workspace_change_preview_view(
+        diff_preview=diff_preview,
+        provider="codex",
+        workspace_label="Default Workspace",
+        user_id=123,
+        ui_state=ui_state,
+        last_request_text="Review this change",
+        back_label="Back to Changes",
+        back_action="workspace_changes_page",
+        back_payload={"page": 0},
+        ask_payload={"relative_path": "src/app.py", "status_code": "M"},
+        quick_ask_payload={"relative_path": "src/app.py", "status_code": "M"},
+        secondary_button_label="Add Change to Context",
+        secondary_button_action="workspace_change_add_context",
+        secondary_button_payload={"relative_path": "src/app.py", "status_code": "M"},
+    )
+    assert change_text.startswith("工作区变更预览：Default Workspace 中的 Codex")
+    assert "Workspace change for Codex in Default Workspace" in change_text
+    assert "状态：M" in change_text
+    assert "Status: M" in change_text
+
+    changes_notice = _workspace_changes_start_bundle_chat_notice(
+        added_count=2,
+        duplicate_count=1,
+        already_active=False,
+    )
+    assert changes_notice.startswith("以上变更已就绪，并已开启 Bundle Chat。")
+    assert "Bundle chat enabled." in changes_notice
+
+    search_notice = _workspace_search_start_bundle_chat_notice(
+        added_count=2,
+        duplicate_count=0,
+        already_active=True,
+    )
+    assert search_notice.startswith("以上搜索结果已就绪，Bundle Chat 会继续保持开启。")
+    assert "Bundle chat stays on." in search_notice
+
+    listing_notice = _workspace_listing_start_bundle_chat_notice(
+        added_count=1,
+        duplicate_count=1,
+        already_active=False,
+    )
+    assert listing_notice.startswith("以上文件已就绪，并已开启 Bundle Chat。")
+    assert "Bundle chat enabled." in listing_notice
+
+    item_notice = _single_context_item_start_bundle_chat_notice(
+        item_kind="file",
+        added=True,
+        already_active=False,
+    )
+    assert item_notice.startswith("这项内容已就绪，并已开启 Bundle Chat。")
+    assert "Bundle chat enabled." in item_notice
+
+
+def test_inline_runtime_notices_are_not_left_as_raw_english_literals():
+    from talk2agent.bots import telegram_bot
+
+    source = inspect.getsource(telegram_bot)
+    patterns = [
+        r'notice="[A-Za-z]',
+        r'success_notice="[A-Za-z]',
+        r'empty_notice="[A-Za-z]',
+        r'cancel_notice="[A-Za-z]',
+        r'status_success_notice="[A-Za-z]',
+        r'text="Couldn.t',
+        r'text="No [A-Za-z]',
+    ]
+
+    for pattern in patterns:
+        assert re.search(pattern, source) is None, pattern
 
