@@ -962,6 +962,7 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
         [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
         [BUTTON_SWITCH_AGENT, BUTTON_SWITCH_WORKSPACE],
     ]
+    assert len(update.message.reply_calls) == 1
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1001,6 +1002,12 @@ def test_handle_start_summarizes_existing_session_and_pending_work_without_clear
     assert "Mode: xhigh (2 choices)" in text
     assert "Pending input: Workspace search" in text
     assert "Context bundle: 1 item (bundle chat on)" in text
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for pending input:")
+    assert "Workspace search is waiting for plain text." in quick_actions_text
+    quick_actions_markup = update.message.reply_markups[1]
+    assert find_inline_button(quick_actions_markup, "Cancel Pending Input")
+    assert find_inline_button(quick_actions_markup, "Open Bot Status")
     assert ui_state.get_pending_text_action(123) is not None
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is True
     assert store.peek_calls == [123]
@@ -1057,6 +1064,63 @@ def test_handle_start_surfaces_resume_snapshot_for_returning_user():
         "Context bundle ready: 1 item; bundle chat is on, so your next plain text message will include it."
         in text
     )
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for getting back to work:")
+    assert (
+        "Retry / Fork Last Turn replays the full saved payload in the current workspace."
+        in quick_actions_text
+    )
+    assert "Run Last Request replays only the saved request text." in quick_actions_text
+    assert (
+        "Ask Agent With Context waits for your next plain-text question and adds the current context bundle."
+        in quick_actions_text
+    )
+    quick_actions_markup = update.message.reply_markups[1]
+    assert find_inline_button(quick_actions_markup, "Retry Last Turn")
+    assert find_inline_button(quick_actions_markup, "Fork Last Turn")
+    assert find_inline_button(quick_actions_markup, "Run Last Request")
+    assert find_inline_button(quick_actions_markup, "Bundle + Last Request")
+    assert find_inline_button(quick_actions_markup, "Ask Agent With Context")
+    assert find_inline_button(quick_actions_markup, "Open Context Bundle")
+    assert find_inline_button(quick_actions_markup, "Stop Bundle Chat")
+    assert find_inline_button(quick_actions_markup, "Open Bot Status")
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_start_uses_quick_actions_language_for_cached_request():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_start
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the rollout summary")
+
+    update = FakeUpdate(user_id=123, text="/start")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_start(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert (
+        "Recommended next step: use Quick actions below to run the last request again, send "
+        "text or an attachment, or use Workspace Search / Context Bundle before you ask."
+        in text
+    )
+    assert (
+        "Primary controls right now: Run Last Request below, send text or an attachment, or "
+        "use Workspace Search / Context Bundle first."
+        in text
+    )
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for getting back to work:")
+    assert "Run Last Request replays only the saved request text." in quick_actions_text
+    assert (
+        "Open Bot Status if you need history, files, changes, model / mode, or the full "
+        "control center."
+        in quick_actions_text
+    )
+    quick_actions_markup = update.message.reply_markups[1]
+    assert find_inline_button(quick_actions_markup, "Run Last Request")
+    assert find_inline_button(quick_actions_markup, "Open Bot Status")
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1089,6 +1153,12 @@ def test_handle_start_surfaces_pending_media_group_state_without_starting_sessio
         in text
     )
     assert "Pending uploads: 1 attachment group (2 items)" in text
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for pending uploads:")
+    assert "1 attachment group (2 items) is still collecting." in quick_actions_text
+    quick_actions_markup = update.message.reply_markups[1]
+    assert find_inline_button(quick_actions_markup, "Discard Pending Uploads")
+    assert find_inline_button(quick_actions_markup, "Open Bot Status")
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1224,6 +1294,57 @@ def test_handle_help_surfaces_resume_snapshot_for_returning_user():
         "Context bundle ready: 1 item; use Context Bundle or Bot Status to send it with your next request."
         in text
     )
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for getting back to work:")
+    assert "Run Last Request replays only the saved request text." in quick_actions_text
+    quick_actions_markup = update.message.reply_markups[1]
+    assert find_inline_button(quick_actions_markup, "Retry Last Turn")
+    assert find_inline_button(quick_actions_markup, "Fork Last Turn")
+    assert find_inline_button(quick_actions_markup, "Run Last Request")
+    assert find_inline_button(quick_actions_markup, "Bundle + Last Request")
+    assert find_inline_button(quick_actions_markup, "Ask Agent With Context")
+    assert find_inline_button(quick_actions_markup, "Open Context Bundle")
+    assert find_inline_button(quick_actions_markup, "Open Bot Status")
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_help_surfaces_active_turn_quick_actions():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_help
+
+    async def scenario():
+        ui_state = TelegramUiState()
+        task = asyncio.create_task(asyncio.sleep(10))
+        ui_state.start_active_turn(
+            123,
+            provider="codex",
+            workspace_id="default",
+            title_hint="Index the repo",
+            task=task,
+        )
+
+        update = FakeUpdate(user_id=123, text="/help")
+        services, store = make_services(
+            provider="codex",
+            session=FakeSession(session_id="session-abc", session_title="Index the repo"),
+        )
+
+        await handle_help(update, None, services, ui_state)
+        task.cancel()
+        await asyncio.sleep(0)
+        return update, store
+
+    update, store = run(scenario())
+
+    text = update.message.reply_calls[0]
+    assert "Status: running Index the repo." in text
+    assert "Primary controls right now: Stop Turn below, or use /cancel from chat." in text
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for the current turn:")
+    assert "Index the repo is still running. Stop it here, or open Bot Status to watch progress." in quick_actions_text
+    quick_actions_markup = update.message.reply_markups[1]
+    assert find_inline_button(quick_actions_markup, "Stop Turn")
+    assert find_inline_button(quick_actions_markup, "Open Bot Status")
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 

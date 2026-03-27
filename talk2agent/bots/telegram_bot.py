@@ -1536,6 +1536,7 @@ def _recommended_next_step_line(
     bundle_chat_active: bool,
     last_request_available: bool,
     last_turn_available: bool,
+    entrypoint_shortcuts: bool = False,
 ) -> str:
     if active_turn is not None:
         return (
@@ -1567,21 +1568,43 @@ def _recommended_next_step_line(
             )
         return "Recommended next step: tap Ask Agent With Context, or send a fresh request."
     if last_request_available and last_turn_available:
+        if entrypoint_shortcuts:
+            return (
+                "Recommended next step: use Quick actions below to run the last request again "
+                "or reuse the previous turn, or send a fresh request."
+            )
         return (
             "Recommended next step: run the last request again from Bot Status, reuse the "
             "previous turn with Retry Last Turn / Fork Last Turn, or send a fresh request."
         )
     if last_request_available:
         if session is None:
+            if entrypoint_shortcuts:
+                return (
+                    "Recommended next step: use Quick actions below to run the last request "
+                    "again, send text or an attachment, or use Workspace Search / Context "
+                    "Bundle before you ask."
+                )
             return (
                 "Recommended next step: run the last request again from Bot Status, send text "
                 "or an attachment, or use Workspace Search / Context Bundle before you ask."
+            )
+        if entrypoint_shortcuts:
+            return (
+                "Recommended next step: use Quick actions below to run the last request again, "
+                "send text or an attachment, or open Bot Status if you want files, changes, "
+                "or history first."
             )
         return (
             "Recommended next step: run the last request again from Bot Status, send text or "
             "an attachment, or open Bot Status if you want files, changes, or history first."
         )
     if last_turn_available:
+        if entrypoint_shortcuts:
+            return (
+                "Recommended next step: send a fresh request, or reuse the previous turn from "
+                "Quick actions below."
+            )
         return (
             "Recommended next step: send a fresh request, or reuse the previous turn with "
             "Retry Last Turn / Fork Last Turn."
@@ -1607,24 +1630,47 @@ def _primary_controls_line(
     bundle_chat_active: bool,
     last_request_available: bool,
     last_turn_available: bool,
+    entrypoint_shortcuts: bool = False,
 ) -> str:
     if active_turn is not None:
+        if entrypoint_shortcuts:
+            return "Primary controls right now: Stop Turn below, or use /cancel from chat."
         return "Primary controls right now: Stop Turn in Bot Status, or use /cancel from chat."
     if pending_text_action is not None:
+        if entrypoint_shortcuts:
+            return (
+                "Primary controls right now: send the expected text next, or use Cancel Pending "
+                "Input below."
+            )
         return (
             "Primary controls right now: send the expected text next, or use Cancel Pending Input "
             "in Bot Status."
         )
     if pending_media_group_stats is not None:
+        if entrypoint_shortcuts:
+            return (
+                "Primary controls right now: wait for the album to finish, or use Discard Pending "
+                "Uploads below."
+            )
         return (
             "Primary controls right now: wait for the album to finish, or use Discard Pending "
             "Uploads in Bot Status."
         )
     if bundle_chat_active and bundle_count > 0:
         if last_request_available:
+            if entrypoint_shortcuts:
+                return (
+                    "Primary controls right now: send plain text, use Bundle + Last Request "
+                    "below, or stop bundle chat below."
+                )
             return (
                 "Primary controls right now: send plain text, use Bundle + Last Request, or stop "
                 "bundle chat from Bot Status."
+            )
+        if entrypoint_shortcuts:
+            return (
+                "Primary controls right now: send plain text, Ask Agent With Context below, or "
+                "stop bundle chat below."
             )
         return (
             "Primary controls right now: send plain text, Ask Agent With Context, or stop bundle "
@@ -1632,10 +1678,17 @@ def _primary_controls_line(
         )
     if bundle_count > 0:
         if last_request_available:
+            if entrypoint_shortcuts:
+                return (
+                    "Primary controls right now: Ask Agent With Context, Bundle + Last Request, "
+                    "or Context Bundle below."
+                )
             return (
                 "Primary controls right now: Ask Agent With Context, Bundle + Last Request, or "
                 "Context Bundle."
             )
+        if entrypoint_shortcuts:
+            return "Primary controls right now: Ask Agent With Context or Context Bundle below."
         return "Primary controls right now: Ask Agent With Context or Context Bundle."
     if last_request_available and last_turn_available:
         return (
@@ -1644,15 +1697,30 @@ def _primary_controls_line(
         )
     if last_request_available:
         if session is None:
+            if entrypoint_shortcuts:
+                return (
+                    "Primary controls right now: Run Last Request below, send text or an "
+                    "attachment, or use Workspace Search / Context Bundle first."
+                )
             return (
                 "Primary controls right now: Run Last Request, send text or an attachment, or "
                 "use Workspace Search / Context Bundle first."
+            )
+        if entrypoint_shortcuts:
+            return (
+                "Primary controls right now: Run Last Request below, send text or an attachment, "
+                "or open Bot Status for files, changes, and context prep."
             )
         return (
             "Primary controls right now: Run Last Request, send text or an attachment, or "
             "open Bot Status for files, changes, and context prep."
         )
     if last_turn_available:
+        if entrypoint_shortcuts:
+            return (
+                "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh "
+                "request."
+            )
         return "Primary controls right now: Retry Last Turn, Fork Last Turn, or send a fresh request."
     if session is None:
         return (
@@ -1936,6 +2004,7 @@ def _build_start_text(
             bundle_chat_active=bundle_chat_active,
             last_request_available=last_request_available,
             last_turn_available=last_turn_available,
+            entrypoint_shortcuts=True,
         ),
         _primary_controls_line(
             session=session,
@@ -1946,6 +2015,7 @@ def _build_start_text(
             bundle_chat_active=bundle_chat_active,
             last_request_available=last_request_available,
             last_turn_available=last_turn_available,
+            entrypoint_shortcuts=True,
         ),
         "",
     ]
@@ -2055,6 +2125,7 @@ def _build_help_text(
             bundle_chat_active=bundle_chat_active,
             last_request_available=last_request_available,
             last_turn_available=last_turn_available,
+            entrypoint_shortcuts=True,
         ),
         _primary_controls_line(
             session=session,
@@ -2065,6 +2136,7 @@ def _build_help_text(
             bundle_chat_active=bundle_chat_active,
             last_request_available=last_request_available,
             last_turn_available=last_turn_available,
+            entrypoint_shortcuts=True,
         ),
         "",
     ]
@@ -2113,6 +2185,128 @@ def _build_help_text(
     return "\n".join(lines)
 
 
+def _entrypoint_quick_actions_view(
+    *,
+    provider: str,
+    workspace_id: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+) -> tuple[str, InlineKeyboardMarkup] | None:
+    active_turn = ui_state.get_active_turn(
+        user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    if active_turn is not None:
+        title = _status_text_snippet(active_turn.title_hint, limit=120) or "current request"
+        return (
+            "Quick actions for the current turn:\n"
+            f"{title} is still running. Stop it here, or open Bot Status to watch progress.",
+            _active_turn_notice_markup(ui_state, user_id),
+        )
+
+    pending_text_action = ui_state.get_pending_text_action(user_id)
+    if pending_text_action is not None:
+        return (
+            "Quick actions for pending input:\n"
+            f"{_pending_text_action_label(pending_text_action)} is waiting for plain text. "
+            "Cancel it here, or send the expected text next.",
+            _pending_input_notice_markup(ui_state, user_id),
+        )
+
+    pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
+    if pending_media_group_stats is not None:
+        return (
+            "Quick actions for pending uploads:\n"
+            f"{_pending_media_group_summary(pending_media_group_stats)} is still collecting. "
+            "Discard it here, or open Bot Status for the full runtime view.",
+            _pending_uploads_notice_markup(ui_state, user_id),
+        )
+
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    if last_request is None and last_turn is None and bundle_count <= 0:
+        return None
+
+    lines = ["Quick actions for getting back to work:"]
+    rows: list[tuple[tuple[str, str, dict[str, Any]], ...]] = []
+
+    if last_turn is not None:
+        lines.append(
+            "Retry / Fork Last Turn replays the full saved payload in the current workspace."
+        )
+        rows.append(
+            (
+                ("Retry Last Turn", "runtime_status_control", {"target": "retry_last_turn"}),
+                ("Fork Last Turn", "runtime_status_control", {"target": "fork_last_turn"}),
+            )
+        )
+
+    if last_request is not None:
+        lines.append("Run Last Request replays only the saved request text.")
+        if bundle_count > 0:
+            rows.append(
+                (
+                    ("Run Last Request", "runtime_status_control", {"target": "run_last_request"}),
+                    (
+                        "Bundle + Last Request",
+                        "runtime_status_control",
+                        {"target": "context_bundle_ask_last_request"},
+                    ),
+                )
+            )
+        else:
+            rows.append(
+                (("Run Last Request", "runtime_status_control", {"target": "run_last_request"}),)
+            )
+
+    if bundle_count > 0:
+        lines.append(
+            "Ask Agent With Context waits for your next plain-text question and adds the current context bundle."
+        )
+        rows.append(
+            (
+                ("Ask Agent With Context", "runtime_status_control", {"target": "context_bundle_ask"}),
+                ("Open Context Bundle", "runtime_status_open", {"target": "bundle"}),
+            )
+        )
+        if bundle_chat_active:
+            lines.append(
+                "Bundle chat is already on, so the next plain text message will include that bundle automatically."
+            )
+            rows.append((("Stop Bundle Chat", "runtime_status_stop_bundle_chat", {}),))
+
+    lines.append(
+        "Open Bot Status if you need history, files, changes, model / mode, or the full control center."
+    )
+    rows.append((("Open Bot Status", "runtime_status_page", {}),))
+
+    return "\n".join(lines), _inline_notice_markup(ui_state, user_id, *rows)
+
+
+async def _reply_entrypoint_quick_actions(
+    message,
+    *,
+    provider: str,
+    workspace_id: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+) -> None:
+    view = _entrypoint_quick_actions_view(
+        provider=provider,
+        workspace_id=workspace_id,
+        user_id=user_id,
+        ui_state=ui_state,
+    )
+    if view is None:
+        return
+    text, markup = view
+    await message.reply_text(text, reply_markup=markup)
+
+
 async def handle_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2150,6 +2344,13 @@ async def handle_start(
             ui_state=ui_state,
             is_admin=user_id == services.admin_user_id,
         ),
+    )
+    await _reply_entrypoint_quick_actions(
+        update.message,
+        provider=state.provider,
+        workspace_id=state.workspace_id,
+        user_id=user_id,
+        ui_state=ui_state,
     )
 
 
@@ -2190,6 +2391,13 @@ async def handle_help(
             ui_state=ui_state,
             is_admin=user_id == services.admin_user_id,
         ),
+    )
+    await _reply_entrypoint_quick_actions(
+        update.message,
+        provider=state.provider,
+        workspace_id=state.workspace_id,
+        user_id=user_id,
+        ui_state=ui_state,
     )
 
 

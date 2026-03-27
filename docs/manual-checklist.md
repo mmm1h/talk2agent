@@ -12,9 +12,9 @@
 ## 启动与全局运行时
 
 1. 发送 `/start`，确认会返回欢迎页和主键盘，且不会隐式创建新 session。
-   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的 `Quick paths` 引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒；如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认欢迎页会额外给出 `Resume snapshot`，直接解释哪些内容可以继续复用。
+   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的 `Quick paths` 引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒；如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认欢迎页会额外给出 `Resume snapshot`，直接解释哪些内容可以继续复用。若当前还有可恢复内容，或 bot 正卡在运行中 turn / 待输入 / 待发送附件组，再确认 `/start` 会额外补一张 `Quick actions` 卡片，并把对应恢复按钮直接挂出来，同时始终保留 `Open Bot Status` 作为完整控制台回退入口。
 2. 发送 `/help`，确认会返回快速使用指南和恢复入口，且不会隐式创建新 session。
-   同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用；帮助页正文还应补上 `Common tasks` 与 `Core concepts`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Context Bundle`、`Bundle Chat` 这些术语解释清楚；如果当前 workspace 仍有可恢复内容，再确认帮助页也会显示 `Resume snapshot`。
+   同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用；帮助页正文还应补上 `Common tasks` 与 `Core concepts`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Context Bundle`、`Bundle Chat` 这些术语解释清楚；如果当前 workspace 仍有可恢复内容，再确认帮助页也会显示 `Resume snapshot`，并额外补一张 `Quick actions` 卡片，把最相关的恢复按钮直接挂在帮助页下方，同时保留 `Open Bot Status` 这个完整控制台入口。
 3. 发送 `/status`，确认会直接打开 `Bot Status`，且不会隐式创建新 session；在主键盘被 Telegram 折叠时，这条命令仍然可作为只读恢复入口。
 4. 在待输入、运行中 turn 和 Bundle Chat 三种状态下分别发送 `/cancel`，并额外测试一次主键盘 `Cancel / Stop`，确认都会按优先级执行本地取消，而不是误发给 agent。
    额外验证一次 `media_group` 还在收集窗口内时立刻 `/cancel`，确认附件组会被直接丢弃，而不是延迟几百毫秒后仍然发给 agent。

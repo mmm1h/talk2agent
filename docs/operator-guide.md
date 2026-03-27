@@ -33,6 +33,7 @@
 - `/start` / `/help` / `/status` / `Bot Status`：消息顶部会先给出当前 `Status` 和 `Recommended next step`，并补上一句 `Primary controls right now`，把“现在处于什么状态、接下来该做什么、该点哪个入口”放在详细运行时信息之前。
 - `/start`：欢迎页会额外给出一段 `Quick paths`，把“直接发请求”“先准备上下文”“去 `Bot Status` 做恢复或分支”这三条高频路径先讲清楚，而不是只罗列系统入口。
 - `/start` / `/help`：如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，欢迎页和帮助页会直接补一段 `Resume snapshot`，把“重跑文本”和“重放整轮 payload”的区别先讲清楚，减少返回用户还得先点进 `Bot Status` 才知道能从哪里继续。
+- `/start` / `/help`：如果当前还有可恢复内容，或 bot 正卡在运行中 turn / 待输入 / 待发送附件组，这两条命令还会额外补一张 `Quick actions` 卡片，把最相关的恢复按钮直接挂在说明页下面，而不是只留下文字引导；这张卡片会始终保留 `Open Bot Status`，让用户随时退回完整控制台。
 - `/help`：除了恢复入口外，还会用 `Common tasks` 和 `Core concepts` 解释 `Run Last Request`、`Retry / Fork Last Turn`、`Context Bundle`、`Bundle Chat` 这些术语，降低新用户第一次接触时的理解成本。
 - `/start` / `/help`：都会明确提醒本地 `/start`、`/status`、`/help`、`/cancel` 始终可用，即使 Telegram 折叠了主键盘或 slash 菜单正在刷新。
 - `/help`：查看当前 Provider / Workspace 下的快速使用指南和恢复入口，不会隐式创建新 session。
