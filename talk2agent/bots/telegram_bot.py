@@ -1828,6 +1828,139 @@ def _workspace_reuse_summary_line(
     return f"Reusable in this workspace: {_join_label_series(labels)}."
 
 
+def _workspace_recovery_actions(
+    *,
+    ui_state: TelegramUiState,
+    user_id: int,
+    provider: str,
+    workspace_id: str,
+    back_target: str,
+) -> tuple[list[str], list[list[InlineKeyboardButton]]]:
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
+    bundle_count = 0 if bundle is None else len(bundle.items)
+    bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
+    restore_back_target = "status" if back_target == "none" else back_target
+
+    if last_request is None and last_turn is None and bundle_count <= 0:
+        return (
+            [
+                "Recommended next step: send text or an attachment from chat to start a live session, or use the buttons below to go back."
+            ],
+            [],
+        )
+
+    lines = []
+    reuse_summary = _workspace_reuse_summary_line(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+    )
+    if reuse_summary is not None:
+        lines.append(reuse_summary)
+    lines.append("Recovery options:")
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if last_request is not None:
+        lines.append("Run Last Request can start a live session again from the saved text.")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Run Last Request",
+                    "runtime_status_control",
+                    target="run_last_request",
+                )
+            ]
+        )
+    if last_turn is not None:
+        lines.append("Retry / Fork Last Turn can rebuild the saved payload in this workspace.")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Retry Last Turn",
+                    "runtime_status_control",
+                    target="retry_last_turn",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Fork Last Turn",
+                    "runtime_status_control",
+                    target="fork_last_turn",
+                ),
+            ]
+        )
+    if bundle_count > 0:
+        bundle_summary = _status_item_count_summary(bundle_count) or "current bundle"
+        if last_request is not None:
+            lines.append(
+                "Context bundle ready: "
+                f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message, "
+                "and Bundle + Last Request reuses the saved text with that bundle."
+            )
+        else:
+            lines.append(
+                "Context bundle ready: "
+                f"{bundle_summary}. Ask Agent With Context waits for your next plain-text message "
+                "and uses that bundle."
+            )
+        if bundle_chat_active:
+            lines.append(
+                "Bundle chat is already on, so a fresh plain text message would include that bundle automatically."
+            )
+        bundle_buttons = [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Ask Agent With Context",
+                "runtime_status_control",
+                target="context_bundle_ask",
+            )
+        ]
+        if last_request is not None:
+            bundle_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Bundle + Last Request",
+                    "runtime_status_control",
+                    target="context_bundle_ask_last_request",
+                )
+            )
+        else:
+            bundle_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Open Context Bundle",
+                    "runtime_status_open",
+                    target="bundle",
+                    back_target=restore_back_target,
+                )
+            )
+        buttons.append(bundle_buttons)
+        if last_request is not None:
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Open Context Bundle",
+                        "runtime_status_open",
+                        target="bundle",
+                        back_target=restore_back_target,
+                    )
+                ]
+            )
+    return lines, buttons
+
+
 def _session_ready_extra_lines(
     *,
     ui_state: TelegramUiState,
@@ -3096,6 +3229,7 @@ async def _show_usage_from_callback(
     )
     text, markup = _build_usage_view(
         provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
         ui_state=ui_state,
@@ -6389,6 +6523,7 @@ async def _show_agent_commands_menu(update: Update, services, ui_state: Telegram
     text, markup = _build_agent_commands_view(
         commands=command_state.commands,
         provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=update.effective_user.id,
         page=0,
@@ -6412,6 +6547,7 @@ async def _show_agent_commands_menu_from_callback(
     text, markup = _build_agent_commands_view(
         commands=command_state.commands,
         provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
         page=page,
@@ -16221,6 +16357,16 @@ def _build_session_info_view(
 
     if session is None:
         lines.append("No live session. A session will start on the first request.")
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target="session_info",
+        )
+        if recovery_lines:
+            lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
         _append_back_to_status_button(
             buttons,
             ui_state=ui_state,
@@ -16374,6 +16520,7 @@ def _build_session_info_view(
 def _build_usage_view(
     *,
     provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     ui_state: TelegramUiState,
@@ -16393,6 +16540,15 @@ def _build_usage_view(
     buttons: list[list[InlineKeyboardButton]] = []
     if session is None:
         lines.append("No live session. A session will start on the first request.")
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+        )
+        lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
         _append_back_to_status_button(
             buttons,
             ui_state=ui_state,
@@ -17514,6 +17670,7 @@ def _build_agent_commands_view(
     *,
     commands,
     provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     page: int,
@@ -17538,6 +17695,14 @@ def _build_agent_commands_view(
             "Command discovery may still be loading, or the current agent may not expose any "
             "slash commands."
         )
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+        )
+        lines.extend(recovery_lines)
         buttons.append(
             [
                 _callback_button(
@@ -17550,6 +17715,7 @@ def _build_agent_commands_view(
                 )
             ]
         )
+        buttons.extend(recovery_buttons)
         _append_status_recovery_button(
             buttons,
             ui_state=ui_state,

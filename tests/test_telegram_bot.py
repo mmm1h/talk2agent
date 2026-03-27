@@ -3970,6 +3970,79 @@ def test_bot_status_can_open_usage_and_back_to_status():
     assert find_inline_button(restored_markup, "Usage")
 
 
+def test_bot_status_usage_without_live_session_surfaces_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(
+        session_id="session-live",
+        session_title="Provider Native Thread",
+        session_updated_at="2026-03-26T09:30:00Z",
+        usage=SimpleNamespace(
+            used=512,
+            size=4096,
+            cost_amount=0.42,
+            cost_currency="USD",
+        ),
+    )
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, store = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    store.peek_session = None
+    usage_button = find_inline_button(update.message.reply_markups[0], "Usage")
+    callback_message = FakeIncomingMessage("status")
+    usage_update = FakeCallbackUpdate(123, usage_button.callback_data, message=callback_message)
+    run(handle_callback_query(usage_update, None, services, ui_state))
+
+    usage_text, usage_markup = callback_message.edit_calls[-1]
+    assert usage_text.startswith("Usage for Codex in Default Workspace")
+    assert "No live session. A session will start on the first request." in usage_text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in usage_text
+    assert "Recovery options:" in usage_text
+    assert "Run Last Request can start a live session again from the saved text." in usage_text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in usage_text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in usage_text
+    )
+    assert find_inline_button(usage_markup, "Run Last Request")
+    assert find_inline_button(usage_markup, "Retry Last Turn")
+    assert find_inline_button(usage_markup, "Fork Last Turn")
+    assert find_inline_button(usage_markup, "Ask Agent With Context")
+    assert find_inline_button(usage_markup, "Bundle + Last Request")
+    assert find_inline_button(usage_markup, "Open Context Bundle")
+    assert find_inline_button(usage_markup, "Back to Bot Status")
+    assert store.get_or_create_calls == []
+
+
 def test_bot_status_can_open_workspace_runtime_and_back_to_status():
     from talk2agent.bots.telegram_bot import (
         BUTTON_BOT_STATUS,
@@ -4260,7 +4333,73 @@ def test_bot_status_session_info_without_live_session_does_not_create_one():
     info_text, info_markup = callback_message.edit_calls[-1]
     assert info_text.startswith("Session info for Codex in Default Workspace")
     assert "No live session. A session will start on the first request." in info_text
+    assert (
+        "Recommended next step: send text or an attachment from chat to start a live session, "
+        "or use the buttons below to go back."
+        in info_text
+    )
     assert find_inline_button(info_markup, "Workspace Runtime")
+    assert find_inline_button(info_markup, "Back to Bot Status")
+    assert store.get_or_create_calls == []
+
+
+def test_bot_status_session_info_without_live_session_surfaces_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    info_button = find_inline_button(update.message.reply_markups[0], "Session Info")
+    callback_message = FakeIncomingMessage("status")
+    info_update = FakeCallbackUpdate(123, info_button.callback_data, message=callback_message)
+    run(handle_callback_query(info_update, None, services, ui_state))
+
+    info_text, info_markup = callback_message.edit_calls[-1]
+    assert info_text.startswith("Session info for Codex in Default Workspace")
+    assert "No live session. A session will start on the first request." in info_text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in info_text
+    assert "Recovery options:" in info_text
+    assert "Run Last Request can start a live session again from the saved text." in info_text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in info_text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in info_text
+    )
+    assert find_inline_button(info_markup, "Workspace Runtime")
+    assert find_inline_button(info_markup, "Run Last Request")
+    assert find_inline_button(info_markup, "Retry Last Turn")
+    assert find_inline_button(info_markup, "Fork Last Turn")
+    assert find_inline_button(info_markup, "Ask Agent With Context")
+    assert find_inline_button(info_markup, "Bundle + Last Request")
+    assert find_inline_button(info_markup, "Open Context Bundle")
     assert find_inline_button(info_markup, "Back to Bot Status")
     assert store.get_or_create_calls == []
 
@@ -11609,10 +11748,67 @@ def test_agent_commands_empty_state_offers_refresh_and_status_recovery():
         "Session: none (will start on first command)\n"
         "No agent commands available.\n"
         "Command discovery may still be loading, or the current agent may not expose any "
-        "slash commands."
+        "slash commands.\n"
+        "Recommended next step: send text or an attachment from chat to start a live session, "
+        "or use the buttons below to go back."
     )
     markup = update.message.reply_markups[0]
     assert find_inline_button(markup, "Refresh")
+    assert find_inline_button(markup, "Open Bot Status")
+
+
+def test_agent_commands_empty_state_surfaces_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_AGENT_COMMANDS,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "claude",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_AGENT_COMMANDS)
+    services, _ = make_services(session=FakeSession(available_commands=[]), peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert text.startswith("Agent commands for Claude Code in Default Workspace")
+    assert "No agent commands available." in text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in text
+    assert "Recovery options:" in text
+    assert "Run Last Request can start a live session again from the saved text." in text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in text
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Refresh")
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Retry Last Turn")
+    assert find_inline_button(markup, "Fork Last Turn")
+    assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Bundle + Last Request")
+    assert find_inline_button(markup, "Open Context Bundle")
     assert find_inline_button(markup, "Open Bot Status")
 
 

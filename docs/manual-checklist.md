@@ -99,6 +99,7 @@
    如果 `Last Request` 或 `Last Turn` 记录自另一个 Provider，再确认详情页会直接写明“Recorded provider` 与 `Current provider` 的差异，以及当前重放到底会发往哪里”，避免跨 runtime 误会。
    同时确认 `Last Turn` 详情会额外解释 `Retry Last Turn` 是在当前 live session 里重放整轮 payload，而 `Fork Last Turn` 会先开新 session 再重放。
    如果 `Last Turn`、`Agent Plan` 或 `Tool Activity` 超过一页，再确认页首会显示总数、`Showing` 和 `Page`，避免只读排查长列表时失去位置感。
+   额外在“当前没有 live session，但 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`”的场景下，再打开 `Session Info`、`Usage` 或无命令的 `Agent Commands`，确认页面会补上 `Recovery options`，并直接给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context` 或 `Bundle + Last Request`，而不是只剩返回按钮。
 
 ## 附件与长回合
 

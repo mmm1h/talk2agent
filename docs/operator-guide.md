@@ -70,6 +70,7 @@
   从 `Session History` 里执行 `Run Session` / `Run+Retry` / `Fork+Retry` 时，成功和失败都会回到历史列表并保留当前上下文；如果上一轮已失效，也会明确提示先发新请求，而不是误报“已经重试成功”。
   `Session History` 列表和详情都会先解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
   如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；而是补上 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，把下一步动作直接放在空状态里。
+- `Session Info` / `Usage` / `Agent Commands` 的无 session 空状态：如果当前 live session 已消失，但当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些页面不会只剩“没有会话”；它们会直接补上 `Recovery options`，并给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这类直达按钮。
 - 分页列表可预期：`Session History`、`Provider Sessions`、`Agent Commands`、`Workspace Files` / `Search` / `Changes`、`Context Bundle` 在超过一页时都会显示总数、当前页范围和页码，减少手机端只看到 `Prev` / `Next` 却不知道自己翻到哪里的情况。
 - `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，主键盘入口不会只回一句死提示，而会直接落到带 notice 的 `Bot Status`，把 `Run Last Request`、`Session History`、`New Session` 等恢复入口一起摆出来；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
   当上一轮最初记录在另一个 Provider 上时，状态页和 `Last Turn` 详情页也会明确提示“本次会在当前 Provider 上重放，必要时会先做附件能力适配”，减少跨 runtime 误解。
