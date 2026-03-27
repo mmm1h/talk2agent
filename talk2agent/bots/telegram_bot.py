@@ -1684,6 +1684,46 @@ def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
     return lines
 
 
+def _start_quick_path_lines() -> list[str]:
+    return [
+        "1. Ask right now: send plain text or an attachment.",
+        "2. Prepare context first: use Workspace Search or Context Bundle.",
+        (
+            "3. Recover or branch work: open Bot Status for Last Request, Last Turn, "
+            "history, model / mode, and session actions."
+        ),
+    ]
+
+
+def _help_common_task_lines() -> list[str]:
+    return [
+        "1. Ask a fresh question: send text or an attachment.",
+        (
+            "2. Prepare reusable local context: use Workspace Search or Workspace Files / "
+            "Changes, then keep it in Context Bundle if you want to reuse it."
+        ),
+        "3. Replay only the saved request text: Run Last Request.",
+        (
+            "4. Replay the full saved turn payload: Retry Last Turn. Use Fork Last Turn to do "
+            "that in a new session."
+        ),
+        (
+            "5. Recover, inspect, or switch setup: Bot Status for history, model / mode, "
+            "agent commands, new session, and restart."
+        ),
+    ]
+
+
+def _help_core_concept_lines() -> list[str]:
+    return [
+        "Context Bundle keeps selected files, changes, and fallback attachments ready across turns.",
+        (
+            "Bundle chat means your next plain text message will automatically include the "
+            "current context bundle until you stop it."
+        ),
+    ]
+
+
 def _session_ready_notice_text() -> str:
     return (
         "You're ready for the next request. Old bot buttons and pending inputs tied to the "
@@ -1809,12 +1849,10 @@ def _build_start_text(
         lines.extend(resume_lines)
 
     lines.append("")
-    lines.append("Start here:")
-    lines.append("Send plain text or an attachment to talk to the current agent.")
-    lines.append(
-        "Open Bot Status when you need the control center for history, files, model / mode, "
-        "agent commands, or recovery."
-    )
+    lines.append("Quick paths:")
+    lines.extend(_start_quick_path_lines())
+    lines.append("")
+    lines.append("Keyboard layout:")
     lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
 
     return "\n".join(lines)
@@ -1902,20 +1940,11 @@ def _build_help_text(
         lines.extend(resume_lines)
 
     lines.append("")
-    lines.append("Quick guide:")
-    lines.append("1. Send text or an attachment to chat with the current agent.")
-    lines.append(
-        "2. Use Workspace Search and Context Bundle from the main keyboard, or open Bot Status "
-        "for Workspace Files/Changes, when you want to prepare context before you ask."
-    )
-    lines.append(
-        "3. Use Bot Status or /status as the control center for runtime state, history, model "
-        "/ mode, agent commands, and recovery."
-    )
-    lines.append(
-        "4. Use Session History, Run Last Request, Retry/Fork Last Turn, New Session, and "
-        "Restart Agent from Bot Status when you need to branch, replay, or reset your work."
-    )
+    lines.append("Common tasks:")
+    lines.extend(_help_common_task_lines())
+    lines.append("")
+    lines.append("Core concepts:")
+    lines.extend(_help_core_concept_lines())
     lines.append("")
     lines.append("Keyboard:")
     lines.extend(_main_keyboard_priority_lines(is_admin=is_admin))
@@ -14385,7 +14414,7 @@ def _build_runtime_status_view(
     lines.append("Current runtime:")
     lines.extend(runtime_lines)
     lines.append("")
-    lines.append("Recoverable memory:")
+    lines.append("Resume and memory:")
     lines.extend(memory_lines)
     lines.append("")
     lines.append("Workspace context:")
@@ -15946,6 +15975,13 @@ def _build_last_turn_view(
         )
     )
     lines.append(f"Title: {_status_text_snippet(replay_turn.title_hint, limit=120) or '[empty]'}")
+    lines.append(
+        "Retry Last Turn replays this saved payload, including any saved attachments or extra "
+        "context, in the current live session."
+    )
+    lines.append(
+        "Fork Last Turn starts a new session first, then replays the same payload there."
+    )
 
     prompt_items = _replay_prompt_items(replay_turn)
     lines.append(f"Prompt items: {len(prompt_items)}")
@@ -17852,7 +17888,6 @@ def _build_context_bundle_view(
 
     lines.append(f"Items: {len(bundle.items)}")
     lines.append(f"Bundle chat: {'on' if bundle_chat_active else 'off'}")
-
     page_count = max(1, (len(bundle.items) + CONTEXT_BUNDLE_PAGE_SIZE - 1) // CONTEXT_BUNDLE_PAGE_SIZE)
     page = min(max(page, 0), page_count - 1)
     start = page * CONTEXT_BUNDLE_PAGE_SIZE
@@ -17885,6 +17920,19 @@ def _build_context_bundle_view(
                     **source_payload,
                 )
             ]
+        )
+
+    lines.append("")
+    lines.append("Ask Agent With Context starts a fresh turn with these items.")
+    if last_request_text is not None:
+        lines.append("Ask With Last Request reuses the saved request text with this bundle.")
+    if bundle_chat_active:
+        lines.append(
+            "Bundle chat is on, so your next plain text message will include this bundle automatically."
+        )
+    else:
+        lines.append(
+            "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
         )
 
     buttons.append(

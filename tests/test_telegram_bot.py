@@ -920,13 +920,15 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     assert "Turn: idle" in text
     assert "Pending input: none" in text
     assert "Context bundle: empty" in text
-    assert "Start here:" in text
-    assert "Send plain text or an attachment to talk to the current agent." in text
+    assert "Quick paths:" in text
+    assert "1. Ask right now: send plain text or an attachment." in text
+    assert "2. Prepare context first: use Workspace Search or Context Bundle." in text
     assert (
-        "Open Bot Status when you need the control center for history, files, model / mode, "
-        "agent commands, or recovery."
+        "3. Recover or branch work: open Bot Status for Last Request, Last Turn, history, "
+        "model / mode, and session actions."
         in text
     )
+    assert "Keyboard layout:" in text
     assert "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn." in text
     assert (
         "Context prep row: Workspace Search and Context Bundle stay one tap away before you ask."
@@ -1123,21 +1125,32 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
     assert "Turn: idle" in text
     assert "Pending input: none" in text
     assert "Context bundle: 0 items" in text
-    assert "Quick guide:" in text
-    assert "1. Send text or an attachment to chat with the current agent." in text
+    assert "Common tasks:" in text
+    assert "1. Ask a fresh question: send text or an attachment." in text
     assert (
-        "2. Use Workspace Search and Context Bundle from the main keyboard, or open Bot Status "
-        "for Workspace Files/Changes, when you want to prepare context before you ask."
+        "2. Prepare reusable local context: use Workspace Search or Workspace Files / Changes, "
+        "then keep it in Context Bundle if you want to reuse it."
+        in text
+    )
+    assert "3. Replay only the saved request text: Run Last Request." in text
+    assert (
+        "4. Replay the full saved turn payload: Retry Last Turn. Use Fork Last Turn to do that "
+        "in a new session."
         in text
     )
     assert (
-        "3. Use Bot Status or /status as the control center for runtime state, history, model "
-        "/ mode, agent commands, and recovery."
+        "5. Recover, inspect, or switch setup: Bot Status for history, model / mode, agent "
+        "commands, new session, and restart."
+        in text
+    )
+    assert "Core concepts:" in text
+    assert (
+        "Context Bundle keeps selected files, changes, and fallback attachments ready across turns."
         in text
     )
     assert (
-        "4. Use Session History, Run Last Request, Retry/Fork Last Turn, New Session, and "
-        "Restart Agent from Bot Status when you need to branch, replay, or reset your work."
+        "Bundle chat means your next plain text message will automatically include the current "
+        "context bundle until you stop it."
         in text
     )
     assert "Keyboard:" in text
@@ -2366,6 +2379,11 @@ def test_workspace_changes_follow_up_can_start_bundle_chat(monkeypatch):
         "Added 2 changes to context bundle. Bundle chat enabled.\n"
         "Context bundle for Claude Code in Default Workspace\nItems: 2\nBundle chat: on"
     )
+    assert "Ask Agent With Context starts a fresh turn with these items." in enabled_text
+    assert (
+        "Bundle chat is on, so your next plain text message will include this bundle automatically."
+        in enabled_text
+    )
 
     request_update = FakeUpdate(user_id=123, text="Keep iterating on these changes.")
     run(handle_text(request_update, None, services, ui_state))
@@ -2625,7 +2643,7 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert "Workspace ID: default" in text
     assert "Path: F:/workspace" in text
     assert "Current runtime:" in text
-    assert "Recoverable memory:" in text
+    assert "Resume and memory:" in text
     assert "Workspace context:" in text
     assert "Agent capabilities:" in text
     assert "Controls:" in text
@@ -3965,6 +3983,12 @@ def test_bot_status_can_open_last_turn_and_back_to_status():
         "differs, the bot adapts the saved payload first."
         in last_turn_text
     )
+    assert (
+        "Retry Last Turn replays this saved payload, including any saved attachments or extra "
+        "context, in the current live session."
+        in last_turn_text
+    )
+    assert "Fork Last Turn starts a new session first, then replays the same payload there." in last_turn_text
     assert "Prompt items: 3" in last_turn_text
     assert "Saved context items: 2" in last_turn_text
     assert "Saved context preview:" in last_turn_text
@@ -8800,6 +8824,11 @@ def test_bot_status_context_bundle_preview_cancel_and_back_to_status(tmp_path):
     assert bundle_text.startswith(
         "Context bundle for Codex in Default Workspace\nItems: 1\nBundle chat: off\n1. [file] notes.txt"
     )
+    assert "Ask Agent With Context starts a fresh turn with these items." in bundle_text
+    assert (
+        "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
+        in bundle_text
+    )
     assert find_inline_button(bundle_markup, "Back to Bot Status")
 
     open_button = find_inline_button(bundle_markup, "Open 1")
@@ -11640,12 +11669,17 @@ def test_workspace_listing_add_visible_files_reports_existing_bundle_items(tmp_p
     run(handle_callback_query(add_update, None, services, ui_state))
 
     edited_text, _ = add_update.callback_query.message.edit_calls[-1]
-    assert edited_text == (
+    assert edited_text.startswith(
         "All 1 visible file is already in the context bundle.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
         "Bundle chat: off\n"
         "1. [file] README.md"
+    )
+    assert "Ask Agent With Context starts a fresh turn with these items." in edited_text
+    assert (
+        "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
+        in edited_text
     )
 
 

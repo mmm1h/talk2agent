@@ -31,7 +31,9 @@
 
 - `/start`：恢复欢迎页和常驻主键盘，不会隐式创建新 session。
 - `/start` / `/help` / `/status` / `Bot Status`：消息顶部会先给出当前 `Status` 和 `Recommended next step`，并补上一句 `Primary controls right now`，把“现在处于什么状态、接下来该做什么、该点哪个入口”放在详细运行时信息之前。
+- `/start`：欢迎页会额外给出一段 `Quick paths`，把“直接发请求”“先准备上下文”“去 `Bot Status` 做恢复或分支”这三条高频路径先讲清楚，而不是只罗列系统入口。
 - `/start` / `/help`：如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，欢迎页和帮助页会直接补一段 `Resume snapshot`，把“重跑文本”和“重放整轮 payload”的区别先讲清楚，减少返回用户还得先点进 `Bot Status` 才知道能从哪里继续。
+- `/help`：除了恢复入口外，还会用 `Common tasks` 和 `Core concepts` 解释 `Run Last Request`、`Retry / Fork Last Turn`、`Context Bundle`、`Bundle Chat` 这些术语，降低新用户第一次接触时的理解成本。
 - `/start` / `/help`：都会明确提醒本地 `/start`、`/status`、`/help`、`/cancel` 始终可用，即使 Telegram 折叠了主键盘或 slash 菜单正在刷新。
 - `/help`：查看当前 Provider / Workspace 下的快速使用指南和恢复入口，不会隐式创建新 session。
 - `/cancel`：优先取消待输入动作，其次停止当前 turn，再次关闭 Bundle Chat；只有在没有本地状态可取消时，才会回到 agent 自己的 `/cancel` 命令。
@@ -45,7 +47,7 @@
 - 无效或跨用户按钮：版本漂移、失效 payload，或点到别人的按钮时，bot 会返回恢复或纠正建议，而不是只显示生硬的系统短语。
 - `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
 - `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`，减少手机端来回扫按钮。
-- `Bot Status` 的正文会按 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 分段，避免长消息退化成一整屏无层次的状态 dump。
+- `Bot Status` 的正文会按 `Current runtime`、`Resume and memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 分段，避免长消息退化成一整屏无层次的状态 dump。
 - 当当前 turn 仍在运行时，`Bot Status` 会额外显示 `Turn elapsed`；当 bot 正在等待下一条纯文本时，也会直接显示 `Next plain text` 提示，减少用户猜“下一条到底该发什么”。
 - 当用户的消息被当前运行中 turn、待输入动作或待发送附件组挡住时，bot 不只会解释原因，还会直接附上 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Open Bot Status` 这类恢复按钮，避免用户还得记 slash 命令。
 - `Last Request` 不再只是只读缓存：`Bot Status` 会额外显示它来自 plain text / bundle / workspace request 等哪个来源，并提供 `Run Last Request`，用于只重跑请求文本本身；如果你需要原附件或原上下文，则继续使用 `Retry Last Turn`。
@@ -89,6 +91,7 @@
 - 空上下文与缺失 last request：`Context Bundle` 为空时，bot 会明确提示先从 Files/Search/Changes 加内容；`Ask With Last Request` 这类快捷动作在缺少上一条请求时，也会提示先发送一条新请求。
 - `Context Bundle`：把文件、变更和降级附件累积为持续上下文。
   当 `Context Bundle` 还是空的，视图内会直接给出 `Workspace Files`、`Workspace Search` 和 `Workspace Changes`，把“先去哪里补上下文”变成一跳动作。
+  当 bundle 非空时，页面也会直接解释 `Ask Agent With Context`、`Ask With Last Request` 和 `Start / Stop Bundle Chat` 的区别，避免用户只看到按钮名却还得自己猜效果。
 - `Stop Turn`：停止当前正在运行的 agent 回合。
   如果用户在回合仍运行时又发来一条新消息，bot 会明确说明这条新消息没有发给 agent，避免误以为系统会排队执行。
 - `Cancel / Stop`：主键盘上的常驻快捷入口，对应 `/cancel` 的本地优先语义，便于手机端在长回合中快速止损。
