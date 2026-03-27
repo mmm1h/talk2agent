@@ -898,8 +898,6 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
         BUTTON_HELP,
         BUTTON_NEW_SESSION,
         BUTTON_RETRY_LAST_TURN,
-        BUTTON_SWITCH_AGENT,
-        BUTTON_SWITCH_WORKSPACE,
         BUTTON_WORKSPACE_SEARCH,
         TelegramUiState,
         handle_start,
@@ -945,7 +943,7 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
     )
     assert (
         "Advanced actions live in Bot Status: Session History, Model / Mode, Agent Commands, "
-        "Workspace Files/Changes, and Restart Agent."
+        "Workspace Files/Changes, Restart Agent, and admin-only runtime switches."
         in text
     )
     assert (
@@ -953,14 +951,17 @@ def test_handle_start_replies_with_welcome_and_main_menu_without_starting_sessio
         "/help, and /cancel still work if Telegram hides it."
         in text
     )
-    assert "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime." in text
+    assert (
+        "Admin-only shared-runtime switches live in Bot Status so they stay reachable without "
+        "turning the persistent keyboard into a dangerous control surface."
+        in text
+    )
     keyboard = [[button.text for button in row] for row in update.message.reply_markups[0].keyboard]
     assert keyboard == [
         [BUTTON_NEW_SESSION, BUTTON_BOT_STATUS],
         [BUTTON_RETRY_LAST_TURN, BUTTON_FORK_LAST_TURN],
         [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
         [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
-        [BUTTON_SWITCH_AGENT, BUTTON_SWITCH_WORKSPACE],
     ]
     assert len(update.message.reply_calls) == 1
     assert store.peek_calls == [123]
@@ -1236,7 +1237,7 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
     assert "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn." in text
     assert (
         "Advanced actions live in Bot Status: Session History, Model / Mode, Agent Commands, "
-        "Workspace Files/Changes, and Restart Agent."
+        "Workspace Files/Changes, Restart Agent, and admin-only runtime switches."
         in text
     )
     assert "/start restores the welcome screen and the full keyboard." in text
@@ -1248,7 +1249,11 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
         "/help, and /cancel still work if Telegram hides it."
         in text
     )
-    assert "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime." in text
+    assert (
+        "Admin-only shared-runtime switches live in Bot Status so they stay reachable without "
+        "turning the persistent keyboard into a dangerous control surface."
+        in text
+    )
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1297,12 +1302,17 @@ def test_handle_help_surfaces_resume_snapshot_for_returning_user():
     quick_actions_text = update.message.reply_calls[1]
     assert quick_actions_text.startswith("Quick actions for getting back to work:")
     assert "Run Last Request replays only the saved request text." in quick_actions_text
+    assert (
+        "Start Bundle Chat if you want later plain-text messages to keep carrying that bundle until you stop it."
+        in quick_actions_text
+    )
     quick_actions_markup = update.message.reply_markups[1]
     assert find_inline_button(quick_actions_markup, "Retry Last Turn")
     assert find_inline_button(quick_actions_markup, "Fork Last Turn")
     assert find_inline_button(quick_actions_markup, "Run Last Request")
     assert find_inline_button(quick_actions_markup, "Bundle + Last Request")
     assert find_inline_button(quick_actions_markup, "Ask Agent With Context")
+    assert find_inline_button(quick_actions_markup, "Start Bundle Chat")
     assert find_inline_button(quick_actions_markup, "Open Context Bundle")
     assert find_inline_button(quick_actions_markup, "Open Bot Status")
     assert store.peek_calls == [123]
@@ -1584,6 +1594,7 @@ def test_handle_cancel_disables_bundle_chat_before_falling_back_to_agent():
         in quick_actions_text
     )
     assert find_inline_button(update.message.reply_markups[1], "Ask Agent With Context")
+    assert find_inline_button(update.message.reply_markups[1], "Start Bundle Chat")
     assert find_inline_button(update.message.reply_markups[1], "Open Context Bundle")
     assert find_inline_button(update.message.reply_markups[1], "Open Bot Status")
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is False
@@ -4332,9 +4343,14 @@ def test_last_request_empty_state_surfaces_workspace_recovery_actions():
         "message and uses that bundle."
         in text
     )
+    assert (
+        "Start Bundle Chat keeps this bundle attached to later plain-text messages until you stop it."
+        in text
+    )
     assert find_inline_button(markup, "Retry Last Turn")
     assert find_inline_button(markup, "Fork Last Turn")
     assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Start Bundle Chat")
     assert find_inline_button(markup, "Open Context Bundle")
     assert find_inline_button(markup, "Back to Bot Status")
     labels = [button.text for row in markup.inline_keyboard for button in row]
@@ -10623,6 +10639,61 @@ def test_invalidate_runtime_bound_interactions_clears_aliases_bundle_chat_and_me
     assert ui_state.context_bundle_chat_active(123, "claude", "default") is False
     assert ui_state.pop_media_group_messages(123, "group-1") == ()
     assert task.cancelled()
+
+
+def test_invalidate_session_bound_interactions_for_user_keeps_other_users_state():
+    from talk2agent.bots.telegram_bot import TelegramUiState, _ContextBundleItem
+
+    async def scenario():
+        ui_state = TelegramUiState()
+        ui_state.set_agent_command_aliases(123, {"model": "/model"})
+        ui_state.set_agent_command_aliases(456, {"review": "/review"})
+        ui_state.set_pending_text_action(123, "workspace_search")
+        ui_state.set_pending_text_action(456, "rename_history", session_id="session-2")
+        ui_state.add_context_item(
+            123,
+            "claude",
+            "default",
+            _ContextBundleItem(kind="file", relative_path="notes.txt"),
+        )
+        ui_state.add_context_item(
+            456,
+            "claude",
+            "default",
+            _ContextBundleItem(kind="file", relative_path="plan.md"),
+        )
+        assert ui_state.enable_context_bundle_chat(123, "claude", "default") is True
+        assert ui_state.enable_context_bundle_chat(456, "claude", "default") is True
+        ui_state.add_media_group_message(123, "group-1", FakeIncomingMessage(caption="photo"))
+        ui_state.add_media_group_message(456, "group-2", FakeIncomingMessage(caption="doc"))
+        task_123 = asyncio.create_task(asyncio.sleep(10))
+        task_456 = asyncio.create_task(asyncio.sleep(10))
+        ui_state.replace_media_group_task(123, "group-1", task_123)
+        ui_state.replace_media_group_task(456, "group-2", task_456)
+
+        callback_token_123 = ui_state.create(123, "workspace_page", relative_path="", page=0)
+        callback_token_456 = ui_state.create(456, "workspace_page", relative_path="", page=0)
+        ui_state.invalidate_session_bound_interactions_for_user(123)
+        await asyncio.sleep(0)
+        other_user_cancelled = task_456.cancelled()
+        task_456.cancel()
+        await asyncio.sleep(0)
+        return ui_state, task_123, other_user_cancelled, callback_token_123, callback_token_456
+
+    ui_state, task_123, other_user_cancelled, callback_token_123, callback_token_456 = run(scenario())
+
+    assert ui_state.resolve_agent_command(123, "model") is None
+    assert ui_state.resolve_agent_command(456, "review") == "/review"
+    assert ui_state.get_pending_text_action(123) is None
+    assert ui_state.get_pending_text_action(456) is not None
+    assert ui_state.get(callback_token_123) is None
+    assert ui_state.get(callback_token_456) is not None
+    assert ui_state.context_bundle_chat_active(123, "claude", "default") is True
+    assert ui_state.context_bundle_chat_active(456, "claude", "default") is True
+    assert ui_state.pop_media_group_messages(123, "group-1") == ()
+    assert ui_state.pop_media_group_messages(456, "group-2") != ()
+    assert task_123.cancelled()
+    assert other_user_cancelled is False
 
 
 def test_session_history_delete_refreshes_with_notice():

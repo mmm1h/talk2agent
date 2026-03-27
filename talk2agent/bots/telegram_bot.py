@@ -654,6 +654,26 @@ class TelegramUiState:
         self._media_groups.clear()
         self._ignored_media_groups.clear()
 
+    def _cancel_media_group_tasks_for_user(self, user_id: int) -> None:
+        for key in [item for item in self._media_groups if item[0] == user_id]:
+            buffer = self._media_groups.pop(key, None)
+            if buffer is not None and buffer.task is not None:
+                buffer.task.cancel()
+        for key in [item for item in self._ignored_media_groups if item[0] == user_id]:
+            self._ignored_media_groups.pop(key, None)
+
+    def invalidate_session_bound_interactions_for_user(self, user_id: int) -> None:
+        self._prune()
+        for token in [
+            item_token
+            for item_token, action in self._actions.items()
+            if action.user_id == user_id
+        ]:
+            self._actions.pop(token, None)
+        self._pending_text_actions.pop(user_id, None)
+        self._agent_command_aliases.pop(user_id, None)
+        self._cancel_media_group_tasks_for_user(user_id)
+
     def invalidate_session_bound_interactions(self) -> None:
         self._actions.clear()
         self._pending_text_actions.clear()
@@ -770,8 +790,6 @@ def _main_menu_markup(user_id: int, services) -> ReplyKeyboardMarkup:
         [BUTTON_WORKSPACE_SEARCH, BUTTON_CONTEXT_BUNDLE],
         [BUTTON_HELP, BUTTON_CANCEL_OR_STOP],
     ]
-    if user_id == services.admin_user_id:
-        rows.append([BUTTON_SWITCH_AGENT, BUTTON_SWITCH_WORKSPACE])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -913,7 +931,7 @@ async def _clear_session_bound_ui_after_session_loss(
     ui_state: TelegramUiState,
     user_id: int,
 ) -> None:
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_discovered_agent_commands_for_user(
         application,
         services,
@@ -1924,6 +1942,30 @@ def _workspace_recovery_actions(
             lines.append(
                 "Bundle chat is already on, so a fresh plain text message would include that bundle automatically."
             )
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Stop Bundle Chat",
+                        "runtime_status_stop_bundle_chat",
+                    )
+                ]
+            )
+        else:
+            lines.append(
+                "Start Bundle Chat keeps this bundle attached to later plain-text messages until you stop it."
+            )
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Start Bundle Chat",
+                        "runtime_status_start_bundle_chat",
+                    )
+                ]
+            )
         bundle_buttons = [
             _callback_button(
                 ui_state,
@@ -2080,7 +2122,8 @@ def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
         "Context prep row: Workspace Search and Context Bundle stay one tap away before you ask.",
         (
             "Advanced actions live in Bot Status: Session History, Model / Mode, Agent "
-            "Commands, Workspace Files/Changes, and Restart Agent."
+            "Commands, Workspace Files/Changes, Restart Agent, and admin-only runtime "
+            "switches."
         ),
         (
             "Recovery row: Help and Cancel / Stop stay on the keyboard, and /start, /status, "
@@ -2089,7 +2132,8 @@ def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
     ]
     if is_admin:
         lines.append(
-            "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime."
+            "Admin-only shared-runtime switches live in Bot Status so they stay reachable "
+            "without turning the persistent keyboard into a dangerous control surface."
         )
     return lines
 
@@ -2480,6 +2524,11 @@ def _entrypoint_quick_actions_view(
                 "Bundle chat is already on, so the next plain text message will include that bundle automatically."
             )
             rows.append((("Stop Bundle Chat", "runtime_status_stop_bundle_chat", {}),))
+        else:
+            lines.append(
+                "Start Bundle Chat if you want later plain-text messages to keep carrying that bundle until you stop it."
+            )
+            rows.append((("Start Bundle Chat", "runtime_status_start_bundle_chat", {}),))
 
     lines.append(
         "Open Bot Status if you need history, files, changes, model / mode, or the full control center."
@@ -8661,7 +8710,7 @@ async def _start_new_session(update: Update, services, ui_state: TelegramUiState
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(update.effective_user.id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -8731,7 +8780,7 @@ async def _start_new_session_from_callback(
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -8796,7 +8845,7 @@ async def _restart_agent(update: Update, services, ui_state: TelegramUiState, *,
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -8866,7 +8915,7 @@ async def _restart_agent_from_callback(
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -8940,7 +8989,7 @@ async def _fork_live_session_from_callback(
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -10279,7 +10328,7 @@ async def _fork_last_turn(
         await _reply_session_creation_failed(update, services)
         return
 
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(update.effective_user.id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -10586,7 +10635,7 @@ async def _switch_history_session_from_callback(
             ),
         )
         return
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -10793,7 +10842,7 @@ async def _fork_history_session_from_callback(
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -10993,7 +11042,7 @@ async def _switch_provider_session_from_callback(
             )
         return
 
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -11217,7 +11266,7 @@ async def _fork_provider_session_from_callback(
         )
     except Exception:
         pass
-    ui_state.invalidate_session_bound_interactions()
+    ui_state.invalidate_session_bound_interactions_for_user(user_id)
     await _sync_agent_commands_for_session(
         application,
         ui_state,
@@ -13540,7 +13589,7 @@ async def _dispatch_callback_action(
             and history_state.active_session_id != payload["session_id"]
         )
         if deleted_active_session:
-            ui_state.invalidate_session_bound_interactions()
+            ui_state.invalidate_session_bound_interactions_for_user(user_id)
             await _sync_discovered_agent_commands_for_user(
                 application,
                 services,
@@ -15674,7 +15723,9 @@ def _build_runtime_status_view(
     if workspace_reuse_summary is not None:
         lines.append(workspace_reuse_summary)
     if is_admin:
-        lines.append("Admin switches stay on the main keyboard.")
+        lines.append(
+            "Admin-only shared-runtime switches stay here instead of the persistent keyboard."
+        )
 
     buttons = []
     primary_buttons = []
@@ -15787,6 +15838,25 @@ def _build_runtime_status_view(
             )
         )
     buttons.append(status_nav_row)
+    if is_admin:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Switch Agent",
+                    "runtime_status_control",
+                    target="switch_agent",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Switch Workspace",
+                    "runtime_status_control",
+                    target="switch_workspace",
+                ),
+            ]
+        )
     buttons.extend(
         _status_recent_session_quick_buttons(
             ui_state,
@@ -15946,25 +16016,6 @@ def _build_runtime_status_view(
                     "Last Request",
                     "runtime_status_open",
                     target="last_request",
-                ),
-            ]
-        )
-    if is_admin:
-        buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Switch Agent",
-                    "runtime_status_control",
-                    target="switch_agent",
-                ),
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Switch Workspace",
-                    "runtime_status_control",
-                    target="switch_workspace",
                 ),
             ]
         )

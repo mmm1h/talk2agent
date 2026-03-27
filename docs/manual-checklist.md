@@ -12,9 +12,9 @@
 ## 启动与全局运行时
 
 1. 发送 `/start`，确认会返回欢迎页和主键盘，且不会隐式创建新 session。
-   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的 `Quick paths` 引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒；如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认欢迎页会额外给出 `Resume snapshot`，直接解释哪些内容可以继续复用。若当前还有可恢复内容，或 bot 正卡在运行中 turn / 待输入 / 待发送附件组，再确认 `/start` 会额外补一张 `Quick actions` 卡片，并把对应恢复按钮直接挂出来，同时始终保留 `Open Bot Status` 作为完整控制台回退入口。
+   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent`，以及管理员的 `Switch Agent` / `Switch Workspace` 都不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的 `Quick paths` 引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒；如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认欢迎页会额外给出 `Resume snapshot`，直接解释哪些内容可以继续复用。若当前还有可恢复内容，或 bot 正卡在运行中 turn / 待输入 / 待发送附件组，再确认 `/start` 会额外补一张 `Quick actions` 卡片，并把对应恢复按钮直接挂出来，同时始终保留 `Open Bot Status` 作为完整控制台回退入口；如果当前还留有 `Context Bundle` 且 `Bundle Chat` 尚未开启，也确认这张卡片会直接给出 `Start Bundle Chat`。
 2. 发送 `/help`，确认会返回快速使用指南和恢复入口，且不会隐式创建新 session。
-   同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用；帮助页正文还应补上 `Common tasks` 与 `Core concepts`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Context Bundle`、`Bundle Chat` 这些术语解释清楚；如果当前 workspace 仍有可恢复内容，再确认帮助页也会显示 `Resume snapshot`，并额外补一张 `Quick actions` 卡片，把最相关的恢复按钮直接挂在帮助页下方，同时保留 `Open Bot Status` 这个完整控制台入口。
+   同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用；帮助页正文还应补上 `Common tasks` 与 `Core concepts`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Context Bundle`、`Bundle Chat` 这些术语解释清楚；如果当前 workspace 仍有可恢复内容，再确认帮助页也会显示 `Resume snapshot`，并额外补一张 `Quick actions` 卡片，把最相关的恢复按钮直接挂在帮助页下方，同时保留 `Open Bot Status` 这个完整控制台入口；如果当前只差一步就能继续使用已有 `Context Bundle`，也确认这里会直接给出 `Start Bundle Chat`。
 3. 发送 `/status`，确认会直接打开 `Bot Status`，且不会隐式创建新 session；在主键盘被 Telegram 折叠时，这条命令仍然可作为只读恢复入口。
 4. 在待输入、运行中 turn 和 Bundle Chat 三种状态下分别发送 `/cancel`，并额外测试一次主键盘 `Cancel / Stop`，确认都会按优先级执行本地取消，而不是误发给 agent。
    额外验证一次 `media_group` 还在收集窗口内时立刻 `/cancel`，确认附件组会被直接丢弃，而不是延迟几百毫秒后仍然发给 agent。
@@ -32,12 +32,12 @@
 10. 执行 `Switch Agent`，确认切换前有预检，切换菜单会明确提示旧按钮 / 待输入会被清理、`Context Bundle` 不会跟随切换，而同 workspace 下的 `Last Turn` / `Last Request` 仍可继续复用；切换后旧 UI 动作立即失效。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
    再确认菜单会显示 `Available agents`，但第一层只负责列出目标；点进单个 provider 后，详情页才会集中展示能力摘要、`Switch to ...`、`Retry on ...`、`Fork on ...`，避免管理员在列表页误触就立刻切换。
-   从主键盘直接进入这条流时，再确认切换成功或失败后仍会停留在当前目标详情页，并保留 `Switch to ...` 或 `Back to Switch Agent` 这类下一步按钮；如果入口来自 `Bot Status`，则应回到状态页并保留同样的 notice。
+   从 `Bot Status` 进入这条流时，再确认切换成功或失败后仍会停留在当前目标详情页，并保留 `Switch to ...` 或 `Back to Switch Agent` 这类下一步按钮；如果入口来自状态页内的其他恢复动作，则应回到状态页并保留同样的 notice。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 agent。
 11. 执行 `Switch Workspace`，确认只显示白名单 workspace，并且切换跨重启持久化；切换菜单和成功回显都要明确提示 workspace 作用域内的 `Context Bundle`、`Last Request`、`Last Turn` 不会跟到新 workspace。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
    再确认菜单会显示 `Configured workspaces`，并且点进单个 workspace 后要先看到目标详情与影响说明，再通过 `Switch to ...` 真正确认切换，避免管理员在多 workspace 环境下误切。
-   从主键盘直接进入这条流时，再确认切换成功或失败后仍会停留在当前目标详情页，并保留 `Switch to ...` 或 `Back to Switch Workspace` 这类下一步按钮；如果入口来自 `Bot Status`，则应回到状态页并保留同样的 notice。
+   从 `Bot Status` 进入这条流时，再确认切换成功或失败后仍会停留在当前目标详情页，并保留 `Switch to ...` 或 `Back to Switch Workspace` 这类下一步按钮；如果入口来自状态页内的其他恢复动作，则应回到状态页并保留同样的 notice。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 workspace。
 12. 使用一个未授权 Telegram 账号访问 bot，确认提示会明确说明需要联系操作者开通访问。
 
