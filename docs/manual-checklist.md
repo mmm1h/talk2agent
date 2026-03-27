@@ -26,6 +26,8 @@
 9. 点击 `Bot Status`，确认它是只读入口，不会隐式创建新 session。
    同时确认顶部会前置当前状态下的主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`。
    再确认正文被分成 `Current runtime`、`Resume and memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 这类可扫读分段，而不是一整块无层次长文本。
+   再确认 `Controls` 段会补一组 `Action guide`，把 `Refresh / Session History / Provider Sessions`、`New Session / Restart Agent / Fork Session`、`Model / Mode / Agent Commands`、`Workspace Files / Search / Changes / Context Bundle` 这些成组入口先解释清楚，而不是只留按钮名。
+   同时确认状态页里会动态出现的密集 inline controls 也按双列拆开；像 `Refresh` / `Session History` / `Provider Sessions` 或一组恢复动作都不应再被挤进单行。
    如果当前 turn 仍在运行，再确认状态页会显示 `Turn elapsed`；如果当前正在等待纯文本输入，再确认状态页会显示 `Next plain text`，让用户知道下一条该发什么。
    如果当前 workspace 已缓存 `Last Request`，再确认状态页会显示它的来源摘要，并提供 `Run Last Request`；这个入口应只重跑请求文本，而不是隐式恢复旧附件或旧上下文。
    如果该 `Last Request` 或 `Last Turn` 最初记录在另一个 Provider 上，再确认状态页会明确提示这次重放将落到当前 Provider，而不是让用户自己猜。
@@ -50,12 +52,14 @@
 3. 打开 `Session History`，确认可以浏览、切换、分叉、重命名和删除本地历史会话。
    额外在本地历史为空时打开一次，确认空状态会直接给出 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，并补一行 `Recommended next step`，而不是只显示一句“没有历史”。
    如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认这个空状态会继续先补一行更贴近当前可复用内容的 `Recommended next step`，再补上 `Recovery options`，并直接给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 或 `Open Context Bundle`。
-   再确认列表和详情都会明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。
+   再确认列表和详情都会先补一行 `Recommended next step`，并明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。
+   同时确认 `Run` / `Open` / `Rename` / `Delete` 以及 `...+Retry` / `Fork` 这些密集动作不会再被挤进单行，而是按双列拆开，保证手机端仍然可点可读。
    如果历史记录超过一页，再确认页首会显示 `Local sessions`、`Showing` 和 `Page`，让用户知道总共有多少条、当前页覆盖哪一段，而不是只剩 `Prev` / `Next`。
 4. 如果 Provider 支持原生 session 浏览，打开 `Provider Sessions`，确认可以接管或分叉 provider 侧 session。
    再分别制造“当前 agent 不支持 provider session browsing”和“当前页暂时没有任何 provider session”两种空状态，确认视图会解释原因，并保留 `Refresh` 或 `Open Bot Status` 恢复入口，同时补一行 `Recommended next step`，而不是只留一句空文案。
    如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认这些 provider-session 空状态也会继续先补一行更贴近当前可复用内容的 `Recommended next step`，再补上 `Recovery options`，让管理员能直接继续工作，而不用先退回 `Bot Status`。
-   同时确认列表和详情都会明确解释 `Run` 是接管 provider session、`Fork` 是基于它开新分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
+   同时确认列表和详情都会先补一行 `Recommended next step`，并明确解释 `Run` 是接管 provider session、`Fork` 是基于它开新分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
+   再确认这些高密度动作同样按双列拆开，而不是把 `Run+Retry`、`Fork`、`Fork+Retry` 全塞进一排。
    如果 provider session 列表存在多页，再确认页首会显示当前页加载数量和 `Cursor page`，避免管理员翻页后失去方向感。
 5. 验证 `Retry Last Turn` 和 `Fork Last Turn` 会复用上一轮保存的 replay payload。
 6. 对一次普通成功回合，确认最终结果消息本身附带 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
@@ -78,8 +82,11 @@
 3. 打开 `Workspace Changes`，确认可以查看当前 Git 变更和 diff 预览。
    再分别在“当前 workspace 不是 Git 仓库”和“Git 仓库但工作树干净”两种空状态下打开，确认视图会直接给出 `Workspace Files`、`Workspace Search` 和状态页恢复入口。
    再分别检查 `Workspace Files`、`Workspace Search`、`Workspace Changes` 以及单文件 / 单变更预览，确认页面正文会直接解释 `Ask Agent ...`、`Ask With Last Request`、`Start Bundle Chat ...`、`Add ... to Context` 或 `Remove From Context` 的差别，而不是只堆动作按钮。
+   当当前 workspace 已缓存 `Last Request` 时，再确认单文件 / 单变更预览页会先补一行 `Recommended next step`，并把 `Ask With Last Request` 放到首行按钮，而不是埋在第二排。
 4. 从文件、搜索结果或变更中加入 `Context Bundle`，确认 bundle 可浏览、移除、清空和持续附着。
+   再分别打开非空的 `Workspace Files`、`Workspace Search`、`Workspace Changes` 和 `Context Bundle`，确认页首都会补一行 `Recommended next step`，把“先打开单项检查”和“已经可以直接问 agent / 加入上下文”明确区分开，而不是让用户自己从动作说明里猜第一步。
    当 bundle 非空时，再确认页面会直接解释 `Ask Agent With Context`、`Ask With Last Request` 和 `Start / Stop Bundle Chat` 各自会做什么，而不是只显示动作按钮。
+   当 bundle 非空且当前 workspace 还留有 `Last Request` 时，再确认首行按钮会优先放 `Ask With Last Request`，把“直接复用已保存文本”放在需要继续输入新文本的动作前面。
    对 `Workspace Files`、`Workspace Search`、`Workspace Changes` 和 `Context Bundle` 这些列表页，再分别制造一次超过一页的场景，确认页首会显示 `Entries` / `Matches` / `Changes` / `Items`，以及 `Showing` 和 `Page`，而不是只留翻页按钮。
 5. 在 `Context Bundle` 为空、或点击 `Ask With Last Request` 但当前 workspace 没有上一条请求时，确认提示会明确指向“先加上下文”或“先发送一条新请求”，而不是只显示空泛短语。
    其中 `Context Bundle` 为空时，确认视图本身也会提供 `Workspace Files`、`Workspace Search` 和 `Workspace Changes` 的直接入口。
@@ -90,7 +97,8 @@
    再制造一个“当前没有任何可发现命令”的场景，确认空状态会解释这是“仍在发现中”或“agent 不暴露命令”，并保留 `Refresh` 与状态页恢复入口。
    如果命令列表超过一页，再确认页首会显示 `Commands`、`Showing` 和 `Page`，让用户知道当前只看到哪一段命令。
 2. 打开 `Model / Mode`，确认可以查看并切换当前 live session 暴露的选项。
-   同时确认页面会先显示当前 setup，并明确说明这次切换作用于当前 live session；主列表还应告诉用户可以直接切换，或先打开某个 choice 查看详情再决定。
+   同时确认页面会先显示当前 setup、补一行 `Recommended next step`，并明确说明这次切换作用于当前 live session；主列表还应告诉用户可以直接切换，或先打开某个 choice 查看详情再决定。
+   再确认主列表会用 `Action guide` 解释 `Model: ...` / `Mode: ...`、`...+Retry` 和 `Open Model N` / `Open Mode N` 的差别，而不是只把按钮名称堆出来。
    如果当前 session 只暴露 `Model` 或只暴露 `Mode`，再确认页面会直接说明另一半当前不可用，而不是静默少一半按钮。
    如果当前 session 两者都不暴露，再确认 bot 会把这件事解释成能力空状态，并保留 `Open Bot Status` 或返回按钮，而不是留下一张近乎空白的页面。
    再打开一个 choice 详情，确认页面会明确说明 `Use ...` 与 `Use ... + Retry` 的差别，而不是只给出字段列表。
@@ -101,7 +109,12 @@
    再从 `Last Request` 详情点击一次 `Run Last Request`，确认 bot 会执行该文本并回到状态页，而不是把用户困在只读详情页里。
    如果当前 workspace 还有上一轮可复用 turn，再确认 `Last Request` 详情会同时提供 `Retry Last Turn` / `Fork Last Turn`，把“重跑文本”和“恢复整轮上下文”区分清楚。
    如果 `Last Request` 或 `Last Turn` 记录自另一个 Provider，再确认详情页会直接写明“Recorded provider` 与 `Current provider` 的差异，以及当前重放到底会发往哪里”，避免跨 runtime 误会。
-   同时确认 `Last Turn` 详情会额外解释 `Retry Last Turn` 是在当前 live session 里重放整轮 payload，而 `Fork Last Turn` 会先开新 session 再重放。
+   同时确认 `Last Request` / `Last Turn` 详情页都会先补一行 `Recommended next step`，并且 `Last Turn` 详情会额外解释 `Retry Last Turn` 是在当前 live session 里重放整轮 payload，而 `Fork Last Turn` 会先开新 session 再重放。
+   在“当前仍有 live session，且 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`”的场景下，再打开 `Session Info` 和 `Usage`，确认它们同样会补上 `Recommended next step` 与 `Recovery options`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 或 `Open Context Bundle` 直接留在页内，而不是逼用户先退回 `Bot Status`。
+   同时确认 `Session Info` 的辅助入口会拆成多行，而不是把 `Last Request`、`Last Turn`、`Agent Commands`、`Agent Plan`、`Tool Activity` 挤在单行按钮里。
+   再打开 `Workspace Runtime` 和单个 MCP server 详情，确认这两页同样会先补一行 `Recommended next step`，明确当前更适合继续打开 server 看 transport / key 名，还是直接返回状态页。
+   再打开非空的 `Agent Commands`、`Agent Plan`、`Tool Activity`，确认页首也会补一行 `Recommended next step`，把“直接执行 / 打开详情 / 刷新等待更新”的首选路径写清楚，而不是让用户自己从按钮名里猜。
+   同时确认 `Agent Commands` 会直接解释 `Run N`、`Args N`、`Open N` 的差别，`Agent Plan` / `Tool Activity` 详情页也会明确提示当前更适合 `Refresh`、回到列表继续比对，还是先打开相关文件 / diff。
    如果 `Last Turn`、`Agent Plan` 或 `Tool Activity` 超过一页，再确认页首会显示总数、`Showing` 和 `Page`，避免只读排查长列表时失去位置感。
    额外在“当前没有 live session，但 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`”的场景下，再打开 `Session Info`、`Usage` 或无命令的 `Agent Commands`，确认页面会补上 `Recovery options`，并直接给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context` 或 `Bundle + Last Request`，而不是只剩返回按钮。
    再额外制造一次“刚刚还能点开 `Last Request` / `Last Turn` / `Agent Plan` / `Tool Activity`，但实际打开时数据已经失效或暂时为空”的场景，确认页面不会只剩一句 `No ...`；它仍会给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 或 `Refresh` 这类下一步动作，而不是把用户困在空页里。

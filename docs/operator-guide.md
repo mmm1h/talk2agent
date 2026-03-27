@@ -51,10 +51,13 @@
 - `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
 - `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`，减少手机端来回扫按钮。
 - `Bot Status` 的正文会按 `Current runtime`、`Resume and memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 分段，避免长消息退化成一整屏无层次的状态 dump。
+- `Bot Status` 的 `Controls` 段还会补一组 `Action guide`，把 `Refresh / Session History / Provider Sessions`、`New Session / Restart Agent / Fork Session`、`Model / Mode / Agent Commands`、`Workspace Files / Search / Changes / Context Bundle` 这些成组入口先解释清楚，而不是只留一屏按钮让用户自己猜。
+- `Bot Status` 里会在复杂恢复或管理员场景下出现的动态 inline controls 也会按双列拆开，避免 `Refresh`、`Session History`、`Provider Sessions` 或一组恢复动作在手机端被挤进同一排。
 - 当当前 turn 仍在运行时，`Bot Status` 会额外显示 `Turn elapsed`；当 bot 正在等待下一条纯文本时，也会直接显示 `Next plain text` 提示，减少用户猜“下一条到底该发什么”。
 - 当用户的消息被当前运行中 turn、待输入动作或待发送附件组挡住时，bot 不只会解释原因，还会直接附上 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Open Bot Status` 这类恢复按钮，避免用户还得记 slash 命令。
 - `Last Request` 不再只是只读缓存：`Bot Status` 会额外显示它来自 plain text / bundle / workspace request 等哪个来源，并提供 `Run Last Request`，用于只重跑请求文本本身；如果你需要原附件或原上下文，则继续使用 `Retry Last Turn`。
   在 `Last Request` 详情页里，如果当前 workspace 还有上一轮可复用 turn，页面也会直接给出 `Retry Last Turn` / `Fork Last Turn`，把“只重跑文本”和“恢复整轮上下文”明确分开。
+  这类 `Last Request` / `Last Turn` 详情页现在也会先补一行 `Recommended next step`，把“先重跑文本”还是“先重放整轮 payload”直接放到字段列表前面，避免用户读完一整页后才知道首选动作。
   如果这条缓存请求最初记录在另一个 Provider 上，状态页和详情页还会明确提示“当前会重放到哪个 Provider”，避免管理员切换共享 runtime 后用户误以为还是在旧 agent 上执行。
 - `Bot Status` 导航失败：如果某个只读视图临时打开失败，bot 会保留 `Try Again` 和相应的返回按钮，避免把用户丢出当前流程。
 - 关键失败态：包括通用请求失败、session 拉起/切换/分叉失败、Provider Session 接管失败，以及 Model / Mode 更新失败，都会优先返回可操作的恢复建议，而不是直接暴露内部错误短语。
@@ -73,10 +76,13 @@
   当这些动作会替换当前 live session 时，如果还有待发送附件组，bot 也会先丢弃并明确告知，而不是让旧上传跨 session 漏过去。
   成功回显会直接说明同一 workspace 下哪些内容仍可复用；如果 `Bundle Chat` 仍处于开启状态，也会明确提醒“下一条纯文本仍会自动带上当前 bundle”，避免用户把“新 session”误解成“所有上下文都被清空”。
   从 `Session History` 里执行 `Run Session` / `Run+Retry` / `Fork+Retry` 时，成功和失败都会回到历史列表并保留当前上下文；如果上一轮已失效，也会明确提示先发新请求，而不是误报“已经重试成功”。
-  `Session History` 列表和详情都会先解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
+  `Session History` 列表和详情都会先补一行 `Recommended next step`，再解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
+  这些历史页里原本容易挤在一排的 `Run` / `Open` / `Rename` / `Delete` 以及 `...+Retry` / `Fork` 动作也会拆成双列按钮，减少手机端误触和读不清按钮的问题。
   如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；除了 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，它还会补一行 `Recommended next step`。
   如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，同一个空状态里还会继续补上 `Recovery options`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这些真正能继续工作的入口直接挂出来。
 - `Session Info` / `Usage` / `Agent Commands` 的无 session 空状态：如果当前 live session 已消失，但当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些页面不会只剩“没有会话”；它们会先补一行 `Recommended next step`，再补上 `Recovery options`，并给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这类直达按钮。
+- `Session Info` / `Usage` 的有 session 只读页也不会再变成终点：如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这两页同样会补上 `Recommended next step` 和 `Recovery options`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 和 `Open Context Bundle` 直接留在页内，而不是逼用户先退回 `Bot Status`。
+  `Session Info` 里的辅助入口也会按多行排开，而不是把 `Last Request`、`Last Turn`、`Agent Commands`、`Agent Plan`、`Tool Activity` 一次挤在同一排按钮里。
 - `Last Request` / `Last Turn` / `Agent Plan` / `Tool Activity` 的空状态也不再是死路页：如果数据刚失效、当前还留有其他可复用上下文，页面会先补一行 `Recommended next step`，再补上对应的恢复动作；其中 `Agent Plan` / `Tool Activity` 还会额外保留 `Refresh`，方便用户在同一页等待后续更新，而不是被迫先退回状态页。
 - 分页列表可预期：`Session History`、`Provider Sessions`、`Agent Commands`、`Workspace Files` / `Search` / `Changes`、`Context Bundle` 在超过一页时都会显示总数、当前页范围和页码，减少手机端只看到 `Prev` / `Next` 却不知道自己翻到哪里的情况。
 - `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，主键盘入口不会只回一句死提示，而会直接落到带 notice 的 `Bot Status`，把 `Run Last Request`、`Session History`、`New Session` 等恢复入口一起摆出来；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
@@ -85,28 +91,37 @@
   如果当前 workspace 还保留 `Context Bundle`，结果消息还会直接补上 `Start / Stop Bundle Chat` 和 `Open Context Bundle`，把“继续带着上下文聊”与“先停掉这个持续模式”都放在答案旁边，而不用先跳回 `Bot Status`。
   这些按钮会从结果继续发起下一步，而不会把刚收到的答案编辑掉。
 - `Provider Sessions`：管理员浏览并接管 Provider 原生保存的 session。
-  列表和详情都会先解释 `Run` 是把当前 bot 重新附着到 provider session、`Fork` 是基于它再开一条 live 分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
+  列表和详情都会先补一行 `Recommended next step`，再解释 `Run` 是把当前 bot 重新附着到 provider session、`Fork` 是基于它再开一条 live 分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
+  这些 provider-session 视图里的高密度动作也会拆成双列按钮，避免手机端把 `Run+Retry`、`Fork`、`Fork+Retry` 全挤在同一排里。
   其中 `Run+Retry` / `Fork+Retry` 也会在原列表内完成成功/失败回显，避免管理员在 provider 会话列表和结果页之间来回跳转。
   如果当前 agent 不支持 provider-side session browsing，或当前页暂时没有任何 provider session，bot 会解释这是 provider 能力或当前状态所致，并补一行 `Recommended next step`，而不是只留一句空文案。
   如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些 provider-session 空状态也会继续补上 `Recovery options`，允许管理员直接从当前 workspace 恢复工作，而不用先退回别的页面。
 - `Agent Commands` / `Model / Mode`：使用当前 live session 暴露的能力。
-  `Model / Mode` 不再只是按钮列表；页面会先展示当前 setup、说明这是对当前 live session 的原地更新，再列出可选项和“先看详情还是直接切换”的路径，减少手机端误切。
+  `Model / Mode` 不再只是按钮列表；页面会先展示当前 setup、补一行 `Recommended next step`、说明这是对当前 live session 的原地更新，再列出可选项和“先看详情还是直接切换”的路径，减少手机端误切。
+  主列表还会用 `Action guide` 直接解释 `Model: ...` / `Mode: ...`、`...+Retry` 和 `Open Model N` / `Open Mode N` 的差别，避免手机端只看到一堆近似按钮却不知道哪类动作会立即重跑上一轮。
   如果当前 session 只暴露 `Model` 或只暴露 `Mode`，页面会直接说明另一半当前不可用，而不是让用户误以为按钮加载失败。
   如果当前 session 两者都不暴露，bot 也会把这件事明确解释成能力空状态，并保留 `Open Bot Status` 恢复入口，而不是落成近乎空白的页面。
   进入单个 choice 详情后，bot 会明确说明这次切换的作用范围；如果存在上一轮请求，还会直接解释 `Use ... + Retry` 会在切换后立刻重跑上一轮。
   如果 live session 已失效，bot 会提示直接发送文本或附件来重新开始，并保留 `Reopen Model / Mode` 或返回状态页的恢复入口。
   如果入口来自 `Bot Status`，其中 `...+Retry` 在重放准备失败或执行失败时也会回到状态页并明确提示失败原因，而不是误报已经重放成功。
   如果暂时没有发现任何 agent commands，bot 会把这件事解释成“可能还在发现中，或当前 agent 根本不暴露命令”，并保留 `Refresh` 与状态页恢复入口。
+  `Workspace Runtime` 和单个 MCP server 详情页也会先补一行 `Recommended next step`，明确当前更适合继续打开 server 看 transport / key 名，还是直接返回状态页，不再像纯工程诊断页那样只堆字段。
 - `Workspace Files` / `Workspace Search` / `Workspace Changes`：围绕当前 workspace 做只读浏览和检查。
   如果进入的是空目录，`Workspace Files` 不会把用户留在死路里；视图会直接保留 `Workspace Search` 和状态页恢复入口。
   取消 `Workspace Search` 的待输入后，消息会保留 `Search Again` 和 `Open Bot Status` 恢复入口。
   对 `Workspace Search` 无结果、`Workspace Changes` 无 Git 仓库或工作树干净这类空结果，bot 也会直接给出 `Search Again`、`Workspace Files`、`Workspace Search` 或状态页入口，而不是只留一个终点文案。
+  对非空的 `Workspace Files`、`Workspace Search` 和 `Workspace Changes` 列表页，正文顶部也会先补一行 `Recommended next step`，把“先打开单项检查”与“已经可以直接问 agent / 加入 Context Bundle”区分开，减少手机端先读完整段动作说明才知道第一步。
+  单文件 / 单变更预览页现在也会先补一行 `Recommended next step`，并在当前 workspace 已缓存 `Last Request` 时，把 `Ask With Last Request` 提前到首行按钮，让“直接复用上一条请求”不再埋在第二排按钮里。
   这些列表页和单文件 / 单变更预览也会直接解释 `Ask Agent ...`、`Ask With Last Request`、`Start Bundle Chat ...`、`Add ... to Context` 或 `Remove From Context` 的差别，避免用户在手机端只看到动作名却还得自己猜影响范围。
   当 bot 正在等待纯文本时，如果用户误发了附件、sticker 等非文本消息，提示会点名当前等待的动作，例如 `Workspace Search` 或 `Rename session title`，并明确说明这条误发消息没有被转给 agent，避免只看到笼统的“等待输入”。
 - `Last Turn` / `Agent Plan` / `Tool Activity`：这些只读检查视图如果超过一页，也会显示总数、`Showing` 和 `Page`，避免排查长 payload、长计划或多条工具活动时只剩翻页按钮却不知道自己看到哪一段。
+  `Agent Commands`、`Agent Plan`、`Tool Activity` 的非空视图也会先补一行 `Recommended next step`，把“先直接执行 / 打开详情 / 刷新等待更新”的首选路径写在列表顶部，而不是让用户自己从按钮名里猜。
+  其中 `Agent Commands` 列表还会直接解释 `Run N`、`Args N`、`Open N` 的差别；`Agent Plan` / `Tool Activity` 详情页也会明确提示当前更适合 `Refresh`、回到列表继续比对，还是先打开相关文件 / diff。
 - 空上下文与缺失 last request：`Context Bundle` 为空时，bot 会明确提示先从 Files/Search/Changes 加内容；`Ask With Last Request` 这类快捷动作在缺少上一条请求时，也会提示先发送一条新请求。
 - `Context Bundle`：把文件、变更和降级附件累积为持续上下文。
   当 `Context Bundle` 还是空的，视图内会直接给出 `Workspace Files`、`Workspace Search` 和 `Workspace Changes`，把“先去哪里补上下文”变成一跳动作。
+  当 bundle 非空时，页首也会先补一行 `Recommended next step`，明确当前更适合直接 `Ask Agent With Context`、`Ask With Last Request`，还是回到聊天里继续用 `Bundle Chat`，避免用户先读完整个列表才知道首选路径。
+  当 bundle 非空且当前 workspace 还留有 `Last Request` 时，首行按钮也会优先放 `Ask With Last Request`，把“一键复用已保存文本”放到比“等待下一条新文本”更靠前的位置。
   当 bundle 非空时，页面也会直接解释 `Ask Agent With Context`、`Ask With Last Request` 和 `Start / Stop Bundle Chat` 的区别，避免用户只看到按钮名却还得自己猜效果。
 - `Stop Turn`：停止当前正在运行的 agent 回合。
   如果用户在回合仍运行时又发来一条新消息，bot 会明确说明这条新消息没有发给 agent，避免误以为系统会排队执行。

@@ -1380,6 +1380,12 @@ def test_handle_status_opens_runtime_status_without_starting_session():
         "model / mode, agent commands, and workspace actions."
         in text
     )
+    assert "Action guide:" in text
+    assert (
+        "- Refresh, Session History, and Provider Sessions let you refresh this snapshot or "
+        "open saved sessions when you want to resume existing work."
+        in text
+    )
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -2987,10 +2993,26 @@ def test_bot_status_shows_runtime_summary_and_shortcuts():
     assert "Bundle preview:" in text
     assert "1. [file] notes.txt" in text
     assert "Agent commands cached: unknown until a live session starts." in text
+    assert "Action guide:" in text
+    assert (
+        "- Cancel Pending Input clears the waiting plain-text action before you choose another path."
+        in text
+    )
+    assert (
+        "- Refresh, Session History, and Provider Sessions let you refresh this snapshot or "
+        "open saved sessions when you want to resume existing work."
+        in text
+    )
+    assert (
+        "- Switch Agent and Switch Workspace change the shared runtime for every Telegram user, "
+        "so treat them as global admin controls."
+        in text
+    )
     assert services.discover_agent_commands_calls == []
     assert store.get_or_create_calls == []
 
     markup = update.message.reply_markups[0]
+    assert max(len(row) for row in markup.inline_keyboard) <= 2
     assert find_inline_button(markup, "Refresh")
     assert find_inline_button(markup, "Session History")
     assert find_inline_button(markup, "Provider Sessions")
@@ -3981,11 +4003,17 @@ def test_bot_status_can_open_session_info_and_back_to_status():
     assert "Cached commands: 1" in info_text
     assert "Cached plan items: 1" in info_text
     assert "Cached tool activities: 1" in info_text
+    assert (
+        "Recommended next step: send text or an attachment from chat to keep working, or use "
+        "Usage / Workspace Runtime below if you want more runtime detail first."
+        in info_text
+    )
     assert find_inline_button(info_markup, "Usage")
     assert find_inline_button(info_markup, "Workspace Runtime")
     assert find_inline_button(info_markup, "Agent Commands")
     assert find_inline_button(info_markup, "Agent Plan")
     assert find_inline_button(info_markup, "Tool Activity")
+    assert max(len(row) for row in info_markup.inline_keyboard) <= 2
 
     back_button = find_inline_button(info_markup, "Back to Bot Status")
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=callback_message)
@@ -4037,6 +4065,13 @@ def test_bot_status_can_open_usage_and_back_to_status():
     assert "Remaining: 3584" in usage_text
     assert "Utilization: 12.5%" in usage_text
     assert "Cost: 0.42 USD" in usage_text
+    assert (
+        "Recommended next step: keep chatting if you just needed a usage snapshot, or open "
+        "Session Info if you want the wider runtime snapshot."
+        in usage_text
+    )
+    assert find_inline_button(usage_markup, "Refresh")
+    assert find_inline_button(usage_markup, "Session Info")
 
     back_button = find_inline_button(usage_markup, "Back to Bot Status")
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=callback_message)
@@ -4103,13 +4138,94 @@ def test_bot_status_usage_without_live_session_surfaces_recovery_actions():
     assert "No live session. A session will start on the first request." in usage_text
     assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in usage_text
     assert "Recovery options:" in usage_text
-    assert "Run Last Request can start a live session again from the saved text." in usage_text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in usage_text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in usage_text
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
         "message, and Bundle + Last Request reuses the saved text with that bundle."
         in usage_text
     )
+    assert find_inline_button(usage_markup, "Run Last Request")
+    assert find_inline_button(usage_markup, "Retry Last Turn")
+    assert find_inline_button(usage_markup, "Fork Last Turn")
+    assert find_inline_button(usage_markup, "Ask Agent With Context")
+    assert find_inline_button(usage_markup, "Bundle + Last Request")
+    assert find_inline_button(usage_markup, "Open Context Bundle")
+    assert find_inline_button(usage_markup, "Back to Bot Status")
+    assert store.get_or_create_calls == []
+
+
+def test_bot_status_usage_with_live_session_surfaces_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(
+        session_id="session-live",
+        session_title="Provider Native Thread",
+        usage=SimpleNamespace(
+            used=512,
+            size=4096,
+            cost_amount=0.42,
+            cost_currency="USD",
+        ),
+    )
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, store = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    usage_button = find_inline_button(update.message.reply_markups[0], "Usage")
+    callback_message = FakeIncomingMessage("status")
+    usage_update = FakeCallbackUpdate(123, usage_button.callback_data, message=callback_message)
+    run(handle_callback_query(usage_update, None, services, ui_state))
+
+    usage_text, usage_markup = callback_message.edit_calls[-1]
+    assert usage_text.startswith("Usage for Codex in Default Workspace")
+    assert "Session: session-live" in usage_text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in usage_text
+    assert "Recovery options:" in usage_text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in usage_text
+    )
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in usage_text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in usage_text
+    )
+    assert find_inline_button(usage_markup, "Refresh")
+    assert find_inline_button(usage_markup, "Session Info")
     assert find_inline_button(usage_markup, "Run Last Request")
     assert find_inline_button(usage_markup, "Retry Last Turn")
     assert find_inline_button(usage_markup, "Fork Last Turn")
@@ -4148,6 +4264,11 @@ def test_bot_status_can_open_workspace_runtime_and_back_to_status():
     assert "terminal=yes (workspace-scoped process bridge)" in runtime_text
     assert "Configured MCP servers: none" in runtime_text
     assert "Sessions in this runtime use only the bot client filesystem/terminal bridges." in runtime_text
+    assert (
+        "Recommended next step: go back to Bot Status if the built-in filesystem / terminal "
+        "tools are enough, or reopen this page later when you need to verify runtime wiring."
+        in runtime_text
+    )
     assert store.get_or_create_calls == []
 
     back_button = find_inline_button(runtime_markup, "Back to Bot Status")
@@ -4203,6 +4324,11 @@ def test_bot_status_workspace_runtime_can_open_mcp_server_detail():
 
     runtime_text, runtime_markup = callback_message.edit_calls[-1]
     assert "Configured MCP servers: 2" in runtime_text
+    assert (
+        "Recommended next step: open an MCP server first if you need transport or config-key "
+        "details, or go back when the runtime wiring already looks right."
+        in runtime_text
+    )
     open_button = find_inline_button(runtime_markup, "Open 1")
 
     open_update = FakeCallbackUpdate(123, open_button.callback_data, message=callback_message)
@@ -4222,6 +4348,11 @@ def test_bot_status_workspace_runtime_can_open_mcp_server_detail():
     assert "Env keys:" in detail_text
     assert "API_KEY" in detail_text
     assert "Headers: 0" in detail_text
+    assert (
+        "Recommended next step: refresh if you just changed runtime config, or go back to "
+        "compare another MCP server."
+        in detail_text
+    )
     assert "secret" not in detail_text
     assert find_inline_button(detail_markup, "Back to Workspace Runtime")
 
@@ -4275,6 +4406,11 @@ def test_bot_status_can_open_last_request_and_back_to_status():
     assert (
         "Run Last Request sends only this text again in the current provider and workspace. "
         "It does not restore the original attachments or extra context."
+        in request_text
+    )
+    assert (
+        "Recommended next step: Run Last Request if the saved text is still enough, or go back "
+        "to Bot Status if you want fresh workspace context first."
         in request_text
     )
     assert "Text length: 59 characters" in request_text
@@ -4449,6 +4585,11 @@ def test_bot_status_last_request_view_offers_last_turn_replay_recovery():
         "context back."
         in request_text
     )
+    assert (
+        "Recommended next step: Run Last Request if the saved text is enough, or Retry / Fork "
+        "Last Turn if you need the original payload back."
+        in request_text
+    )
     assert find_inline_button(request_markup, "Run Last Request")
     assert find_inline_button(request_markup, "Retry Last Turn")
     assert find_inline_button(request_markup, "Fork Last Turn")
@@ -4529,7 +4670,11 @@ def test_bot_status_session_info_without_live_session_surfaces_recovery_actions(
     assert "No live session. A session will start on the first request." in info_text
     assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in info_text
     assert "Recovery options:" in info_text
-    assert "Run Last Request can start a live session again from the saved text." in info_text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in info_text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in info_text
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
@@ -4544,6 +4689,86 @@ def test_bot_status_session_info_without_live_session_surfaces_recovery_actions(
     assert find_inline_button(info_markup, "Bundle + Last Request")
     assert find_inline_button(info_markup, "Open Context Bundle")
     assert find_inline_button(info_markup, "Back to Bot Status")
+    assert store.get_or_create_calls == []
+
+
+def test_bot_status_session_info_with_live_session_surfaces_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_BOT_STATUS,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    session = FakeSession(
+        session_id="session-live",
+        session_title="Provider Native Thread",
+        usage=SimpleNamespace(
+            used=512,
+            size=4096,
+            cost_amount=0.42,
+            cost_currency="USD",
+        ),
+        available_commands=(FakeCommand("plan", "Plan work"),),
+    )
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+
+    update = FakeUpdate(user_id=123, text=BUTTON_BOT_STATUS)
+    services, store = make_services(provider="codex", session=session)
+
+    run(handle_text(update, None, services, ui_state))
+
+    info_button = find_inline_button(update.message.reply_markups[0], "Session Info")
+    callback_message = FakeIncomingMessage("status")
+    info_update = FakeCallbackUpdate(123, info_button.callback_data, message=callback_message)
+    run(handle_callback_query(info_update, None, services, ui_state))
+
+    info_text, info_markup = callback_message.edit_calls[-1]
+    assert info_text.startswith("Session info for Codex in Default Workspace")
+    assert "Session: session-live" in info_text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in info_text
+    assert "Recovery options:" in info_text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in info_text
+    )
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in info_text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in info_text
+    )
+    assert find_inline_button(info_markup, "Workspace Runtime")
+    assert find_inline_button(info_markup, "Usage")
+    assert find_inline_button(info_markup, "Run Last Request")
+    assert find_inline_button(info_markup, "Retry Last Turn")
+    assert find_inline_button(info_markup, "Fork Last Turn")
+    assert find_inline_button(info_markup, "Ask Agent With Context")
+    assert find_inline_button(info_markup, "Bundle + Last Request")
+    assert find_inline_button(info_markup, "Open Context Bundle")
+    assert find_inline_button(info_markup, "Last Request")
+    assert find_inline_button(info_markup, "Last Turn")
+    assert max(len(row) for row in info_markup.inline_keyboard) <= 2
     assert store.get_or_create_calls == []
 
 
@@ -4612,6 +4837,11 @@ def test_bot_status_can_open_last_turn_and_back_to_status():
         in last_turn_text
     )
     assert "Fork Last Turn starts a new session first, then replays the same payload there." in last_turn_text
+    assert (
+        "Recommended next step: Retry Last Turn if you want the same payload in the current live "
+        "session, or Fork Last Turn if you want a clean branch first."
+        in last_turn_text
+    )
     assert "Prompt items: 3" in last_turn_text
     assert "Saved context items: 2" in last_turn_text
     assert "Saved context preview:" in last_turn_text
@@ -4666,7 +4896,11 @@ def test_last_turn_empty_state_surfaces_workspace_recovery_actions():
         in text
     )
     assert "Recovery options:" in text
-    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in text
+    )
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
         "message, and Bundle + Last Request reuses the saved text with that bundle."
@@ -5284,6 +5518,11 @@ def test_bot_status_can_open_agent_plan_and_back_to_status():
 
     plan_text, plan_markup = callback_message.edit_calls[-1]
     assert plan_text.startswith("Agent plan for Codex in Default Workspace")
+    assert (
+        "Recommended next step: open the in-progress item first if you want the current plan "
+        "focus, or refresh later if the agent is still updating it."
+        in plan_text
+    )
     assert "1. [>] Audit the runtime status view (priority: high)" in plan_text
     back_button = find_inline_button(plan_markup, "Back to Bot Status")
 
@@ -5333,7 +5572,11 @@ def test_agent_plan_empty_state_offers_refresh_and_recovery_actions():
         in text
     )
     assert "Recovery options:" in text
-    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
     assert find_inline_button(markup, "Refresh")
     assert find_inline_button(markup, "Run Last Request")
@@ -5385,6 +5628,11 @@ def test_agent_plan_detail_can_open_and_back():
     assert "Item: 1/2" in detail_text
     assert "Status: completed" in detail_text
     assert "Priority: high" in detail_text
+    assert (
+        "Recommended next step: go back to the plan list for unfinished items, or refresh if "
+        "you expect the agent to revise this step."
+        in detail_text
+    )
     assert "Content:" in detail_text
     assert "Audit the runtime status view and confirm every status callback restores correctly." in detail_text
 
@@ -5510,6 +5758,11 @@ def test_bot_status_can_open_tool_activity_and_back_to_status():
 
     tool_text, tool_markup = callback_message.edit_calls[-1]
     assert tool_text.startswith("Tool activity for Codex in Default Workspace")
+    assert (
+        "Recommended next step: open the item you care about if you need files, diffs, or "
+        "terminal output, or go back when the summary here is enough."
+        in tool_text
+    )
     assert "1. [completed] Run tests (execute, cmd: python -m pytest -q)" in tool_text
     back_button = find_inline_button(tool_markup, "Back to Bot Status")
 
@@ -5563,7 +5816,11 @@ def test_tool_activity_empty_state_offers_refresh_and_recovery_actions():
         in text
     )
     assert "Recovery options:" in text
-    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in text
+    )
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
         "message, and Bundle + Last Request reuses the saved text with that bundle."
@@ -5694,6 +5951,11 @@ def test_tool_activity_detail_can_open_file_preview_and_back(monkeypatch, tmp_pa
     assert "Item: 1/1" in detail_text
     assert "1. term-1 [exit=0]" in detail_text
     assert "output:\nhello\nworld" in detail_text
+    assert (
+        "Recommended next step: open the related file or change if you want the concrete "
+        "artifact, or go back to compare another activity."
+        in detail_text
+    )
     assert find_inline_button(detail_markup, "Open File 1")
     assert find_inline_button(detail_markup, "Open Change 1")
 
@@ -6446,10 +6708,16 @@ def test_bot_status_can_open_session_history_from_callback():
     assert ui_state.get_pending_text_action(123) is None
     edited_text, edited_markup = history_update.callback_query.message.edit_calls[-1]
     assert edited_text.startswith("Session history for Codex in Default Workspace")
+    assert (
+        "Recommended next step: open the session you want to inspect first, or tap Run / Fork "
+        "on the right one when you already know where to continue."
+        in edited_text
+    )
     assert "Actions: Run keeps working in that saved session." in edited_text
     assert "Fork creates a new live session branched from it." in edited_text
     assert find_inline_button(edited_markup, "Run 1")
     assert find_inline_button(edited_markup, "Back to Bot Status")
+    assert max(len(row) for row in edited_markup.inline_keyboard) <= 2
 
 
 def test_bot_status_open_view_failure_keeps_retry_and_back_to_status():
@@ -6551,6 +6819,11 @@ def test_bot_status_can_open_provider_sessions_and_back_to_status():
 
     provider_text, provider_markup = callback_message.edit_calls[-1]
     assert provider_text.startswith("Provider sessions for Codex in Default Workspace")
+    assert (
+        "Recommended next step: open the session you want to inspect first, or tap Run / Fork "
+        "on the right one when you already know where to continue."
+        in provider_text
+    )
     assert "Actions: Run attaches this bot to that provider session and keeps working there." in provider_text
     assert "Fork creates a new live session branched from it." in provider_text
     back_button = find_inline_button(provider_markup, "Back to Bot Status")
@@ -6610,6 +6883,11 @@ def test_bot_status_provider_session_detail_shows_fields_and_actions():
     assert "Workspace-relative cwd: src" in detail_text
     assert "Provider cwd: F:/workspace/src" in detail_text
     assert "Updated: 2026-03-26T00:00:00+00:00" in detail_text
+    assert (
+        "Recommended next step: tap Run Session to continue there, or use Run+Retry / "
+        "Fork+Retry if you also want the previous turn replayed immediately."
+        in detail_text
+    )
     assert "Actions: Run attaches this bot to that provider session and keeps working there." in detail_text
     assert "Fork creates a new live session branched from it." in detail_text
     assert "Run+Retry / Fork+Retry also replay the previous turn immediately after the switch." in detail_text
@@ -6619,6 +6897,7 @@ def test_bot_status_provider_session_detail_shows_fields_and_actions():
     assert find_inline_button(detail_markup, "Run+Retry Session")
     assert find_inline_button(detail_markup, "Fork Session")
     assert find_inline_button(detail_markup, "Fork+Retry Session")
+    assert max(len(row) for row in detail_markup.inline_keyboard) <= 2
 
     back_to_provider_button = find_inline_button(detail_markup, "Back to Provider Sessions")
     back_to_provider_update = FakeCallbackUpdate(
@@ -7013,6 +7292,11 @@ def test_bot_status_session_history_detail_shows_fields_and_actions():
     assert "Cwd: F:/workspace" in detail_text
     assert "Created: 2026-03-20T00:00:00+00:00" in detail_text
     assert "Updated: 2026-03-20T00:00:00+00:00" in detail_text
+    assert (
+        "Recommended next step: tap Run Session to continue there, or use Run+Retry / "
+        "Fork+Retry if you also want the previous turn replayed immediately."
+        in detail_text
+    )
     assert "Actions: Run keeps working in that saved session." in detail_text
     assert "Fork creates a new live session branched from it." in detail_text
     assert "Run+Retry / Fork+Retry also replay the previous turn immediately after the switch." in detail_text
@@ -7022,6 +7306,7 @@ def test_bot_status_session_history_detail_shows_fields_and_actions():
     assert find_inline_button(detail_markup, "Run+Retry Session")
     assert find_inline_button(detail_markup, "Fork Session")
     assert find_inline_button(detail_markup, "Fork+Retry Session")
+    assert max(len(row) for row in detail_markup.inline_keyboard) <= 2
 
     back_to_history_button = find_inline_button(detail_markup, "Back to History")
     back_to_history_update = FakeCallbackUpdate(
@@ -9756,8 +10041,9 @@ def test_bot_status_context_bundle_preview_cancel_and_back_to_status(tmp_path):
 
     bundle_text, bundle_markup = callback_message.edit_calls[-1]
     assert bundle_text.startswith(
-        "Context bundle for Codex in Default Workspace\nItems: 1\nBundle chat: off\n1. [file] notes.txt"
+        "Context bundle for Codex in Default Workspace\nItems: 1\nBundle chat: off"
     )
+    assert "1. [file] notes.txt" in bundle_text
     assert "Ask Agent With Context starts a fresh turn with these items." in bundle_text
     assert (
         "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
@@ -9795,8 +10081,9 @@ def test_bot_status_context_bundle_preview_cancel_and_back_to_status(tmp_path):
 
     restored_bundle_text, restored_bundle_markup = callback_message.edit_calls[-1]
     assert restored_bundle_text.startswith(
-        "Context bundle for Codex in Default Workspace\nItems: 1\nBundle chat: off\n1. [file] notes.txt"
+        "Context bundle for Codex in Default Workspace\nItems: 1\nBundle chat: off"
     )
+    assert "1. [file] notes.txt" in restored_bundle_text
     back_to_status_button = find_inline_button(restored_bundle_markup, "Back to Bot Status")
 
     back_to_status_update = FakeCallbackUpdate(
@@ -10717,7 +11004,7 @@ def test_session_history_delete_refreshes_with_notice():
     run(handle_text(update, None, services, ui_state))
 
     first_markup = update.message.reply_markups[0]
-    delete_button = first_markup.inline_keyboard[0][2]
+    delete_button = find_inline_button(first_markup, "Delete 1")
     callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=FakeIncomingMessage("history"))
 
     run(handle_callback_query(callback_update, None, services, ui_state))
@@ -10752,7 +11039,7 @@ def test_session_history_delete_failure_shows_actionable_notice():
     run(handle_text(update, None, services, ui_state))
 
     first_markup = update.message.reply_markups[0]
-    delete_button = first_markup.inline_keyboard[0][2]
+    delete_button = find_inline_button(first_markup, "Delete 1")
     callback_update = FakeCallbackUpdate(123, delete_button.callback_data, message=FakeIncomingMessage("history"))
 
     run(handle_callback_query(callback_update, None, services, ui_state))
@@ -10811,7 +11098,7 @@ def test_session_history_delete_current_session_clears_session_bound_interaction
         await handle_text(update, make_context(application=application), services, ui_state)
 
         first_markup = update.message.reply_markups[0]
-        delete_button = first_markup.inline_keyboard[0][2]
+        delete_button = find_inline_button(first_markup, "Delete 1")
         callback_update = FakeCallbackUpdate(
             123,
             delete_button.callback_data,
@@ -11408,7 +11695,7 @@ def test_session_history_rename_uses_next_text_message():
 
     run(handle_text(update, None, services, ui_state))
 
-    rename_button = update.message.reply_markups[0].inline_keyboard[0][1]
+    rename_button = find_inline_button(update.message.reply_markups[0], "Rename 1")
     callback_update = FakeCallbackUpdate(123, rename_button.callback_data, message=FakeIncomingMessage("history"))
     run(handle_callback_query(callback_update, None, services, ui_state))
 
@@ -11523,7 +11810,11 @@ def test_session_history_empty_state_surfaces_workspace_recovery_actions():
         in text
     )
     assert "Recovery options:" in text
-    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
@@ -12269,7 +12560,11 @@ def test_provider_sessions_unsupported_state_surfaces_workspace_recovery_actions
         in provider_text
     )
     assert "Recovery options:" in provider_text
-    assert "Run Last Request can start a live session again from the saved text." in provider_text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in provider_text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in provider_text
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
@@ -12338,7 +12633,11 @@ def test_provider_sessions_empty_state_surfaces_workspace_recovery_actions():
         in provider_text
     )
     assert "Recovery options:" in provider_text
-    assert "Run Last Request can start a live session again from the saved text." in provider_text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in provider_text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in provider_text
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
@@ -12374,6 +12673,16 @@ def test_agent_commands_button_shows_discovered_commands_without_live_session():
     assert services.discover_agent_commands_calls == [2.0]
     assert update.message.reply_calls[0].startswith(
         "Agent commands for Claude Code in Default Workspace\nSession: none"
+    )
+    assert (
+        "Recommended next step: run a command directly if you already know it, or open one "
+        "first to confirm its args and example."
+        in update.message.reply_calls[0]
+    )
+    assert "Action guide:" in update.message.reply_calls[0]
+    assert (
+        "- Args N waits for your next plain-text message and uses it as command arguments."
+        in update.message.reply_calls[0]
     )
     assert "/status" in update.message.reply_calls[0]
     assert "args: model id" in update.message.reply_calls[0]
@@ -12457,7 +12766,11 @@ def test_agent_commands_empty_state_surfaces_recovery_actions():
     assert "No agent commands available." in text
     assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in text
     assert "Recovery options:" in text
-    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Run Last Request reuses the saved text in the current provider and workspace, starting "
+        "a live session if needed."
+        in text
+    )
     assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
     assert (
         "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
@@ -12502,6 +12815,11 @@ def test_agent_commands_detail_can_open_without_live_session_and_back():
     assert "Name: /model" in detail_text
     assert "Args hint: model id" in detail_text
     assert "Example: /model <args>" in detail_text
+    assert (
+        "Recommended next step: tap Enter Args if you already know what to send, or go back to "
+        "compare another command first."
+        in detail_text
+    )
     assert find_inline_button(detail_markup, "Back to Agent Commands")
 
     back_button = find_inline_button(detail_markup, "Back to Agent Commands")
@@ -12540,6 +12858,11 @@ def test_bot_status_agent_commands_can_open_and_back_to_status():
 
     commands_text, commands_markup = callback_message.edit_calls[-1]
     assert commands_text.startswith("Agent commands for Codex in Default Workspace")
+    assert (
+        "Recommended next step: run a command directly if you already know it, or open one "
+        "first to confirm its args and example."
+        in commands_text
+    )
     assert find_inline_button(commands_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(
@@ -12593,6 +12916,11 @@ def test_bot_status_agent_command_detail_shows_fields_and_back_to_status():
     assert "Show status" in detail_text
     assert "Args hint: none" in detail_text
     assert "Example: /status" in detail_text
+    assert (
+        "Recommended next step: tap Run Command if this is the command you need, or go back to "
+        "compare another command first."
+        in detail_text
+    )
     assert find_inline_button(detail_markup, "Run Command")
 
     back_button = find_inline_button(detail_markup, "Back to Agent Commands")
@@ -12952,6 +13280,11 @@ def test_workspace_files_button_shows_current_directory_listing(tmp_path):
     assert text.startswith(
         "Workspace files for Claude Code in Default Workspace\nPath: ."
     )
+    assert (
+        "Recommended next step: open a file first if you want to inspect it, or use Ask Agent "
+        "With Visible Files / Add Visible Files to Context when this page already covers what "
+        "you need."
+    ) in text
     assert "Action guide:" in text
     assert (
         "- Ask Agent With Visible Files starts a fresh turn using the files shown on this page."
@@ -13145,9 +13478,9 @@ def test_workspace_listing_add_visible_files_reports_existing_bundle_items(tmp_p
         "All 1 visible file is already in the context bundle.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
-        "Bundle chat: off\n"
-        "1. [file] README.md"
+        "Bundle chat: off"
     )
+    assert "1. [file] README.md" in edited_text
     assert "Ask Agent With Context starts a fresh turn with these items." in edited_text
     assert (
         "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
@@ -13350,6 +13683,11 @@ def test_workspace_search_uses_next_text_message_and_shows_matches(tmp_path):
     assert text.startswith(
         "Workspace search for Claude Code in Default Workspace\nQuery: agent"
     )
+    assert (
+        "Recommended next step: open a match first if you want to inspect it, or use Ask Agent "
+        "With Matching Files / Add Matching Files to Context when this page already covers what "
+        "you need."
+    ) in text
     assert "README.md:1" in text
     assert "src/app.py:1" in text
     assert (
@@ -13789,13 +14127,14 @@ def test_workspace_file_preview_can_start_bundle_chat_with_file(tmp_path):
     start_update = FakeCallbackUpdate(123, start_button.callback_data, message=file_update.callback_query.message)
     run(handle_callback_query(start_update, None, services, ui_state))
 
-    assert start_update.callback_query.message.edit_calls[-1][0].startswith(
+    bundle_text = start_update.callback_query.message.edit_calls[-1][0]
+    assert bundle_text.startswith(
         "Added file to context bundle. Bundle chat enabled.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
-        "Bundle chat: on\n"
-        "1. [file] src/app.py"
+        "Bundle chat: on"
     )
+    assert "1. [file] src/app.py" in bundle_text
     assert ui_state.context_bundle_chat_active(123, "claude", "default") is True
     bundle = ui_state.get_context_bundle(123, "claude", "default")
     assert bundle is not None
@@ -13885,10 +14224,17 @@ def test_workspace_file_preview_can_ask_with_last_request(tmp_path):
     file_update = FakeCallbackUpdate(123, file_button.callback_data, message=dir_update.callback_query.message)
     run(handle_callback_query(file_update, None, services, ui_state))
 
-    ask_button = find_inline_button(
-        file_update.callback_query.message.edit_calls[-1][1],
-        "Ask With Last Request",
+    preview_text, preview_markup = file_update.callback_query.message.edit_calls[-1]
+    assert (
+        "Recommended next step: Ask With Last Request if the saved text already fits this file, "
+        "or use Ask Agent About File when you want to send fresh instructions."
+        in preview_text
     )
+    assert [button.text for button in preview_markup.inline_keyboard[0]] == [
+        "Ask With Last Request",
+        "Ask Agent About File",
+    ]
+    ask_button = find_inline_button(preview_markup, "Ask With Last Request")
     ask_update = FakeCallbackUpdate(123, ask_button.callback_data, message=file_update.callback_query.message)
     run(handle_callback_query(ask_update, None, services, ui_state))
 
@@ -14037,11 +14383,16 @@ def test_workspace_previews_can_add_context_and_bundle_can_run_agent_turn(monkey
     bundle_update = FakeUpdate(user_id=123, text=BUTTON_CONTEXT_BUNDLE)
     run(handle_text(bundle_update, None, services, ui_state))
 
-    assert bundle_update.message.reply_calls[0].startswith(
+    bundle_text = bundle_update.message.reply_calls[0]
+    assert bundle_text.startswith(
         "Context bundle for Claude Code in Default Workspace\nItems: 2"
     )
-    assert "1. [file] notes.txt" in bundle_update.message.reply_calls[0]
-    assert "2. [change  M] src/app.py" in bundle_update.message.reply_calls[0]
+    assert (
+        "Recommended next step: Ask Agent With Context to work with this bundle, or Start Bundle "
+        "Chat if you want the next plain-text message to carry it."
+    ) in bundle_text
+    assert "1. [file] notes.txt" in bundle_text
+    assert "2. [change  M] src/app.py" in bundle_text
 
     ask_bundle_button = find_inline_button(
         bundle_update.message.reply_markups[0],
@@ -14103,6 +14454,14 @@ def test_context_bundle_can_ask_with_last_request():
 
     update = FakeUpdate(user_id=123, text=BUTTON_CONTEXT_BUNDLE)
     run(handle_text(update, None, services, ui_state))
+    assert (
+        "Recommended next step: Ask With Last Request to reuse the saved text with this bundle, "
+        "or Ask Agent With Context if you want to send fresh text instead."
+    ) in update.message.reply_calls[0]
+    assert [button.text for button in update.message.reply_markups[0].inline_keyboard[2]] == [
+        "Ask With Last Request",
+        "Ask Agent With Context",
+    ]
 
     ask_button = find_inline_button(update.message.reply_markups[0], "Ask With Last Request")
     ask_update = FakeCallbackUpdate(123, ask_button.callback_data, message=FakeIncomingMessage("bundle"))
@@ -14162,6 +14521,10 @@ def test_context_bundle_can_enable_bundle_chat_for_plain_text_turns():
         "Bundle chat enabled. New plain text messages will use the current context bundle.\n"
         "Context bundle for Claude Code in Default Workspace\nItems: 2\nBundle chat: on"
     )
+    assert (
+        "Recommended next step: send plain text from chat to keep using this bundle, or Ask "
+        "Agent With Context if you want to launch the next turn from here."
+    ) in enabled_text
     assert find_inline_button(enabled_markup, "Stop Bundle Chat")
 
     request_update = FakeUpdate(user_id=123, text="Keep going with this bundle.")
@@ -14316,6 +14679,11 @@ def test_workspace_changes_button_shows_git_status(monkeypatch):
     assert text.startswith(
         "Workspace changes for Claude Code in Default Workspace\nBranch: main"
     )
+    assert (
+        "Recommended next step: open a change first if you want to inspect the diff, or use Ask "
+        "Agent With Current Changes / Add All Changes to Context when this page already covers "
+        "what you need."
+    ) in text
     assert "[ M] src/app.py" in text
     assert "[??] notes.txt" in text
     assert (
@@ -14573,13 +14941,14 @@ def test_workspace_change_preview_can_start_bundle_chat(monkeypatch):
     start_update = FakeCallbackUpdate(123, start_button.callback_data, message=diff_update.callback_query.message)
     run(handle_callback_query(start_update, None, services, ui_state))
 
-    assert start_update.callback_query.message.edit_calls[-1][0].startswith(
+    bundle_text = start_update.callback_query.message.edit_calls[-1][0]
+    assert bundle_text.startswith(
         "Added change to context bundle. Bundle chat enabled.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
-        "Bundle chat: on\n"
-        "1. [change  M] src/app.py"
+        "Bundle chat: on"
     )
+    assert "1. [change  M] src/app.py" in bundle_text
     assert ui_state.context_bundle_chat_active(123, "claude", "default") is True
     bundle = ui_state.get_context_bundle(123, "claude", "default")
     assert bundle is not None
@@ -14640,9 +15009,9 @@ def test_workspace_change_preview_start_bundle_chat_can_go_back_to_change(monkey
         "Added change to context bundle. Bundle chat enabled.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
-        "Bundle chat: on\n"
-        "1. [change  M] src/app.py"
+        "Bundle chat: on"
     )
+    assert "1. [change  M] src/app.py" in bundle_text
     assert find_inline_button(bundle_markup, "Back to Change")
 
     open_bundle_item_button = find_inline_button(bundle_markup, "Open 1")
@@ -14807,14 +15176,21 @@ def test_workspace_change_preview_can_ask_with_last_request(monkeypatch):
     diff_update = FakeCallbackUpdate(123, open_button.callback_data, message=FakeIncomingMessage("changes"))
     run(handle_callback_query(diff_update, None, services, ui_state))
 
+    diff_text, diff_markup = diff_update.callback_query.message.edit_calls[-1]
+    assert (
+        "Recommended next step: Ask With Last Request if the saved text already fits this change, "
+        "or use Ask Agent About Change when you want to send fresh instructions."
+        in diff_text
+    )
+    assert [button.text for button in diff_markup.inline_keyboard[0]] == [
+        "Ask With Last Request",
+        "Ask Agent About Change",
+    ]
     assert (
         "- Ask With Last Request reuses the saved request text with this change."
-        in diff_update.callback_query.message.edit_calls[-1][0]
+        in diff_text
     )
-    ask_button = find_inline_button(
-        diff_update.callback_query.message.edit_calls[-1][1],
-        "Ask With Last Request",
-    )
+    ask_button = find_inline_button(diff_markup, "Ask With Last Request")
     ask_update = FakeCallbackUpdate(123, ask_button.callback_data, message=diff_update.callback_query.message)
     run(handle_callback_query(ask_update, None, services, ui_state))
 
@@ -15080,9 +15456,11 @@ def test_context_bundle_can_open_file_preview_and_back(tmp_path):
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=open_update.callback_query.message)
     run(handle_callback_query(back_update, None, services, ui_state))
 
-    assert back_update.callback_query.message.edit_calls[-1][0].startswith(
-        "Context bundle for Claude Code in Default Workspace\nItems: 1\nBundle chat: off\n1. [file] notes.txt"
+    bundle_text = back_update.callback_query.message.edit_calls[-1][0]
+    assert bundle_text.startswith(
+        "Context bundle for Claude Code in Default Workspace\nItems: 1\nBundle chat: off"
     )
+    assert "1. [file] notes.txt" in bundle_text
 
 
 def test_context_bundle_file_preview_can_remove_current_item(tmp_path):
@@ -15124,13 +15502,14 @@ def test_context_bundle_file_preview_can_remove_current_item(tmp_path):
     remove_update = FakeCallbackUpdate(123, remove_button.callback_data, message=open_update.callback_query.message)
     run(handle_callback_query(remove_update, None, services, ui_state))
 
-    assert remove_update.callback_query.message.edit_calls[-1][0].startswith(
+    bundle_text = remove_update.callback_query.message.edit_calls[-1][0]
+    assert bundle_text.startswith(
         "Removed item from context bundle.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
-        "Bundle chat: off\n"
-        "1. [file] keep.txt"
+        "Bundle chat: off"
     )
+    assert "1. [file] keep.txt" in bundle_text
     bundle = ui_state.get_context_bundle(123, "claude", "default")
     assert bundle is not None
     assert bundle.items == [_ContextBundleItem(kind="file", relative_path="keep.txt")]
@@ -15184,9 +15563,11 @@ def test_context_bundle_can_open_change_preview_and_back(monkeypatch):
     back_update = FakeCallbackUpdate(123, back_button.callback_data, message=open_update.callback_query.message)
     run(handle_callback_query(back_update, None, services, ui_state))
 
-    assert back_update.callback_query.message.edit_calls[-1][0].startswith(
-        "Context bundle for Claude Code in Default Workspace\nItems: 1\nBundle chat: off\n1. [change  M] src/app.py"
+    bundle_text = back_update.callback_query.message.edit_calls[-1][0]
+    assert bundle_text.startswith(
+        "Context bundle for Claude Code in Default Workspace\nItems: 1\nBundle chat: off"
     )
+    assert "1. [change  M] src/app.py" in bundle_text
 
 
 def test_context_bundle_change_preview_can_remove_current_item(monkeypatch):
@@ -15239,13 +15620,14 @@ def test_context_bundle_change_preview_can_remove_current_item(monkeypatch):
     remove_update = FakeCallbackUpdate(123, remove_button.callback_data, message=open_update.callback_query.message)
     run(handle_callback_query(remove_update, None, services, ui_state))
 
-    assert remove_update.callback_query.message.edit_calls[-1][0].startswith(
+    bundle_text = remove_update.callback_query.message.edit_calls[-1][0]
+    assert bundle_text.startswith(
         "Removed item from context bundle.\n"
         "Context bundle for Claude Code in Default Workspace\n"
         "Items: 1\n"
-        "Bundle chat: off\n"
-        "1. [change ??] src/keep.py"
+        "Bundle chat: off"
     )
+    assert "1. [change ??] src/keep.py" in bundle_text
     bundle = ui_state.get_context_bundle(123, "claude", "default")
     assert bundle is not None
     assert bundle.items == [_ContextBundleItem(kind="change", relative_path="src/keep.py", status_code="??")]
@@ -15308,8 +15690,18 @@ def test_model_mode_button_shows_direct_choices_and_current_is_noop():
         "Model / Mode for Claude Code in Default Workspace\nSession: session-123"
     )
     assert "Current setup: model=GPT-5.4, mode=xhigh" in update.message.reply_calls[0]
+    assert (
+        "Recommended next step: open a choice first if you want to compare details, or switch "
+        "directly when you already know the setting you need."
+        in update.message.reply_calls[0]
+    )
     assert "Model choices:" in update.message.reply_calls[0]
     assert "Tap Model: ... to switch now, or Open Model N for details." in update.message.reply_calls[0]
+    assert "Action guide:" in update.message.reply_calls[0]
+    assert (
+        "- Model: ... / Mode: ... switches the current live session without rerunning anything."
+        in update.message.reply_calls[0]
+    )
     markup = update.message.reply_markups[0]
     assert find_inline_button(markup, "Current Model: GPT-5.4")
     assert find_inline_button(markup, "Model: GPT-5.4 Mini")
@@ -15575,6 +15967,21 @@ def test_model_mode_view_shows_retry_shortcuts_when_last_turn_exists():
     run(handle_text(update, None, services, ui_state))
 
     markup = update.message.reply_markups[0]
+    assert (
+        "Recommended next step: open a choice first if you want to compare details, or switch "
+        "directly and use ...+Retry when the saved Last Turn should rerun under the new setting."
+        in update.message.reply_calls[0]
+    )
+    assert (
+        "Tap Model: ... to switch now, use Model+Retry: ... to rerun the last turn, or Open "
+        "Model N for details."
+        in update.message.reply_calls[0]
+    )
+    assert (
+        "- Model+Retry: ... / Mode+Retry: ... switches first, then reruns the saved Last Turn "
+        "immediately."
+        in update.message.reply_calls[0]
+    )
     assert find_inline_button(markup, "Model+Retry: GPT-5.4 Mini").text == "Model+Retry: GPT-5.4 Mini"
     assert find_inline_button(markup, "Mode+Retry: low").text == "Mode+Retry: low"
 

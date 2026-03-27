@@ -1810,6 +1810,183 @@ def _join_label_series(labels: list[str]) -> str:
     return f"{', '.join(labels[:-1])}, and {labels[-1]}"
 
 
+def _status_primary_action_guide_entry(
+    *,
+    active_turn: _ActiveTurn | None,
+    pending_text_action: _PendingTextAction | None,
+    pending_media_group_stats: _PendingMediaGroupStats | None,
+    bundle_count: int,
+    bundle_chat_active: bool,
+    last_request_available: bool,
+    last_turn_available: bool,
+) -> tuple[str, str] | None:
+    if active_turn is not None:
+        return (
+            "Stop Turn",
+            "interrupts the request that's already running without leaving Bot Status.",
+        )
+    if pending_text_action is not None:
+        return (
+            "Cancel Pending Input",
+            "clears the waiting plain-text action before you choose another path.",
+        )
+    if pending_media_group_stats is not None:
+        return (
+            "Discard Pending Uploads",
+            "drops the still-collecting Telegram album before anything reaches the agent.",
+        )
+    if bundle_count > 0:
+        labels = []
+        if last_request_available:
+            labels.append("Bundle + Last Request")
+        labels.append("Ask Agent With Context")
+        labels.append("Stop Bundle Chat" if bundle_chat_active else "Start Bundle Chat")
+        if last_request_available:
+            return (
+                _join_label_series(labels),
+                "let you keep working with the current bundle, either by reusing the saved request or by sending fresh text.",
+            )
+        return (
+            _join_label_series(labels),
+            "let you start a bundled turn right away or control whether the next plain-text message carries that bundle automatically.",
+        )
+    if last_request_available and last_turn_available:
+        return (
+            _join_label_series(["Run Last Request", "Retry Last Turn", "Fork Last Turn"]),
+            "let you choose between replaying only the saved text or restoring the full saved payload.",
+        )
+    if last_request_available:
+        return (
+            "Run Last Request",
+            "replays only the saved request text in the current provider and workspace.",
+        )
+    if last_turn_available:
+        return (
+            _join_label_series(["Retry Last Turn", "Fork Last Turn"]),
+            "let you replay the full saved payload in the current or a forked live session.",
+        )
+    return None
+
+
+def _status_navigation_action_guide_entry(*, is_admin: bool) -> tuple[str, str]:
+    labels = ["Refresh", "Session History"]
+    if is_admin:
+        labels.append("Provider Sessions")
+    return (
+        _join_label_series(labels),
+        "let you refresh this snapshot or open saved sessions when you want to resume existing work.",
+    )
+
+
+def _status_lifecycle_action_guide_entry(*, can_fork_session: bool) -> tuple[str, str]:
+    labels = ["New Session", "Restart Agent"]
+    if can_fork_session:
+        labels.append("Fork Session")
+        summary = "give you a clean path when you want to reset, restart, or branch the current session."
+    else:
+        summary = "give you a clean path when you want to reset or restart the current session."
+    return _join_label_series(labels), summary
+
+
+def _status_tuning_action_guide_entry(*, live_session_available: bool) -> tuple[str, str]:
+    if live_session_available:
+        return (
+            _join_label_series(["Model / Mode", "Agent Commands"]),
+            "let you adjust the live session setup or run agent-exposed commands without leaving the control center.",
+        )
+    return (
+        _join_label_series(["Model / Mode", "Agent Commands"]),
+        "open the live-session tuning and command surfaces once a session is available.",
+    )
+
+
+def _status_inspection_action_guide_entry(
+    *,
+    usage_available: bool,
+    last_request_available: bool,
+    last_turn_available: bool,
+    plan_count: int,
+    tool_activity_count: int,
+) -> tuple[str, str]:
+    labels = ["Session Info", "Workspace Runtime"]
+    if usage_available:
+        labels.append("Usage")
+    if last_request_available:
+        labels.append("Last Request")
+    if last_turn_available:
+        labels.append("Last Turn")
+    if plan_count > 0:
+        labels.append("Agent Plan")
+    if tool_activity_count > 0:
+        labels.append("Tool Activity")
+    return (
+        _join_label_series(labels),
+        "keep you in read-only views while you inspect runtime state, saved replays, plans, or recent tool use.",
+    )
+
+
+def _status_workspace_action_guide_entry() -> tuple[str, str]:
+    return (
+        _join_label_series(
+            ["Workspace Files", "Workspace Search", "Workspace Changes", "Context Bundle"]
+        ),
+        "open focused workspace surfaces so you can browse local context or carry it into the next turn.",
+    )
+
+
+def _status_admin_switch_action_guide_entry() -> tuple[str, str]:
+    return (
+        _join_label_series(["Switch Agent", "Switch Workspace"]),
+        "change the shared runtime for every Telegram user, so treat them as global admin controls.",
+    )
+
+
+def _status_action_guide_entries(
+    *,
+    active_turn: _ActiveTurn | None,
+    pending_text_action: _PendingTextAction | None,
+    pending_media_group_stats: _PendingMediaGroupStats | None,
+    bundle_count: int,
+    bundle_chat_active: bool,
+    last_request_available: bool,
+    last_turn_available: bool,
+    is_admin: bool,
+    can_fork_session: bool,
+    live_session_available: bool,
+    usage_available: bool,
+    plan_count: int,
+    tool_activity_count: int,
+) -> tuple[tuple[str, str], ...]:
+    entries: list[tuple[str, str]] = []
+    primary_entry = _status_primary_action_guide_entry(
+        active_turn=active_turn,
+        pending_text_action=pending_text_action,
+        pending_media_group_stats=pending_media_group_stats,
+        bundle_count=bundle_count,
+        bundle_chat_active=bundle_chat_active,
+        last_request_available=last_request_available,
+        last_turn_available=last_turn_available,
+    )
+    if primary_entry is not None:
+        entries.append(primary_entry)
+    entries.append(_status_navigation_action_guide_entry(is_admin=is_admin))
+    entries.append(_status_lifecycle_action_guide_entry(can_fork_session=can_fork_session))
+    entries.append(_status_tuning_action_guide_entry(live_session_available=live_session_available))
+    entries.append(
+        _status_inspection_action_guide_entry(
+            usage_available=usage_available,
+            last_request_available=last_request_available,
+            last_turn_available=last_turn_available,
+            plan_count=plan_count,
+            tool_activity_count=tool_activity_count,
+        )
+    )
+    entries.append(_status_workspace_action_guide_entry())
+    if is_admin:
+        entries.append(_status_admin_switch_action_guide_entry())
+    return tuple(entries)
+
+
 def _workspace_reuse_labels(
     *,
     ui_state: TelegramUiState,
@@ -1892,7 +2069,10 @@ def _workspace_recovery_actions(
 
     buttons: list[list[InlineKeyboardButton]] = []
     if last_request is not None:
-        lines.append("Run Last Request can start a live session again from the saved text.")
+        lines.append(
+            "Run Last Request reuses the saved text in the current provider and workspace, "
+            "starting a live session if needed."
+        )
         buttons.append(
             [
                 _callback_button(
@@ -7052,6 +7232,13 @@ async def _show_workspace_file_preview_from_callback(
         secondary_button_label="Add File to Context",
         secondary_button_action="workspace_file_add_context",
         secondary_button_payload={"relative_path": preview.relative_path},
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About File",
+            subject_label="this file",
+            secondary_label="Add File to Context",
+            secondary_summary="you want to save it for later reuse",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About File",
             subject_summary="this file",
@@ -7136,6 +7323,13 @@ async def _show_workspace_search_file_preview_from_callback(
         secondary_button_label="Add File to Context",
         secondary_button_action="workspace_file_add_context",
         secondary_button_payload={"relative_path": preview.relative_path},
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About File",
+            subject_label="this file",
+            secondary_label="Add File to Context",
+            secondary_summary="you want to save it for later reuse",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About File",
             subject_summary="this file",
@@ -7728,6 +7922,61 @@ def _session_action_guide_lines(
     return lines
 
 
+def _session_collection_next_step_line(
+    *,
+    can_fork: bool,
+    can_retry_last_turn: bool,
+) -> str:
+    if can_retry_last_turn:
+        retry_labels = "Run+Retry / Fork+Retry" if can_fork else "Run+Retry"
+        return (
+            "Recommended next step: open the session you want to inspect first, or use "
+            f"{retry_labels} when you already know you want that session plus the previous turn."
+        )
+    if can_fork:
+        return (
+            "Recommended next step: open the session you want to inspect first, or tap Run / "
+            "Fork on the right one when you already know where to continue."
+        )
+    return (
+        "Recommended next step: open the session you want to inspect first, or tap Run on the "
+        "right one when you already know where to continue."
+    )
+
+
+def _session_entry_next_step_line(
+    *,
+    is_current: bool,
+    can_fork: bool,
+    can_retry_last_turn: bool,
+) -> str:
+    if is_current:
+        if can_fork:
+            return (
+                "Recommended next step: go back when you're ready to keep chatting here, or use "
+                "Fork Session if you want a clean branch first."
+            )
+        return (
+            "Recommended next step: go back when you're ready to keep chatting here, or use "
+            "Refresh if you just needed to verify the saved session details."
+        )
+    if can_retry_last_turn:
+        retry_labels = "Run+Retry / Fork+Retry" if can_fork else "Run+Retry"
+        return (
+            "Recommended next step: tap Run Session to continue there, or use "
+            f"{retry_labels} if you also want the previous turn replayed immediately."
+        )
+    if can_fork:
+        return (
+            "Recommended next step: tap Run Session to continue there, or Fork Session if you "
+            "want a clean branch first."
+        )
+    return (
+        "Recommended next step: tap Run Session to continue there, or go back to compare "
+        "another session."
+    )
+
+
 def _append_paged_list_summary_lines(
     lines: list[str],
     *,
@@ -7757,6 +8006,18 @@ def _append_action_guide_lines(
     lines.append("Action guide:")
     for label, summary in entries:
         lines.append(f"- {label} {summary}")
+
+
+def _append_chunked_button_rows(
+    buttons: list[list[InlineKeyboardButton]],
+    row_buttons: list[InlineKeyboardButton],
+    *,
+    row_size: int = 2,
+) -> None:
+    if not row_buttons:
+        return
+    for start in range(0, len(row_buttons), row_size):
+        buttons.append(row_buttons[start : start + row_size])
 
 
 def _workspace_collection_action_guide_entries(
@@ -7789,6 +8050,62 @@ def _workspace_collection_action_guide_entries(
     return tuple(entries)
 
 
+def _workspace_collection_next_step_line(
+    *,
+    inspect_summary: str,
+    ask_label: str,
+    add_label: str,
+    has_last_request: bool,
+) -> str:
+    if has_last_request:
+        return (
+            f"Recommended next step: {inspect_summary}, or use Ask With Last Request / "
+            f"{add_label} when this page already covers what you need."
+        )
+    return (
+        f"Recommended next step: {inspect_summary}, or use {ask_label} / "
+        f"{add_label} when this page already covers what you need."
+    )
+
+
+def _workspace_item_preview_next_step_line(
+    *,
+    ask_label: str,
+    subject_label: str,
+    secondary_label: str,
+    secondary_summary: str,
+    has_last_request: bool,
+) -> str:
+    if has_last_request:
+        return (
+            f"Recommended next step: Ask With Last Request if the saved text already fits "
+            f"{subject_label}, or use {ask_label} when you want to send fresh instructions."
+        )
+    return (
+        f"Recommended next step: use {ask_label} if {subject_label} already covers what you need, "
+        f"or {secondary_label} if {secondary_summary}."
+    )
+
+
+def _workspace_runtime_next_step_line(*, has_mcp_servers: bool) -> str:
+    if has_mcp_servers:
+        return (
+            "Recommended next step: open an MCP server first if you need transport or config-key "
+            "details, or go back when the runtime wiring already looks right."
+        )
+    return (
+        "Recommended next step: go back to Bot Status if the built-in filesystem / terminal "
+        "tools are enough, or reopen this page later when you need to verify runtime wiring."
+    )
+
+
+def _workspace_runtime_server_next_step_line() -> str:
+    return (
+        "Recommended next step: refresh if you just changed runtime config, or go back to "
+        "compare another MCP server."
+    )
+
+
 def _workspace_item_action_guide_entries(
     *,
     ask_label: str,
@@ -7810,6 +8127,225 @@ def _workspace_item_action_guide_entries(
         entries.append((bundle_chat_label, bundle_chat_summary))
     entries.append((secondary_label, secondary_summary))
     return tuple(entries)
+
+
+def _context_bundle_next_step_line(
+    *,
+    bundle_chat_active: bool,
+    has_last_request: bool,
+) -> str:
+    if bundle_chat_active and has_last_request:
+        return (
+            "Recommended next step: Ask With Last Request if you want to reuse the saved text "
+            "with this bundle, or send plain text from chat to keep bundle chat going."
+        )
+    if bundle_chat_active:
+        return (
+            "Recommended next step: send plain text from chat to keep using this bundle, or Ask "
+            "Agent With Context if you want to launch the next turn from here."
+        )
+    if has_last_request:
+        return (
+            "Recommended next step: Ask With Last Request to reuse the saved text with this "
+            "bundle, or Ask Agent With Context if you want to send fresh text instead."
+        )
+    return (
+        "Recommended next step: Ask Agent With Context to work with this bundle, or Start Bundle "
+        "Chat if you want the next plain-text message to carry it."
+    )
+
+
+def _last_request_next_step_line(*, last_turn_available: bool) -> str:
+    if last_turn_available:
+        return (
+            "Recommended next step: Run Last Request if the saved text is enough, or Retry / Fork "
+            "Last Turn if you need the original payload back."
+        )
+    return (
+        "Recommended next step: Run Last Request if the saved text is still enough, or go back to "
+        "Bot Status if you want fresh workspace context first."
+    )
+
+
+def _last_turn_next_step_line() -> str:
+    return (
+        "Recommended next step: Retry Last Turn if you want the same payload in the current live "
+        "session, or Fork Last Turn if you want a clean branch first."
+    )
+
+
+def _agent_commands_next_step_line(*, has_args_commands: bool) -> str:
+    if has_args_commands:
+        return (
+            "Recommended next step: run a command directly if you already know it, or open one "
+            "first to confirm its args and example."
+        )
+    return (
+        "Recommended next step: run a command directly if you already know it, or open one first "
+        "if you want to review what it does."
+    )
+
+
+def _agent_command_action_guide_entries(
+    *,
+    has_args_commands: bool,
+) -> tuple[tuple[str, str], ...]:
+    entries = [
+        ("Run N", "starts that slash command immediately when no extra args are needed."),
+    ]
+    if has_args_commands:
+        entries.append(
+            (
+                "Args N",
+                "waits for your next plain-text message and uses it as command arguments.",
+            )
+        )
+    entries.append(("Open N", "shows the full description and example before you run it."))
+    return tuple(entries)
+
+
+def _agent_command_detail_next_step_line(*, requires_args: bool) -> str:
+    if requires_args:
+        return (
+            "Recommended next step: tap Enter Args if you already know what to send, or go back "
+            "to compare another command first."
+        )
+    return (
+        "Recommended next step: tap Run Command if this is the command you need, or go back to "
+        "compare another command first."
+    )
+
+
+def _model_mode_next_step_line(*, can_retry_last_turn: bool) -> str:
+    if can_retry_last_turn:
+        return (
+            "Recommended next step: open a choice first if you want to compare details, or "
+            "switch directly and use ...+Retry when the saved Last Turn should rerun under the "
+            "new setting."
+        )
+    return (
+        "Recommended next step: open a choice first if you want to compare details, or switch "
+        "directly when you already know the setting you need."
+    )
+
+
+def _model_mode_action_guide_entries(
+    *,
+    can_retry_last_turn: bool,
+) -> tuple[tuple[str, str], ...]:
+    entries = [
+        (
+            "Model: ... / Mode: ...",
+            "switches the current live session without rerunning anything.",
+        )
+    ]
+    if can_retry_last_turn:
+        entries.append(
+            (
+                "Model+Retry: ... / Mode+Retry: ...",
+                "switches first, then reruns the saved Last Turn immediately.",
+            )
+        )
+    entries.append(
+        (
+            "Open Model N / Open Mode N",
+            "shows description and scope before you switch.",
+        )
+    )
+    return tuple(entries)
+
+
+def _plan_next_step_line(entries) -> str:
+    if any(str(getattr(entry, "status", "pending")) == "in_progress" for entry in entries):
+        return (
+            "Recommended next step: open the in-progress item first if you want the current plan "
+            "focus, or refresh later if the agent is still updating it."
+        )
+    return (
+        "Recommended next step: open the item you want in full, or refresh later if you expect "
+        "the plan to change."
+    )
+
+
+def _plan_detail_next_step_line(*, status: str) -> str:
+    if status == "in_progress":
+        return (
+            "Recommended next step: refresh if the agent is still working on this step, or go "
+            "back to compare it with the rest of the plan."
+        )
+    if status == "completed":
+        return (
+            "Recommended next step: go back to the plan list for unfinished items, or refresh if "
+            "you expect the agent to revise this step."
+        )
+    return (
+        "Recommended next step: go back to the plan list if you want the rest of the sequence, "
+        "or refresh if this step may still update."
+    )
+
+
+def _tool_activity_next_step_line(activities) -> str:
+    if any(
+        str(getattr(activity, "status", "pending")) in {"pending", "in_progress", "running"}
+        for activity in activities
+    ):
+        return (
+            "Recommended next step: open the item you care about if you need files, diffs, or "
+            "terminal output, or refresh later if the agent is still working."
+        )
+    return (
+        "Recommended next step: open the item you care about if you need files, diffs, or "
+        "terminal output, or go back when the summary here is enough."
+    )
+
+
+def _tool_activity_detail_next_step_line(
+    *,
+    status: str,
+    has_openable_paths: bool,
+    has_change_targets: bool,
+    has_terminal_preview: bool,
+) -> str:
+    still_running = status in {"pending", "in_progress", "running"}
+    if has_openable_paths and has_change_targets:
+        return (
+            "Recommended next step: open the related file or change if you want the concrete "
+            "artifact, or refresh if this activity is still moving."
+            if still_running
+            else "Recommended next step: open the related file or change if you want the concrete "
+            "artifact, or go back to compare another activity."
+        )
+    if has_openable_paths:
+        return (
+            "Recommended next step: open the related file if you want the concrete artifact, or "
+            "refresh if this activity is still moving."
+            if still_running
+            else "Recommended next step: open the related file if you want the concrete artifact, "
+            "or go back to compare another activity."
+        )
+    if has_change_targets:
+        return (
+            "Recommended next step: open the related change if you want the concrete diff, or "
+            "refresh if this activity is still moving."
+            if still_running
+            else "Recommended next step: open the related change if you want the concrete diff, or "
+            "go back to compare another activity."
+        )
+    if has_terminal_preview:
+        return (
+            "Recommended next step: review the terminal preview here, or refresh if this command "
+            "is still running."
+            if still_running
+            else "Recommended next step: review the terminal preview here, or go back to compare "
+            "another activity."
+        )
+    return (
+        "Recommended next step: refresh if this activity is still moving, or go back to compare "
+        "another activity."
+        if still_running
+        else "Recommended next step: go back to compare another activity, or return to Bot Status "
+        "if this summary is enough."
+    )
 
 
 def _no_model_mode_controls_text() -> str:
@@ -8084,6 +8620,13 @@ async def _show_workspace_change_preview_from_callback(
             "relative_path": diff_preview.relative_path,
             "status_code": diff_preview.status_code,
         },
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About Change",
+            subject_label="this change",
+            secondary_label="Add Change to Context",
+            secondary_summary="you want to save it for later reuse",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About Change",
             subject_summary="this change",
@@ -8159,6 +8702,13 @@ async def _show_tool_activity_file_preview_from_callback(
         secondary_button_label="Add File to Context",
         secondary_button_action="workspace_file_add_context",
         secondary_button_payload={"relative_path": preview.relative_path},
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About File",
+            subject_label="this file",
+            secondary_label="Add File to Context",
+            secondary_summary="you want to save it for later reuse",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About File",
             subject_summary="this file",
@@ -8226,6 +8776,13 @@ async def _show_tool_activity_change_preview_from_callback(
             "relative_path": diff_preview.relative_path,
             "status_code": diff_preview.status_code,
         },
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About Change",
+            subject_label="this change",
+            secondary_label="Add Change to Context",
+            secondary_summary="you want to save it for later reuse",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About Change",
             subject_summary="this change",
@@ -8297,6 +8854,13 @@ async def _show_context_bundle_file_preview_from_callback(
             "back_target": back_target,
             **source_payload,
         },
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About File",
+            subject_label="this bundled file",
+            secondary_label="Remove From Context",
+            secondary_summary="you want to trim the saved bundle instead",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About File",
             subject_summary="this file",
@@ -8376,6 +8940,13 @@ async def _show_context_bundle_change_preview_from_callback(
             "back_target": back_target,
             **source_payload,
         },
+        next_step_line=_workspace_item_preview_next_step_line(
+            ask_label="Ask Agent About Change",
+            subject_label="this bundled change",
+            secondary_label="Remove From Context",
+            secondary_summary="you want to trim the saved bundle instead",
+            has_last_request=last_request_text is not None,
+        ),
         action_guide_entries=_workspace_item_action_guide_entries(
             ask_label="Ask Agent About Change",
             subject_summary="this change",
@@ -15528,6 +16099,10 @@ def _build_runtime_status_view(
     last_turn_available = last_turn is not None
     last_request = ui_state.get_last_request(user_id, workspace_id)
     last_request_text = None if last_request is None else last_request.text
+    session_has_live_id = session is not None and getattr(session, "session_id", None) is not None
+    can_fork_session = session_has_live_id and bool(
+        getattr(getattr(session, "capabilities", None), "can_fork", False)
+    )
     pending_media_group_stats = ui_state.pending_media_group_stats(user_id)
     bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
     bundle_count = 0 if bundle is None else len(bundle.items)
@@ -15726,6 +16301,24 @@ def _build_runtime_status_view(
         lines.append(
             "Admin-only shared-runtime switches stay here instead of the persistent keyboard."
         )
+    _append_action_guide_lines(
+        lines,
+        entries=_status_action_guide_entries(
+            active_turn=active_turn,
+            pending_text_action=pending_text_action,
+            pending_media_group_stats=pending_media_group_stats,
+            bundle_count=bundle_count,
+            bundle_chat_active=bundle_chat_active,
+            last_request_available=last_request_text is not None,
+            last_turn_available=last_turn_available,
+            is_admin=is_admin,
+            can_fork_session=can_fork_session,
+            live_session_available=session_has_live_id,
+            usage_available=usage_summary is not None,
+            plan_count=plan_count,
+            tool_activity_count=tool_activity_count,
+        ),
+    )
 
     buttons = []
     primary_buttons = []
@@ -15752,15 +16345,6 @@ def _build_runtime_status_view(
         )
     elif bundle_count > 0:
         primary_action_kind = "bundle"
-        primary_buttons.append(
-            _callback_button(
-                ui_state,
-                user_id,
-                "Ask Agent With Context",
-                "runtime_status_control",
-                target="context_bundle_ask",
-            )
-        )
         if last_request_text is not None:
             primary_buttons.append(
                 _callback_button(
@@ -15771,7 +16355,25 @@ def _build_runtime_status_view(
                     target="context_bundle_ask_last_request",
                 )
             )
+            primary_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Context",
+                    "runtime_status_control",
+                    target="context_bundle_ask",
+                )
+            )
         else:
+            primary_buttons.append(
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Context",
+                    "runtime_status_control",
+                    target="context_bundle_ask",
+                )
+            )
             primary_buttons.append(
                 _callback_button(
                     ui_state,
@@ -15822,7 +16424,7 @@ def _build_runtime_status_view(
             ]
         )
     if primary_buttons:
-        buttons.append(primary_buttons)
+        _append_chunked_button_rows(buttons, primary_buttons)
     status_nav_row = [
         _callback_button(ui_state, user_id, "Refresh", "runtime_status_page"),
         _callback_button(ui_state, user_id, "Session History", "runtime_status_open", target="history"),
@@ -15837,7 +16439,7 @@ def _build_runtime_status_view(
                 target="provider_sessions",
             )
         )
-    buttons.append(status_nav_row)
+    _append_chunked_button_rows(buttons, status_nav_row)
     if is_admin:
         buttons.append(
             [
@@ -15893,7 +16495,7 @@ def _build_runtime_status_view(
                 _callback_button(ui_state, user_id, "Start Bundle Chat", "runtime_status_start_bundle_chat")
             )
     if control_buttons:
-        buttons.append(control_buttons)
+        _append_chunked_button_rows(buttons, control_buttons)
     buttons.append(
         [
             _callback_button(
@@ -15913,9 +16515,7 @@ def _build_runtime_status_view(
         ]
     )
     if (
-        session is not None
-        and getattr(session, "session_id", None) is not None
-        and bool(getattr(getattr(session, "capabilities", None), "can_fork", False))
+        can_fork_session
     ):
         buttons.append(
             [
@@ -16019,7 +16619,7 @@ def _build_runtime_status_view(
                 ),
             ]
         )
-    if session is not None and getattr(session, "session_id", None) is not None:
+    if session_has_live_id:
         buttons.extend(
             _status_selection_quick_rows(
                 ui_state,
@@ -16029,7 +16629,7 @@ def _build_runtime_status_view(
                 can_retry_last_turn=last_turn_available,
             )
         )
-    if session is not None and getattr(session, "session_id", None) is not None:
+    if session_has_live_id:
         buttons.extend(
             _status_agent_command_quick_buttons(
                 ui_state,
@@ -16063,17 +16663,8 @@ def _build_runtime_status_view(
         )
     if bundle_count > 0:
         if primary_action_kind != "bundle":
-            bundle_buttons = [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Ask Agent With Context",
-                    "runtime_status_control",
-                    target="context_bundle_ask",
-                )
-            ]
             if last_request_text is not None:
-                bundle_buttons.append(
+                bundle_buttons = [
                     _callback_button(
                         ui_state,
                         user_id,
@@ -16081,8 +16672,27 @@ def _build_runtime_status_view(
                         "runtime_status_control",
                         target="context_bundle_ask_last_request",
                     )
+                ]
+                bundle_buttons.append(
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Ask Agent With Context",
+                        "runtime_status_control",
+                        target="context_bundle_ask",
+                    )
                 )
-            buttons.append(bundle_buttons)
+            else:
+                bundle_buttons = [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Ask Agent With Context",
+                        "runtime_status_control",
+                        target="context_bundle_ask",
+                    )
+                ]
+            _append_chunked_button_rows(buttons, bundle_buttons)
         buttons.append(
             [
                 _callback_button(
@@ -16114,7 +16724,7 @@ def _build_runtime_status_view(
                     target="workspace_changes_ask_last_request",
                 )
             )
-        buttons.append(change_buttons)
+        _append_chunked_button_rows(buttons, change_buttons)
         buttons.append(
             [
                 _callback_button(
@@ -16239,6 +16849,12 @@ def _build_history_view(
         page=page,
         page_count=page_count,
     )
+    lines.append(
+        _session_collection_next_step_line(
+            can_fork=can_fork,
+            can_retry_last_turn=can_retry_last_turn,
+        )
+    )
     lines.extend(
         _session_action_guide_lines(
             run_summary="keeps working in that saved session",
@@ -16258,46 +16874,44 @@ def _build_history_view(
             page=page,
             back_target=back_target,
         )
-        buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    f"{'Current' if is_current else 'Run'} {start + offset}",
-                    "noop" if is_current else "history_run",
-                    **(
-                        {"notice": "Already using this session."}
-                        if is_current
-                        else history_entry_payload
-                    ),
+        entry_buttons = [
+            _callback_button(
+                ui_state,
+                user_id,
+                f"{'Current' if is_current else 'Run'} {start + offset}",
+                "noop" if is_current else "history_run",
+                **(
+                    {"notice": "Already using this session."}
+                    if is_current
+                    else history_entry_payload
                 ),
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    f"Rename {start + offset}",
-                    "history_rename",
-                    **history_entry_payload,
-                    title=entry.title or entry.session_id,
-                ),
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    f"Delete {start + offset}",
-                    "history_delete",
-                    **history_entry_payload,
-                ),
-            ]
-        )
-        buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    f"Open {start + offset}",
-                    "history_open",
-                    **history_entry_payload,
-                ),
-            ]
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                f"Open {start + offset}",
+                "history_open",
+                **history_entry_payload,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                f"Rename {start + offset}",
+                "history_rename",
+                **history_entry_payload,
+                title=entry.title or entry.session_id,
+            ),
+            _callback_button(
+                ui_state,
+                user_id,
+                f"Delete {start + offset}",
+                "history_delete",
+                **history_entry_payload,
+            ),
+        ]
+        _append_chunked_button_rows(
+            buttons,
+            entry_buttons,
         )
         action_buttons = []
         if can_retry_last_turn and not is_current:
@@ -16331,7 +16945,7 @@ def _build_history_view(
                 )
             )
         if action_buttons:
-            buttons.append(action_buttons)
+            _append_chunked_button_rows(buttons, action_buttons)
 
     if page_count > 1:
         nav = []
@@ -16442,6 +17056,13 @@ def _build_history_entry_view(
     )
     is_current = entry.session_id == active_session_id
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    lines.append(
+        _session_entry_next_step_line(
+            is_current=is_current,
+            can_fork=can_fork,
+            can_retry_last_turn=can_retry_last_turn,
+        )
+    )
     lines.extend(
         _session_action_guide_lines(
             run_summary="keeps working in that saved session",
@@ -16514,7 +17135,7 @@ def _build_history_entry_view(
             )
         )
     if action_buttons:
-        buttons.append(action_buttons)
+        _append_chunked_button_rows(buttons, action_buttons)
 
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
@@ -16619,6 +17240,12 @@ def _build_provider_sessions_view(
         lines.append(f"Loaded sessions on this page: {len(entries)}")
         if previous_cursors or next_cursor is not None:
             lines.append(f"Cursor page: {len(previous_cursors) + 1}")
+        lines.append(
+            _session_collection_next_step_line(
+                can_fork=can_fork,
+                can_retry_last_turn=can_retry_last_turn,
+            )
+        )
         lines.extend(
             _session_action_guide_lines(
                 run_summary="attaches this bot to that provider session and keeps working there",
@@ -16699,7 +17326,7 @@ def _build_provider_sessions_view(
                     )
                 )
             if action_buttons:
-                buttons.append(action_buttons)
+                _append_chunked_button_rows(buttons, action_buttons)
 
     nav = []
     if previous_cursors:
@@ -16879,6 +17506,24 @@ def _build_session_info_view(
     lines.append(f"Cached plan items: {len(_plan_items(session))}")
     lines.append(f"Cached tool activities: {len(_tool_activity_items(session))}")
     last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+
+    recovery_lines, recovery_buttons = _workspace_recovery_actions(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+        back_target="session_info",
+    )
+    if recovery_buttons:
+        lines.append("")
+        lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
+    else:
+        lines.append(
+            "Recommended next step: send text or an attachment from chat to keep working, or "
+            "use Usage / Workspace Runtime below if you want more runtime detail first."
+        )
 
     if usage_summary is not None:
         buttons.append(
@@ -16903,6 +17548,17 @@ def _build_session_info_view(
                 "Last Request",
                 "runtime_status_open",
                 target="last_request",
+                back_target="session_info",
+            )
+        )
+    if last_turn is not None:
+        quick_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Last Turn",
+                "runtime_status_open",
+                target="last_turn",
                 back_target="session_info",
             )
         )
@@ -16939,19 +17595,8 @@ def _build_session_info_view(
                 back_target="session_info",
             )
         )
-    if ui_state.get_last_turn(user_id, provider, workspace_id) is not None:
-        quick_buttons.append(
-            _callback_button(
-                ui_state,
-                user_id,
-                "Last Turn",
-                "runtime_status_open",
-                target="last_turn",
-                back_target="session_info",
-            )
-        )
     if quick_buttons:
-        buttons.append(quick_buttons)
+        _append_chunked_button_rows(buttons, quick_buttons)
 
     _append_back_to_status_button(
         buttons,
@@ -17005,6 +17650,29 @@ def _build_usage_view(
         return "\n".join(lines), markup
 
     session_id = getattr(session, "session_id", None)
+    usage_nav_buttons = [
+        _callback_button(
+            ui_state,
+            user_id,
+            "Refresh",
+            "runtime_status_open",
+            target="usage",
+            back_target=back_target,
+        )
+    ]
+    if back_target != "session_info":
+        usage_nav_buttons.append(
+            _callback_button(
+                ui_state,
+                user_id,
+                "Session Info",
+                "runtime_status_open",
+                target="session_info",
+                back_target="usage",
+            )
+        )
+    buttons.append(usage_nav_buttons)
+
     lines.append(f"Session: {session_id or 'pending'}")
     if session_title is not None:
         lines.append(f"Title: {session_title}")
@@ -17029,6 +17697,28 @@ def _build_usage_view(
         if utilization is not None:
             lines.append(f"Utilization: {utilization:.1f}%")
         lines.append(f"Cost: {_usage_cost_label(usage)}")
+
+    recovery_lines, recovery_buttons = _workspace_recovery_actions(
+        ui_state=ui_state,
+        user_id=user_id,
+        provider=provider,
+        workspace_id=workspace_id,
+        back_target="usage",
+    )
+    if recovery_buttons:
+        lines.append("")
+        lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
+    elif usage is None:
+        lines.append(
+            "Recommended next step: send a request that produces a reply first, or go back to "
+            "Session Info / Bot Status if you want the wider runtime snapshot."
+        )
+    else:
+        lines.append(
+            "Recommended next step: keep chatting if you just needed a usage snapshot, or open "
+            "Session Info if you want the wider runtime snapshot."
+        )
 
     _append_back_to_status_button(
         buttons,
@@ -17107,6 +17797,7 @@ def _build_last_request_view(
             "Use Retry Last Turn or Fork Last Turn if you need the original attachments or "
             "extra context back."
         )
+    lines.append(_last_request_next_step_line(last_turn_available=last_turn_available))
     lines.append(
         f"Text length: {len(last_request.text)} character{'s' if len(last_request.text) != 1 else ''}"
     )
@@ -17194,6 +17885,7 @@ def _build_workspace_runtime_view(
         if remaining > 0:
             lines.append(f"... {remaining} more server{'s' if remaining != 1 else ''}")
         lines.append("New, loaded, resumed, and forked sessions inherit this MCP server set.")
+    lines.append(_workspace_runtime_next_step_line(has_mcp_servers=bool(mcp_servers)))
 
     buttons: list[list[InlineKeyboardButton]] = []
     if mcp_servers:
@@ -17273,6 +17965,7 @@ def _build_workspace_runtime_server_view(
         lines.append("Header keys:")
         for item in header_items:
             lines.append(_status_text_snippet(getattr(item, "name", None), limit=120) or "[empty]")
+    lines.append(_workspace_runtime_server_next_step_line())
 
     buttons = [
         [
@@ -17362,6 +18055,7 @@ def _build_last_turn_view(
     lines.append(
         "Fork Last Turn starts a new session first, then replays the same payload there."
     )
+    lines.append(_last_turn_next_step_line())
 
     prompt_items = _replay_prompt_items(replay_turn)
     saved_context_items = tuple(getattr(replay_turn, "saved_context_items", ()) or ())
@@ -17657,6 +18351,7 @@ def _build_plan_view(
         page=page,
         page_count=page_count,
     )
+    lines.append(_plan_next_step_line(entries))
 
     for offset, entry in enumerate(visible_entries, start=1):
         index = start + offset
@@ -17742,6 +18437,7 @@ def _build_plan_detail_view(
     priority = _status_text_snippet(getattr(entry, "priority", None))
     if priority is not None:
         lines.append(f"Priority: {priority}")
+    lines.append(_plan_detail_next_step_line(status=str(getattr(entry, "status", "pending"))))
     lines.append("Content:")
     content = getattr(entry, "content", None)
     if content is None:
@@ -17851,6 +18547,7 @@ def _build_tool_activity_view(
         page=page,
         page_count=page_count,
     )
+    lines.append(_tool_activity_next_step_line(activities))
 
     for offset, activity in enumerate(visible_activities, start=1):
         index = start + offset
@@ -17951,6 +18648,14 @@ def _build_tool_activity_detail_view(
     if kind is not None:
         lines.append(f"Kind: {kind}")
     lines.append(f"Tool call: {getattr(activity, 'tool_call_id', 'tool')}")
+    lines.append(
+        _tool_activity_detail_next_step_line(
+            status=str(getattr(activity, "status", "pending")),
+            has_openable_paths=bool(openable_paths),
+            has_change_targets=bool(change_targets),
+            has_terminal_preview=bool(terminal_previews or tuple(getattr(activity, "terminal_ids", ()) or ())),
+        )
+    )
 
     details = tuple(getattr(activity, "details", ()) or ())
     if details:
@@ -18117,6 +18822,13 @@ def _build_provider_session_detail_view(
     )
     is_current = entry.session_id == active_session_id
     can_retry_last_turn = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    lines.append(
+        _session_entry_next_step_line(
+            is_current=is_current,
+            can_fork=can_fork,
+            can_retry_last_turn=can_retry_last_turn,
+        )
+    )
     lines.extend(
         _session_action_guide_lines(
             run_summary="attaches this bot to that provider session and keeps working there",
@@ -18192,7 +18904,7 @@ def _build_provider_session_detail_view(
             )
         )
     if action_buttons:
-        buttons.append(action_buttons)
+        _append_chunked_button_rows(buttons, action_buttons)
 
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
@@ -18269,6 +18981,8 @@ def _build_agent_commands_view(
         page=page,
         page_count=page_count,
     )
+    has_args_commands = any(bool(command.hint) for command in commands)
+    lines.append(_agent_commands_next_step_line(has_args_commands=has_args_commands))
 
     for offset, command in enumerate(visible_commands, start=1):
         index = start + offset
@@ -18304,6 +19018,11 @@ def _build_agent_commands_view(
                 )
             ]
         )
+
+    _append_action_guide_lines(
+        lines,
+        entries=_agent_command_action_guide_entries(has_args_commands=has_args_commands),
+    )
 
     if page_count > 1:
         nav = []
@@ -18394,6 +19113,7 @@ def _build_agent_command_detail_view(
     else:
         lines.append("Args hint: none")
         lines.append(f"Example: {_agent_command_name(command.name)}")
+    lines.append(_agent_command_detail_next_step_line(requires_args=bool(command.hint)))
 
     command_payload = _agent_command_callback_payload(
         command=command,
@@ -18730,6 +19450,21 @@ def _build_workspace_listing_view(
         page=page,
         page_count=page_count,
     )
+    visible_file_paths = _visible_workspace_file_paths(listing, page)
+    if visible_file_paths:
+        lines.append(
+            _workspace_collection_next_step_line(
+                inspect_summary="open a file first if you want to inspect it",
+                ask_label="Ask Agent With Visible Files",
+                add_label="Add Visible Files to Context",
+                has_last_request=last_request_text is not None,
+            )
+        )
+    else:
+        lines.append(
+            "Recommended next step: open a folder first if you want to keep browsing, or use "
+            "Workspace Search if you already know what to look for."
+        )
 
     buttons = []
     bundle_source_payload = _callback_source_restore_payload(
@@ -18808,30 +19543,7 @@ def _build_workspace_listing_view(
     if nav:
         buttons.append(nav)
 
-    if _visible_workspace_file_paths(listing, page):
-        buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Ask Agent With Visible Files",
-                    "workspace_page_ask_agent",
-                    relative_path=listing.relative_path,
-                    page=page,
-                    back_target=back_target,
-                ),
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Start Bundle Chat With Visible Files",
-                    "workspace_page_start_bundle_chat",
-                    relative_path=listing.relative_path,
-                    page=page,
-                    back_target=back_target,
-                    **bundle_source_payload,
-                ),
-            ]
-        )
+    if visible_file_paths:
         if last_request_text is not None:
             buttons.append(
                 [
@@ -18844,22 +19556,79 @@ def _build_workspace_listing_view(
                         page=page,
                         back_target=back_target,
                     ),
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Ask Agent With Visible Files",
+                        "workspace_page_ask_agent",
+                        relative_path=listing.relative_path,
+                        page=page,
+                        back_target=back_target,
+                    ),
                 ]
             )
-        buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    "Add Visible Files to Context",
-                    "workspace_page_add_context",
-                    relative_path=listing.relative_path,
-                    page=page,
-                    back_target=back_target,
-                    **bundle_source_payload,
-                ),
-            ]
-        )
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Start Bundle Chat With Visible Files",
+                        "workspace_page_start_bundle_chat",
+                        relative_path=listing.relative_path,
+                        page=page,
+                        back_target=back_target,
+                        **bundle_source_payload,
+                    ),
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Add Visible Files to Context",
+                        "workspace_page_add_context",
+                        relative_path=listing.relative_path,
+                        page=page,
+                        back_target=back_target,
+                        **bundle_source_payload,
+                    ),
+                ]
+            )
+        else:
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Ask Agent With Visible Files",
+                        "workspace_page_ask_agent",
+                        relative_path=listing.relative_path,
+                        page=page,
+                        back_target=back_target,
+                    ),
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Start Bundle Chat With Visible Files",
+                        "workspace_page_start_bundle_chat",
+                        relative_path=listing.relative_path,
+                        page=page,
+                        back_target=back_target,
+                        **bundle_source_payload,
+                    ),
+                ]
+            )
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        "Add Visible Files to Context",
+                        "workspace_page_add_context",
+                        relative_path=listing.relative_path,
+                        page=page,
+                        back_target=back_target,
+                        **bundle_source_payload,
+                    ),
+                ]
+            )
 
     buttons.append(
         [
@@ -18953,6 +19722,14 @@ def _build_workspace_search_results_view(
         page=page,
         page_count=page_count,
     )
+    lines.append(
+        _workspace_collection_next_step_line(
+            inspect_summary="open a match first if you want to inspect it",
+            ask_label="Ask Agent With Matching Files",
+            add_label="Add Matching Files to Context",
+            has_last_request=last_request_text is not None,
+        )
+    )
 
     buttons = []
     bundle_source_payload = _callback_source_restore_payload(
@@ -19026,29 +19803,6 @@ def _build_workspace_search_results_view(
         if nav:
             buttons.append(nav)
 
-    buttons.append(
-        [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Ask Agent With Matching Files",
-                "workspace_search_ask_agent",
-                query_text=search_results.query,
-                page=page,
-                back_target=back_target,
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                "Start Bundle Chat With Matching Files",
-                "workspace_search_start_bundle_chat",
-                query_text=search_results.query,
-                page=page,
-                back_target=back_target,
-                **bundle_source_payload,
-            ),
-        ]
-    )
     if last_request_text is not None:
         buttons.append(
             [
@@ -19061,21 +19815,77 @@ def _build_workspace_search_results_view(
                     page=page,
                     back_target=back_target,
                 ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Matching Files",
+                    "workspace_search_ask_agent",
+                    query_text=search_results.query,
+                    page=page,
+                    back_target=back_target,
+                ),
             ]
         )
-    buttons.append(
-        [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Add Matching Files to Context",
-                "workspace_search_add_context",
-                query_text=search_results.query,
-                back_target=back_target,
-                **bundle_source_payload,
-            ),
-        ]
-    )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Start Bundle Chat With Matching Files",
+                    "workspace_search_start_bundle_chat",
+                    query_text=search_results.query,
+                    page=page,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Add Matching Files to Context",
+                    "workspace_search_add_context",
+                    query_text=search_results.query,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+            ]
+        )
+    else:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Matching Files",
+                    "workspace_search_ask_agent",
+                    query_text=search_results.query,
+                    page=page,
+                    back_target=back_target,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Start Bundle Chat With Matching Files",
+                    "workspace_search_start_bundle_chat",
+                    query_text=search_results.query,
+                    page=page,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+            ]
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Add Matching Files to Context",
+                    "workspace_search_add_context",
+                    query_text=search_results.query,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+            ]
+        )
     buttons.append(
         [
             _callback_button(
@@ -19199,6 +20009,14 @@ def _build_workspace_changes_view(
         page=page,
         page_count=page_count,
     )
+    lines.append(
+        _workspace_collection_next_step_line(
+            inspect_summary="open a change first if you want to inspect the diff",
+            ask_label="Ask Agent With Current Changes",
+            add_label="Add All Changes to Context",
+            has_last_request=last_request_text is not None,
+        )
+    )
 
     buttons = []
     bundle_source_payload = _callback_source_restore_payload(
@@ -19265,27 +20083,6 @@ def _build_workspace_changes_view(
         if nav:
             buttons.append(nav)
 
-    buttons.append(
-        [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Ask Agent With Current Changes",
-                "workspace_changes_ask_agent",
-                page=page,
-                back_target=back_target,
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                "Start Bundle Chat With Changes",
-                "workspace_changes_start_bundle_chat",
-                page=page,
-                back_target=back_target,
-                **bundle_source_payload,
-            ),
-        ]
-    )
     if last_request_text is not None:
         buttons.append(
             [
@@ -19297,21 +20094,73 @@ def _build_workspace_changes_view(
                     page=page,
                     back_target=back_target,
                 ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Current Changes",
+                    "workspace_changes_ask_agent",
+                    page=page,
+                    back_target=back_target,
+                ),
             ]
         )
-    buttons.append(
-        [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Add All Changes to Context",
-                "workspace_changes_add_all",
-                page=page,
-                back_target=back_target,
-                **bundle_source_payload,
-            ),
-        ]
-    )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Start Bundle Chat With Changes",
+                    "workspace_changes_start_bundle_chat",
+                    page=page,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Add All Changes to Context",
+                    "workspace_changes_add_all",
+                    page=page,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+            ]
+        )
+    else:
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent With Current Changes",
+                    "workspace_changes_ask_agent",
+                    page=page,
+                    back_target=back_target,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Start Bundle Chat With Changes",
+                    "workspace_changes_start_bundle_chat",
+                    page=page,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+            ]
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Add All Changes to Context",
+                    "workspace_changes_add_all",
+                    page=page,
+                    back_target=back_target,
+                    **bundle_source_payload,
+                ),
+            ]
+        )
     buttons.append(
         [
             _callback_button(
@@ -19428,6 +20277,12 @@ def _build_context_bundle_view(
     if page_count > 1:
         lines.append(f"Showing: {start + 1}-{start + len(visible_items)} of {len(bundle.items)}")
         lines.append(f"Page: {page + 1}/{page_count}")
+    lines.append(
+        _context_bundle_next_step_line(
+            bundle_chat_active=bundle_chat_active,
+            has_last_request=last_request_text is not None,
+        )
+    )
 
     buttons = []
     for offset, item in enumerate(visible_items, start=1):
@@ -19471,17 +20326,32 @@ def _build_context_bundle_view(
             "Start Bundle Chat if you want your next plain text message to include this bundle automatically."
         )
 
-    buttons.append(
-        [
+    primary_buttons = []
+    if last_request_text is not None:
+        primary_buttons.append(
             _callback_button(
                 ui_state,
                 user_id,
-                "Ask Agent With Context",
-                "context_bundle_ask",
+                "Ask With Last Request",
+                "context_bundle_ask_last_request",
                 page=page,
                 back_target=back_target,
                 **source_payload,
-            ),
+            )
+        )
+    primary_buttons.append(
+        _callback_button(
+            ui_state,
+            user_id,
+            "Ask Agent With Context",
+            "context_bundle_ask",
+            page=page,
+            back_target=back_target,
+            **source_payload,
+        )
+    )
+    if last_request_text is None:
+        primary_buttons.append(
             _callback_button(
                 ui_state,
                 user_id,
@@ -19490,17 +20360,17 @@ def _build_context_bundle_view(
                 page=page,
                 back_target=back_target,
                 **source_payload,
-            ),
-        ]
-    )
+            )
+        )
+    buttons.append(primary_buttons)
     if last_request_text is not None:
         buttons.append(
             [
                 _callback_button(
                     ui_state,
                     user_id,
-                    "Ask With Last Request",
-                    "context_bundle_ask_last_request",
+                    "Stop Bundle Chat" if bundle_chat_active else "Start Bundle Chat",
+                    "context_bundle_chat_disable" if bundle_chat_active else "context_bundle_chat_enable",
                     page=page,
                     back_target=back_target,
                     **source_payload,
@@ -19580,6 +20450,7 @@ def _build_workspace_file_preview_view(
     secondary_button_label: str,
     secondary_button_action: str,
     secondary_button_payload: dict[str, Any],
+    next_step_line: str | None = None,
     action_guide_entries: tuple[tuple[str, str], ...] = (),
     supplemental_buttons: tuple[tuple[str, str, dict[str, Any]], ...] = (),
 ):
@@ -19594,28 +20465,12 @@ def _build_workspace_file_preview_view(
         if preview.truncated:
             lines.append("[preview truncated]")
 
+    if next_step_line is not None:
+        lines.append(next_step_line)
     _append_action_guide_lines(lines, entries=action_guide_entries)
 
-    buttons = [
-        [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Ask Agent About File",
-                "workspace_file_ask_agent",
-                **ask_payload,
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                secondary_button_label,
-                secondary_button_action,
-                **secondary_button_payload,
-            ),
-        ]
-    ]
     if last_request_text is not None:
-        buttons.append(
+        buttons = [
             [
                 _callback_button(
                     ui_state,
@@ -19623,9 +20478,44 @@ def _build_workspace_file_preview_view(
                     "Ask With Last Request",
                     "workspace_file_ask_last_request",
                     **quick_ask_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent About File",
+                    "workspace_file_ask_agent",
+                    **ask_payload,
+                ),
+            ],
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    secondary_button_label,
+                    secondary_button_action,
+                    **secondary_button_payload,
                 )
+            ],
+        ]
+    else:
+        buttons = [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent About File",
+                    "workspace_file_ask_agent",
+                    **ask_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    secondary_button_label,
+                    secondary_button_action,
+                    **secondary_button_payload,
+                ),
             ]
-        )
+        ]
     if supplemental_buttons:
         buttons.append(
             [
@@ -19670,6 +20560,7 @@ def _build_workspace_change_preview_view(
     secondary_button_label: str,
     secondary_button_action: str,
     secondary_button_payload: dict[str, Any],
+    next_step_line: str | None = None,
     action_guide_entries: tuple[tuple[str, str], ...] = (),
     supplemental_buttons: tuple[tuple[str, str, dict[str, Any]], ...] = (),
 ):
@@ -19682,28 +20573,12 @@ def _build_workspace_change_preview_view(
     if diff_preview.truncated:
         lines.append("[diff preview truncated]")
 
+    if next_step_line is not None:
+        lines.append(next_step_line)
     _append_action_guide_lines(lines, entries=action_guide_entries)
 
-    buttons = [
-        [
-            _callback_button(
-                ui_state,
-                user_id,
-                "Ask Agent About Change",
-                "workspace_change_ask_agent",
-                **ask_payload,
-            ),
-            _callback_button(
-                ui_state,
-                user_id,
-                secondary_button_label,
-                secondary_button_action,
-                **secondary_button_payload,
-            ),
-        ]
-    ]
     if last_request_text is not None:
-        buttons.append(
+        buttons = [
             [
                 _callback_button(
                     ui_state,
@@ -19711,9 +20586,44 @@ def _build_workspace_change_preview_view(
                     "Ask With Last Request",
                     "workspace_change_ask_last_request",
                     **quick_ask_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent About Change",
+                    "workspace_change_ask_agent",
+                    **ask_payload,
+                ),
+            ],
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    secondary_button_label,
+                    secondary_button_action,
+                    **secondary_button_payload,
                 )
+            ],
+        ]
+    else:
+        buttons = [
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Ask Agent About Change",
+                    "workspace_change_ask_agent",
+                    **ask_payload,
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    secondary_button_label,
+                    secondary_button_action,
+                    **secondary_button_payload,
+                ),
             ]
-        )
+        ]
     if supplemental_buttons:
         buttons.append(
             [
@@ -19787,6 +20697,7 @@ def _build_model_mode_view(
             "Mode controls are not exposed in this session. Use the available model controls "
             "below, or keep chatting normally if you do not need to change it."
         )
+    lines.append(_model_mode_next_step_line(can_retry_last_turn=can_retry_last_turn))
     lines.append("This updates the current live session in place.")
     if can_retry_last_turn:
         lines.append(
@@ -19798,7 +20709,13 @@ def _build_model_mode_view(
     buttons = []
 
     if model_selection is not None:
-        lines.extend(_selection_overview_lines(prefix="Model", selection=model_selection))
+        lines.extend(
+            _selection_overview_lines(
+                prefix="Model",
+                selection=model_selection,
+                can_retry_last_turn=can_retry_last_turn,
+            )
+        )
         lines.append("")
         buttons.extend(
             _selection_buttons(
@@ -19812,7 +20729,13 @@ def _build_model_mode_view(
         )
 
     if mode_selection is not None:
-        lines.extend(_selection_overview_lines(prefix="Mode", selection=mode_selection))
+        lines.extend(
+            _selection_overview_lines(
+                prefix="Mode",
+                selection=mode_selection,
+                can_retry_last_turn=can_retry_last_turn,
+            )
+        )
         lines.append("")
         buttons.extend(
             _selection_buttons(
@@ -19824,6 +20747,11 @@ def _build_model_mode_view(
                 back_target=back_target,
             )
         )
+
+    _append_action_guide_lines(
+        lines,
+        entries=_model_mode_action_guide_entries(can_retry_last_turn=can_retry_last_turn),
+    )
 
     _append_back_to_status_button(
         buttons,
@@ -19845,12 +20773,23 @@ def _model_mode_current_setup_line(*, model_selection, mode_selection) -> str | 
     return "Current setup: " + ", ".join(parts)
 
 
-def _selection_overview_lines(*, prefix: str, selection) -> list[str]:
+def _selection_overview_lines(
+    *,
+    prefix: str,
+    selection,
+    can_retry_last_turn: bool,
+) -> list[str]:
     lines = [f"{prefix} choices:"]
     for choice_index, choice in enumerate(selection.choices, start=1):
         current_suffix = " [current]" if choice.value == selection.current_value else ""
         lines.append(f"{choice_index}. {choice.label}{current_suffix}")
-    lines.append(f"Tap {prefix}: ... to switch now, or Open {prefix} N for details.")
+    if can_retry_last_turn:
+        lines.append(
+            f"Tap {prefix}: ... to switch now, use {prefix}+Retry: ... to rerun the last turn, "
+            f"or Open {prefix} N for details."
+        )
+    else:
+        lines.append(f"Tap {prefix}: ... to switch now, or Open {prefix} N for details.")
     return lines
 
 
