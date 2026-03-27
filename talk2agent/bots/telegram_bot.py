@@ -1615,6 +1615,55 @@ def _primary_controls_line(
     )
 
 
+def _resume_snapshot_lines(
+    *,
+    provider: str,
+    last_request: _LastRequestText | None,
+    last_turn: _ReplayTurn | None,
+    bundle_count: int,
+    bundle_chat_active: bool,
+) -> list[str]:
+    if last_request is None and last_turn is None and bundle_count <= 0:
+        return []
+
+    lines = ["Resume snapshot:"]
+    if last_request is not None:
+        lines.append(
+            f"Last request: {_status_text_snippet(last_request.text, limit=120) or '[empty]'}"
+        )
+        lines.append(f"Last request source: {_last_request_source_summary(last_request)}")
+        lines.append(
+            "Replay text only: "
+            + _last_request_replay_note(
+                last_request=last_request,
+                current_provider=provider,
+            )
+        )
+    if last_turn is not None:
+        replay_snippet = _status_text_snippet(last_turn.title_hint) or "untitled turn"
+        lines.append(f"Last turn replay: available ({replay_snippet})")
+        lines.append(
+            "Replay full payload: "
+            + _last_turn_replay_note(
+                replay_turn=last_turn,
+                current_provider=provider,
+            )
+        )
+    if bundle_count > 0:
+        bundle_summary = _status_item_count_summary(bundle_count) or "current bundle"
+        if bundle_chat_active:
+            lines.append(
+                "Context bundle ready: "
+                f"{bundle_summary}; bundle chat is on, so your next plain text message will include it."
+            )
+        else:
+            lines.append(
+                "Context bundle ready: "
+                f"{bundle_summary}; use Context Bundle or Bot Status to send it with your next request."
+            )
+    return lines
+
+
 def _main_keyboard_priority_lines(*, is_admin: bool) -> list[str]:
     lines = [
         "Main keyboard focus: New Session and Bot Status first, then Retry / Fork Last Turn.",
@@ -1670,8 +1719,10 @@ def _build_start_text(
     bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
     bundle_count = 0 if bundle is None else len(bundle.items)
     bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
-    last_request_available = ui_state.get_last_request_text(user_id, workspace_id) is not None
-    last_turn_available = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_request_available = last_request is not None
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    last_turn_available = last_turn is not None
 
     lines = [
         f"Welcome to Talk2Agent for {resolve_provider_profile(provider).display_name} in {workspace_label}.",
@@ -1746,6 +1797,17 @@ def _build_start_text(
             f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''} ({bundle_chat_state})"
         )
 
+    resume_lines = _resume_snapshot_lines(
+        provider=provider,
+        last_request=last_request,
+        last_turn=last_turn,
+        bundle_count=bundle_count,
+        bundle_chat_active=bundle_chat_active,
+    )
+    if resume_lines:
+        lines.append("")
+        lines.extend(resume_lines)
+
     lines.append("")
     lines.append("Start here:")
     lines.append("Send plain text or an attachment to talk to the current agent.")
@@ -1778,8 +1840,10 @@ def _build_help_text(
     bundle = ui_state.get_context_bundle(user_id, provider, workspace_id)
     bundle_count = 0 if bundle is None else len(bundle.items)
     bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
-    last_request_available = ui_state.get_last_request_text(user_id, workspace_id) is not None
-    last_turn_available = ui_state.get_last_turn(user_id, provider, workspace_id) is not None
+    last_request = ui_state.get_last_request(user_id, workspace_id)
+    last_request_available = last_request is not None
+    last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
+    last_turn_available = last_turn is not None
 
     lines = [
         f"Talk2Agent help for {resolve_provider_profile(provider).display_name} in {workspace_label}.",
@@ -1826,6 +1890,17 @@ def _build_help_text(
         lines.append(f"Pending uploads: {_pending_media_group_summary(pending_media_group_stats)}")
     lines.append(f"Context bundle: {bundle_count} item{'s' if bundle_count != 1 else ''}")
 
+    resume_lines = _resume_snapshot_lines(
+        provider=provider,
+        last_request=last_request,
+        last_turn=last_turn,
+        bundle_count=bundle_count,
+        bundle_chat_active=bundle_chat_active,
+    )
+    if resume_lines:
+        lines.append("")
+        lines.extend(resume_lines)
+
     lines.append("")
     lines.append("Quick guide:")
     lines.append("1. Send text or an attachment to chat with the current agent.")
@@ -1838,8 +1913,8 @@ def _build_help_text(
         "/ mode, agent commands, and recovery."
     )
     lines.append(
-        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent from Bot "
-        "Status when you need to branch or reset your work."
+        "4. Use Session History, Run Last Request, Retry/Fork Last Turn, New Session, and "
+        "Restart Agent from Bot Status when you need to branch, replay, or reset your work."
     )
     lines.append("")
     lines.append("Keyboard:")
@@ -2451,7 +2526,13 @@ async def _load_runtime_status_view_state(services, user_id: int):
     return state, session, history_entries, git_status
 
 
-async def _show_runtime_status(update: Update, services, ui_state: TelegramUiState) -> None:
+async def _show_runtime_status(
+    update: Update,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    notice: str | None = None,
+) -> None:
     if update.message is None:
         return
     if not _is_authorized(update, services):
@@ -2480,6 +2561,7 @@ async def _show_runtime_status(update: Update, services, ui_state: TelegramUiSta
         user_id=update.effective_user.id,
         ui_state=ui_state,
         is_admin=update.effective_user.id == services.admin_user_id,
+        notice=notice,
     )
     await update.message.reply_text(text, reply_markup=markup)
 
@@ -8822,11 +8904,11 @@ async def _retry_last_turn(
                 return
             except Exception:
                 pass
-        await _reply_with_menu(
-            update.message,
+        await _show_runtime_status(
+            update,
             services,
-            update.effective_user.id,
-            _no_previous_turn_text(),
+            ui_state,
+            notice=_no_previous_turn_text(),
         )
         return
 
@@ -8878,11 +8960,11 @@ async def _fork_last_turn(
                 return
             except Exception:
                 pass
-        await _reply_with_menu(
-            update.message,
+        await _show_runtime_status(
+            update,
             services,
-            update.effective_user.id,
-            _no_previous_turn_text(),
+            ui_state,
+            notice=_no_previous_turn_text(),
         )
         return
 
@@ -14377,6 +14459,26 @@ def _build_runtime_status_view(
                     target="bundle",
                 )
             )
+    elif last_request is not None:
+        primary_action_kind = "last_request"
+        primary_buttons.extend(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Run Last Request",
+                    "runtime_status_control",
+                    target="run_last_request",
+                ),
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Last Request",
+                    "runtime_status_open",
+                    target="last_request",
+                ),
+            ]
+        )
     elif last_turn_available:
         primary_action_kind = "last_turn"
         primary_buttons.extend(
@@ -14557,7 +14659,7 @@ def _build_runtime_status_view(
                 )
             ]
         )
-    if last_request is not None:
+    if last_request is not None and primary_action_kind != "last_request":
         buttons.append(
             [
                 _callback_button(

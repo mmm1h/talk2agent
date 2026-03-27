@@ -996,6 +996,60 @@ def test_handle_start_summarizes_existing_session_and_pending_work_without_clear
     assert store.get_or_create_calls == []
 
 
+def test_handle_start_surfaces_resume_snapshot_for_returning_user():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_start,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the rollout summary")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Re-run the rollout summary"),),
+            title_hint="Re-run the rollout summary",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    ui_state.enable_context_bundle_chat(123, "codex", "default")
+
+    update = FakeUpdate(user_id=123, text="/start")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_start(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert "Resume snapshot:" in text
+    assert "Last request: Re-run the rollout summary" in text
+    assert "Last request source: plain text" in text
+    assert (
+        "Replay text only: Run Last Request will send this text again to Codex in the current workspace."
+        in text
+    )
+    assert "Last turn replay: available (Re-run the rollout summary)" in text
+    assert (
+        "Replay full payload: Retry Last Turn / Fork Last Turn will replay this saved payload on Codex in the current workspace."
+        in text
+    )
+    assert (
+        "Context bundle ready: 1 item; bundle chat is on, so your next plain text message will include it."
+        in text
+    )
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
 def test_handle_start_surfaces_pending_media_group_state_without_starting_session():
     from talk2agent.bots.telegram_bot import TelegramUiState, handle_start
 
@@ -1082,8 +1136,8 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
         in text
     )
     assert (
-        "4. Use Session History, Retry/Fork Last Turn, New Session, and Restart Agent from Bot "
-        "Status when you need to branch or reset your work."
+        "4. Use Session History, Run Last Request, Retry/Fork Last Turn, New Session, and "
+        "Restart Agent from Bot Status when you need to branch, replay, or reset your work."
         in text
     )
     assert "Keyboard:" in text
@@ -1103,6 +1157,51 @@ def test_handle_help_replies_with_quick_guide_without_starting_session():
         in text
     )
     assert "Admin row: Switch Agent and Switch Workspace stay available and change the shared runtime." in text
+    assert store.peek_calls == [123]
+    assert store.get_or_create_calls == []
+
+
+def test_handle_help_surfaces_resume_snapshot_for_returning_user():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_help,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the integration plan")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the integration plan"),),
+            title_hint="Review the integration plan",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="docs/plan.md"),
+    )
+
+    update = FakeUpdate(user_id=123, text="/help")
+    services, store = make_services(provider="codex", peek_session=None)
+
+    run(handle_help(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert "Resume snapshot:" in text
+    assert "Last request: Review the integration plan" in text
+    assert "Last request source: plain text" in text
+    assert "Last turn replay: available (Review the integration plan)" in text
+    assert (
+        "Context bundle ready: 1 item; use Context Bundle or Bot Status to send it with your next request."
+        in text
+    )
     assert store.peek_calls == [123]
     assert store.get_or_create_calls == []
 
@@ -1831,13 +1930,19 @@ def test_retry_last_turn_button_without_previous_turn_shows_notice():
     from talk2agent.bots.telegram_bot import BUTTON_RETRY_LAST_TURN, TelegramUiState, handle_text
 
     update = FakeUpdate(user_id=123, text=BUTTON_RETRY_LAST_TURN)
-    services, _ = make_services()
+    services, _ = make_services(provider="codex")
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls == [
-        "No previous turn is available yet. Send a new request first, then try again."
-    ]
+    assert update.message.reply_calls[0].startswith(
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Session History")
+    assert find_inline_button(markup, "New Session")
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "Retry Last Turn" not in labels
 
 
 def test_fork_last_turn_button_replays_previous_text_turn_in_new_session():
@@ -1893,12 +1998,40 @@ def test_fork_last_turn_button_without_previous_turn_shows_notice():
     from talk2agent.bots.telegram_bot import BUTTON_FORK_LAST_TURN, TelegramUiState, handle_text
 
     update = FakeUpdate(user_id=123, text=BUTTON_FORK_LAST_TURN)
-    services, _ = make_services()
+    services, _ = make_services(provider="codex")
 
     run(handle_text(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls == [
-        "No previous turn is available yet. Send a new request first, then try again."
+    assert update.message.reply_calls[0].startswith(
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "Session History")
+    assert find_inline_button(markup, "New Session")
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "Fork Last Turn" not in labels
+
+
+def test_retry_last_turn_button_without_previous_turn_promotes_run_last_request_recovery():
+    from talk2agent.bots.telegram_bot import BUTTON_RETRY_LAST_TURN, TelegramUiState, handle_text
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Re-run the rollout summary")
+    update = FakeUpdate(user_id=123, text=BUTTON_RETRY_LAST_TURN)
+    services, _ = make_services(provider="codex", peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert text.startswith(
+        "No previous turn is available yet. Send a new request first, then try again.\n"
+        "Bot status for Codex in Default Workspace"
+    )
+    markup = update.message.reply_markups[0]
+    assert [button.text for button in markup.inline_keyboard[0]] == [
+        "Run Last Request",
+        "Last Request",
     ]
 
 
@@ -2638,6 +2771,10 @@ def test_bot_status_prioritizes_run_last_request_when_cached_request_is_availabl
     assert "Last request text: Re-run the rollout summary" in text
     assert "Last request source: plain text" in text
     markup = update.message.reply_markups[0]
+    assert [button.text for button in markup.inline_keyboard[0]] == [
+        "Run Last Request",
+        "Last Request",
+    ]
     assert find_inline_button(markup, "Run Last Request")
     assert find_inline_button(markup, "Last Request")
     assert store.get_or_create_calls == []

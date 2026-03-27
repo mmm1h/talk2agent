@@ -12,9 +12,9 @@
 ## 启动与全局运行时
 
 1. 发送 `/start`，确认会返回欢迎页和主键盘，且不会隐式创建新 session。
-   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的“Start here”引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒。
+   同时确认主键盘只保留四行高频动作：前两行是 `New Session`、`Bot Status`、`Retry Last Turn` 和 `Fork Last Turn`，第三行是 `Workspace Search` / `Context Bundle`，第四行是 `Help` / `Cancel / Stop`；`Session History`、`Model / Mode`、`Agent Commands`、`Workspace Files` / `Workspace Changes`、`Restart Agent` 不再常驻主键盘，而是统一进入 `Bot Status`。另外确认消息顶部会先显示 `Status`、`Recommended next step` 与 `Primary controls right now`，再给出更产品化的“Start here”引导和 `/start`、`/status`、`/help`、`/cancel` 恢复提醒；如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认欢迎页会额外给出 `Resume snapshot`，直接解释哪些内容可以继续复用。
 2. 发送 `/help`，确认会返回快速使用指南和恢复入口，且不会隐式创建新 session。
-   同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用。
+   同时确认消息顶部也会先显示当前状态和建议下一步，而不是一上来就铺满运行时细节，并明确说明本地 slash 恢复入口始终可用；如果当前 workspace 仍有可恢复内容，再确认帮助页也会显示 `Resume snapshot`。
 3. 发送 `/status`，确认会直接打开 `Bot Status`，且不会隐式创建新 session；在主键盘被 Telegram 折叠时，这条命令仍然可作为只读恢复入口。
 4. 在待输入、运行中 turn 和 Bundle Chat 三种状态下分别发送 `/cancel`，并额外测试一次主键盘 `Cancel / Stop`，确认都会按优先级执行本地取消，而不是误发给 agent。
    额外验证一次 `media_group` 还在收集窗口内时立刻 `/cancel`，确认附件组会被直接丢弃，而不是延迟几百毫秒后仍然发给 agent。
@@ -24,7 +24,7 @@
 7. 触发一个已失效的旧 inline button，确认 bot 会提示这是旧菜单上的按钮，并建议重新打开最近视图或使用 `/start`，而不是只弹出无方向的过期提示。
 8. 发送一个伪造或跨用户的 callback，确认 bot 会给出“重新打开最近视图”或“从自己的聊天里重新打开菜单 / 使用 `/start`”之类的纠正提示，而不是只显示模糊的系统短语。
 9. 点击 `Bot Status`，确认它是只读入口，不会隐式创建新 session。
-   同时确认顶部会前置当前状态下的主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`。
+   同时确认顶部会前置当前状态下的主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`。
    再确认正文被分成 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 这类可扫读分段，而不是一整块无层次长文本。
    如果当前 turn 仍在运行，再确认状态页会显示 `Turn elapsed`；如果当前正在等待纯文本输入，再确认状态页会显示 `Next plain text`，让用户知道下一条该发什么。
    如果当前 workspace 已缓存 `Last Request`，再确认状态页会显示它的来源摘要，并提供 `Run Last Request`；这个入口应只重跑请求文本，而不是隐式恢复旧附件或旧上下文。
@@ -55,6 +55,7 @@
    再制造一次“当前没有可复用 `Last Turn`，但仍有 `Last Request`”的失败态，确认恢复面板会改成 `Run Last Request` / `New Session` / `Open Bot Status`，而不是继续保留 `Retry Last Turn` / `Fork Last Turn` 死入口。
 8. 在 `Session History` 或 `Provider Sessions` 里执行 `Run+Retry` 或 `Fork+Retry` 后，再让上一轮在点击前失效，确认 bot 会在原列表里提示“先发送一条新请求”，而不是误报已经重试成功。
 9. 在 `Retry Last Turn`、`Fork Last Turn`、以及带 `Switch+Retry` / `Fork+Retry` 的状态页快捷入口上，人为让上一轮在点击前失效，确认 bot 会原地恢复当前视图并提示先发送一条新请求，而不是误报“已经重试成功”。
+   再额外从主键盘直接点击一次 `Retry Last Turn` 或 `Fork Last Turn`，在当前没有可复用 `Last Turn` 的情况下，确认 bot 会打开带 notice 的 `Bot Status` 并给出 `Run Last Request`、`Session History`、`New Session` 等恢复入口，而不是只回复一条死提示。
 
 ## Workspace 与上下文
 

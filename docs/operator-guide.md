@@ -31,6 +31,7 @@
 
 - `/start`：恢复欢迎页和常驻主键盘，不会隐式创建新 session。
 - `/start` / `/help` / `/status` / `Bot Status`：消息顶部会先给出当前 `Status` 和 `Recommended next step`，并补上一句 `Primary controls right now`，把“现在处于什么状态、接下来该做什么、该点哪个入口”放在详细运行时信息之前。
+- `/start` / `/help`：如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，欢迎页和帮助页会直接补一段 `Resume snapshot`，把“重跑文本”和“重放整轮 payload”的区别先讲清楚，减少返回用户还得先点进 `Bot Status` 才知道能从哪里继续。
 - `/start` / `/help`：都会明确提醒本地 `/start`、`/status`、`/help`、`/cancel` 始终可用，即使 Telegram 折叠了主键盘或 slash 菜单正在刷新。
 - `/help`：查看当前 Provider / Workspace 下的快速使用指南和恢复入口，不会隐式创建新 session。
 - `/cancel`：优先取消待输入动作，其次停止当前 turn，再次关闭 Bundle Chat；只有在没有本地状态可取消时，才会回到 agent 自己的 `/cancel` 命令。
@@ -43,7 +44,7 @@
 - 过期按钮：旧消息上的 inline button 过期后，bot 会明确提示“这是旧菜单上的按钮”，并建议重新打开最近视图或使用 `/start`，避免只留下不可操作的死按钮。
 - 无效或跨用户按钮：版本漂移、失效 payload，或点到别人的按钮时，bot 会返回恢复或纠正建议，而不是只显示生硬的系统短语。
 - `Bot Status`：只读总览当前 Provider、Workspace、会话和最近状态，同时承担高级控制中心。
-- `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context` 或 `Retry Last Turn`，减少手机端来回扫按钮。
+- `Bot Status` 顶部会按当前状态前置主动作，例如 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Ask Agent With Context`、`Run Last Request` 或 `Retry Last Turn`，减少手机端来回扫按钮。
 - `Bot Status` 的正文会按 `Current runtime`、`Recoverable memory`、`Workspace context`、`Agent capabilities` 和 `Controls` 分段，避免长消息退化成一整屏无层次的状态 dump。
 - 当当前 turn 仍在运行时，`Bot Status` 会额外显示 `Turn elapsed`；当 bot 正在等待下一条纯文本时，也会直接显示 `Next plain text` 提示，减少用户猜“下一条到底该发什么”。
 - 当用户的消息被当前运行中 turn、待输入动作或待发送附件组挡住时，bot 不只会解释原因，还会直接附上 `Stop Turn`、`Cancel Pending Input`、`Discard Pending Uploads`、`Open Bot Status` 这类恢复按钮，避免用户还得记 slash 命令。
@@ -64,7 +65,7 @@
   从 `Session History` 里执行 `Run Session` / `Run+Retry` / `Fork+Retry` 时，成功和失败都会回到历史列表并保留当前上下文；如果上一轮已失效，也会明确提示先发新请求，而不是误报“已经重试成功”。
   `Session History` 列表和详情都会先解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
   如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；而是补上 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，把下一步动作直接放在空状态里。
-- `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，bot 会明确提示先发送一条新请求；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
+- `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，主键盘入口不会只回一句死提示，而会直接落到带 notice 的 `Bot Status`，把 `Run Last Request`、`Session History`、`New Session` 等恢复入口一起摆出来；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
   当上一轮最初记录在另一个 Provider 上时，状态页和 `Last Turn` 详情页也会明确提示“本次会在当前 Provider 上重放，必要时会先做附件能力适配”，减少跨 runtime 误解。
 - 回合完成快捷操作：当一次 turn 正常结束且没有更具体的 workspace change follow-up 时，最终结果消息本身会附上 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`。
   这些按钮会从结果继续发起下一步，而不会把刚收到的答案编辑掉。
