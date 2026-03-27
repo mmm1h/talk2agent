@@ -110,6 +110,7 @@
 3. 发起一个持续几秒的请求，确认 `Bot Status` 能显示运行中状态并允许 `Stop Turn`。
    再在 turn 运行中分别发送一条普通文本、一个单附件和一个 Telegram 相册，确认 bot 都会立即提示“这条新消息没有发出去”，而不是悄悄排队；其中被挡住的文本也不应覆盖已有 `Last Request`。
    再执行一次 `/cancel` 或 `Stop Turn`，确认最终的取消回显本身会带上 `Retry Last Turn`、`Fork Last Turn`、`Open Bot Status` 和 `New Session`，而不是只剩一条终点文案。
+   再分别取消一次 `Workspace Search`、`Bundle Chat` 和“其实没有任何东西可取消”的空状态，确认 bot 都会继续补一张 `Quick actions` 卡片，把 `Search Again`、`Ask Agent With Context`、`Run Last Request`、`Open Bot Status` 或 `New Session` 这类下一步动作直接放出来，而不是让用户自己回忆接下来该点哪里。
 4. 发起一个足够长的流式回合，确认 Telegram Draft 预览在超长时会明确用省略号表示当前只显示尾部进度，而不是无提示截断。
    再人为模拟一次 Draft 预览不可用，确认 bot 仍会立即发出“正在处理”的普通消息，而不是在最终回复前完全静默。
 5. 发送一条足够长、会超过 Telegram 文本上限的请求结果，确认 bot 会优先按段落、换行或空格分段，而不是把一句完整的话硬切成难读碎片。

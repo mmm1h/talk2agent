@@ -2440,6 +2440,80 @@ async def _reply_entrypoint_quick_actions(
     await message.reply_text(text, reply_markup=markup)
 
 
+def _post_cancel_fallback_view(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        "Quick actions for getting back to work:\n"
+        "Send text or an attachment when ready, open Bot Status for the full control center, "
+        "or start a New Session if you want a clean slate.",
+        _inline_notice_markup(
+            ui_state,
+            user_id,
+            (
+                ("Open Bot Status", "runtime_status_page", {}),
+                ("New Session", "recover_new_session", {}),
+            ),
+        ),
+    )
+
+
+def _stop_requested_follow_up_view(
+    ui_state: TelegramUiState,
+    user_id: int,
+) -> tuple[str, InlineKeyboardMarkup]:
+    return (
+        "Quick action while the turn winds down:\n"
+        "Open Bot Status to watch the stop request and confirm when the session is ready again.",
+        _status_only_notice_markup(ui_state, user_id),
+    )
+
+
+async def _reply_cancel_follow_up(
+    message,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    cancelled_pending_text_action: _PendingTextAction | None = None,
+    cancelled_pending_uploads: bool = False,
+    stop_requested: bool = False,
+) -> None:
+    view: tuple[str, InlineKeyboardMarkup] | None = None
+    if stop_requested:
+        view = _stop_requested_follow_up_view(ui_state, user_id)
+    elif (
+        cancelled_pending_text_action is not None
+        and cancelled_pending_text_action.action == "workspace_search"
+        and not cancelled_pending_uploads
+    ):
+        view = (
+            _workspace_search_cancelled_text(),
+            _workspace_search_cancelled_markup(ui_state, user_id),
+        )
+    else:
+        try:
+            state = await services.snapshot_runtime_state()
+        except Exception:
+            state = None
+        if state is not None:
+            view = _entrypoint_quick_actions_view(
+                provider=state.provider,
+                workspace_id=state.workspace_id,
+                user_id=user_id,
+                ui_state=ui_state,
+            )
+    if view is None:
+        view = _post_cancel_fallback_view(ui_state, user_id)
+
+    text, markup = view
+    try:
+        await message.reply_text(text, reply_markup=markup)
+    except Exception:
+        pass
+
+
 async def handle_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2596,6 +2670,14 @@ async def handle_cancel(
             user_id,
             " ".join(notice_parts),
         )
+        await _reply_cancel_follow_up(
+            update.message,
+            services,
+            ui_state,
+            user_id=user_id,
+            cancelled_pending_text_action=pending_text_action,
+            cancelled_pending_uploads=pending_media_group_stats is not None,
+        )
         return
 
     active_turn = ui_state.get_active_turn(user_id)
@@ -2614,6 +2696,13 @@ async def handle_cancel(
             services,
             user_id,
             "Stop requested for the current turn. Open Bot Status to track progress.",
+        )
+        await _reply_cancel_follow_up(
+            update.message,
+            services,
+            ui_state,
+            user_id=user_id,
+            stop_requested=True,
         )
         return
 
@@ -2634,6 +2723,12 @@ async def handle_cancel(
             user_id,
             "Bundle chat disabled. New plain text messages will use the normal session again.",
         )
+        await _reply_cancel_follow_up(
+            update.message,
+            services,
+            ui_state,
+            user_id=user_id,
+        )
         return
 
     if ui_state.resolve_agent_command(user_id, CANCEL_COMMAND) is not None:
@@ -2645,6 +2740,12 @@ async def handle_cancel(
         services,
         user_id,
         "Nothing to cancel. Send text, use /start to restore the main keyboard, or open Bot Status.",
+    )
+    await _reply_cancel_follow_up(
+        update.message,
+        services,
+        ui_state,
+        user_id=user_id,
     )
 
 

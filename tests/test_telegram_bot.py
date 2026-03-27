@@ -1401,9 +1401,14 @@ def test_handle_text_cancel_button_routes_to_cancel_flow():
 
     run(handle_text(update, None, services, ui_state))
 
-    assert update.message.reply_calls == [
+    assert update.message.reply_calls[0] == (
         "Cancelled pending input: Workspace search. Nothing was sent to the agent."
-    ]
+    )
+    assert update.message.reply_calls[1] == (
+        "Search cancelled. Use Workspace Search to search again or open Bot Status when ready."
+    )
+    assert find_inline_button(update.message.reply_markups[1], "Search Again")
+    assert find_inline_button(update.message.reply_markups[1], "Open Bot Status")
     assert ui_state.get_pending_text_action(123) is None
     assert store.get_or_create_calls == []
 
@@ -1501,9 +1506,14 @@ def test_handle_cancel_clears_pending_input_without_starting_session():
 
     run(handle_cancel(update, None, services, ui_state))
 
-    assert update.message.reply_calls == [
+    assert update.message.reply_calls[0] == (
         "Cancelled pending input: Workspace search. Nothing was sent to the agent."
-    ]
+    )
+    assert update.message.reply_calls[1] == (
+        "Search cancelled. Use Workspace Search to search again or open Bot Status when ready."
+    )
+    assert find_inline_button(update.message.reply_markups[1], "Search Again")
+    assert find_inline_button(update.message.reply_markups[1], "Open Bot Status")
     assert ui_state.get_pending_text_action(123) is None
     assert store.get_or_create_calls == []
 
@@ -1524,9 +1534,14 @@ def test_handle_cancel_stops_running_turn():
         cancel_update = FakeUpdate(user_id=123, text="/cancel")
         await handle_cancel(cancel_update, make_context(application=application), services, ui_state)
 
-        assert cancel_update.message.reply_calls == [
+        assert cancel_update.message.reply_calls[0] == (
             "Stop requested for the current turn. Open Bot Status to track progress."
-        ]
+        )
+        assert cancel_update.message.reply_calls[1] == (
+            "Quick action while the turn winds down:\n"
+            "Open Bot Status to watch the stop request and confirm when the session is ready again."
+        )
+        assert find_inline_button(cancel_update.message.reply_markups[1], "Open Bot Status")
         assert session.cancel_turn_calls == 1
 
         await application.wait_for_tasks()
@@ -1559,9 +1574,18 @@ def test_handle_cancel_disables_bundle_chat_before_falling_back_to_agent():
 
     run(handle_cancel(update, None, services, ui_state))
 
-    assert update.message.reply_calls == [
+    assert update.message.reply_calls[0] == (
         "Bundle chat disabled. New plain text messages will use the normal session again."
-    ]
+    )
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for getting back to work:")
+    assert (
+        "Ask Agent With Context waits for your next plain-text question and adds the current context bundle."
+        in quick_actions_text
+    )
+    assert find_inline_button(update.message.reply_markups[1], "Ask Agent With Context")
+    assert find_inline_button(update.message.reply_markups[1], "Open Context Bundle")
+    assert find_inline_button(update.message.reply_markups[1], "Open Bot Status")
     assert ui_state.context_bundle_chat_active(123, "codex", "default") is False
     assert store.get_or_create_calls == []
 
@@ -1588,9 +1612,37 @@ def test_handle_cancel_reports_when_nothing_is_cancelable():
 
     run(handle_cancel(update, None, services, TelegramUiState()))
 
-    assert update.message.reply_calls == [
+    assert update.message.reply_calls[0] == (
         "Nothing to cancel. Send text, use /start to restore the main keyboard, or open Bot Status."
-    ]
+    )
+    assert update.message.reply_calls[1] == (
+        "Quick actions for getting back to work:\n"
+        "Send text or an attachment when ready, open Bot Status for the full control center, "
+        "or start a New Session if you want a clean slate."
+    )
+    assert find_inline_button(update.message.reply_markups[1], "Open Bot Status")
+    assert find_inline_button(update.message.reply_markups[1], "New Session")
+    assert store.get_or_create_calls == []
+
+
+def test_handle_cancel_surfaces_workspace_recovery_when_nothing_local_is_cancelable():
+    from talk2agent.bots.telegram_bot import TelegramUiState, handle_cancel
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the rollout summary")
+    update = FakeUpdate(user_id=123, text="/cancel")
+    services, store = make_services(provider="codex")
+
+    run(handle_cancel(update, None, services, ui_state))
+
+    assert update.message.reply_calls[0] == (
+        "Nothing to cancel. Send text, use /start to restore the main keyboard, or open Bot Status."
+    )
+    quick_actions_text = update.message.reply_calls[1]
+    assert quick_actions_text.startswith("Quick actions for getting back to work:")
+    assert "Run Last Request replays only the saved request text." in quick_actions_text
+    assert find_inline_button(update.message.reply_markups[1], "Run Last Request")
+    assert find_inline_button(update.message.reply_markups[1], "Open Bot Status")
     assert store.get_or_create_calls == []
 
 
@@ -1620,9 +1672,16 @@ def test_handle_cancel_discards_pending_media_group_before_it_reaches_agent():
 
     services, ui_state, cancel_update, first_message, second_message = asyncio.run(scenario())
 
-    assert cancel_update.message.reply_calls == [
+    assert cancel_update.message.reply_calls[0] == (
         "Discarded pending attachment group (2 items). Nothing was sent to the agent."
-    ]
+    )
+    assert cancel_update.message.reply_calls[1] == (
+        "Quick actions for getting back to work:\n"
+        "Send text or an attachment when ready, open Bot Status for the full control center, "
+        "or start a New Session if you want a clean slate."
+    )
+    assert find_inline_button(cancel_update.message.reply_markups[1], "Open Bot Status")
+    assert find_inline_button(cancel_update.message.reply_markups[1], "New Session")
     assert services.final_session.prompt_items == []
     assert ui_state.pending_media_group_stats(123) is None
     assert first_message.reply_calls == []
@@ -1660,9 +1719,16 @@ def test_handle_cancel_after_pending_input_blocks_media_group_immediately():
         "Nothing was sent to the agent."
     ]
     assert second_message.reply_calls == []
-    assert cancel_update.message.reply_calls == [
+    assert cancel_update.message.reply_calls[0] == (
         "Cancelled pending input: Rename session title (session-1). Nothing was sent to the agent."
-    ]
+    )
+    assert cancel_update.message.reply_calls[1] == (
+        "Quick actions for getting back to work:\n"
+        "Send text or an attachment when ready, open Bot Status for the full control center, "
+        "or start a New Session if you want a clean slate."
+    )
+    assert find_inline_button(cancel_update.message.reply_markups[1], "Open Bot Status")
+    assert find_inline_button(cancel_update.message.reply_markups[1], "New Session")
     assert ui_state.get_pending_text_action(123) is None
     assert ui_state.pending_media_group_stats(123) is None
     assert services.final_session.prompt_items == []

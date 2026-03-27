@@ -38,6 +38,7 @@
 - `/start` / `/help`：都会明确提醒本地 `/start`、`/status`、`/help`、`/cancel` 始终可用，即使 Telegram 折叠了主键盘或 slash 菜单正在刷新。
 - `/help`：查看当前 Provider / Workspace 下的快速使用指南和恢复入口，不会隐式创建新 session。
 - `/cancel`：优先取消待输入动作，其次停止当前 turn，再次关闭 Bundle Chat；只有在没有本地状态可取消时，才会回到 agent 自己的 `/cancel` 命令。
+- `/cancel` / `Cancel / Stop`：本地取消成功后，不会只留一条终点文案；bot 会继续补一张 `Quick actions` 卡片，把 `Search Again`、`Ask Agent With Context`、`Run Last Request`、`Open Bot Status` 或 `New Session` 这类最相关的下一步动作直接挂出来。
 - 待发送附件组：Telegram `media_group` 还在收集窗口内时，bot 会把它视为显式的本地待处理状态；`/cancel` / `Cancel / Stop` 可以直接丢弃，避免“以为取消了，其实附件还是发到了 agent”。
 - 相册收集中的并发保护：当 `media_group` 还没收齐时，新的非相册文本/附件不会抢先进入 agent；bot 会明确提示“这条新消息没有发出去”，避免用户误以为它会排队执行，结果把待收集附件组冲掉。
 - 状态切换前的上传止损：如果用户在附件组仍处于收集窗口内时执行 `New Session`、`Restart Agent`、会话切换/分叉，或管理员执行 `Switch Agent` / `Switch Workspace`，bot 会先丢弃这些待发送上传，并明确提示“Nothing was sent to the agent”，避免旧附件晚到新 session 或新 workspace。
