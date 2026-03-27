@@ -60,18 +60,22 @@
   如果当前 workspace 已经没有可复用的 `Last Turn`，失败恢复面板不会继续保留 `Retry Last Turn` / `Fork Last Turn` 这类死入口，而会改成优先给出 `Run Last Request`、`New Session` 和 `Open Bot Status`。
 - `Switch Agent` / `Switch Workspace`：管理员执行的全局切换，会影响所有用户的当前运行时。
   菜单顶部会先强调这是 shared runtime 的全局动作，避免管理员把它误解成只影响自己当前聊天。
-  切换菜单还会显示 `Available agents` 或 `Configured workspaces`，并明确告诉管理员当前点下去就是立即切换 shared runtime；如果当前还有可复用 `Last Turn`，`Switch Agent` 也会先解释 `Retry on ...` 与 `Fork on ...` 的差别。
+  切换菜单还会显示 `Available agents` 或 `Configured workspaces`，但第一层只负责列出目标并引导进入详情确认页，避免管理员在手机端误触就立刻切换 shared runtime。
+  `Switch Agent` 的目标详情页会先单独展示目标 provider 的能力摘要，再把 `Switch to ...`、`Retry on ...`、`Fork on ...` 放在同一页里，明确告诉管理员“先切换 shared runtime，再决定是否立刻重放上一轮”。
+  `Switch Workspace` 也会先打开目标详情页，再提供 `Switch to ...` 确认按钮，让“查看影响范围”和“真正执行切换”分成两步，而不是挤在同一层按钮里。
   切换前，bot 会先明确说明旧按钮与待输入会被清理，以及 `Context Bundle`、`Last Request`、`Last Turn` 哪些会继续可复用、哪些会留在旧 runtime / 旧 workspace。
   如果切换前还有待发送附件组，bot 会先直接丢弃并把这件事写进失败/成功回显，避免旧附件误发到新 runtime。
-  如果切换失败，bot 会保留当前选择器并带上失败说明，避免管理员重新回到主键盘再打开一次。
+  如果从主键盘直接进入切换流，切换成功或失败后都会尽量留在当前目标详情页，并带上成功/失败说明，方便管理员立刻重试或返回列表；如果入口来自 `Bot Status`，则会回到状态页并保留同样的 notice。
   切换成功后，回显也会再次提示 carry-over 规则，避免管理员误以为 context bundle 会自动跟着切走。
 - `New Session` / `Restart Agent` / `Session History`：管理当前用户的会话生命周期。
   当这些动作会替换当前 live session 时，如果还有待发送附件组，bot 也会先丢弃并明确告知，而不是让旧上传跨 session 漏过去。
   成功回显会直接说明同一 workspace 下哪些内容仍可复用；如果 `Bundle Chat` 仍处于开启状态，也会明确提醒“下一条纯文本仍会自动带上当前 bundle”，避免用户把“新 session”误解成“所有上下文都被清空”。
   从 `Session History` 里执行 `Run Session` / `Run+Retry` / `Fork+Retry` 时，成功和失败都会回到历史列表并保留当前上下文；如果上一轮已失效，也会明确提示先发新请求，而不是误报“已经重试成功”。
   `Session History` 列表和详情都会先解释 `Run` 是回到旧 session 继续工作、`Fork` 是基于它开一条新分支、`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮，减少手机端试错。
-  如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；而是补上 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，把下一步动作直接放在空状态里。
-- `Session Info` / `Usage` / `Agent Commands` 的无 session 空状态：如果当前 live session 已消失，但当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些页面不会只剩“没有会话”；它们会直接补上 `Recovery options`，并给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这类直达按钮。
+  如果 `Session History` 还是空的，bot 不会只留一句“没有历史”；除了 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，它还会补一行 `Recommended next step`。
+  如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，同一个空状态里还会继续补上 `Recovery options`，把 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这些真正能继续工作的入口直接挂出来。
+- `Session Info` / `Usage` / `Agent Commands` 的无 session 空状态：如果当前 live session 已消失，但当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些页面不会只剩“没有会话”；它们会先补一行 `Recommended next step`，再补上 `Recovery options`，并给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 这类直达按钮。
+- `Last Request` / `Last Turn` / `Agent Plan` / `Tool Activity` 的空状态也不再是死路页：如果数据刚失效、当前还留有其他可复用上下文，页面会先补一行 `Recommended next step`，再补上对应的恢复动作；其中 `Agent Plan` / `Tool Activity` 还会额外保留 `Refresh`，方便用户在同一页等待后续更新，而不是被迫先退回状态页。
 - 分页列表可预期：`Session History`、`Provider Sessions`、`Agent Commands`、`Workspace Files` / `Search` / `Changes`、`Context Bundle` 在超过一页时都会显示总数、当前页范围和页码，减少手机端只看到 `Prev` / `Next` 却不知道自己翻到哪里的情况。
 - `Retry Last Turn` / `Fork Last Turn`：如果当前 workspace 还没有上一轮可复用，主键盘入口不会只回一句死提示，而会直接落到带 notice 的 `Bot Status`，把 `Run Last Request`、`Session History`、`New Session` 等恢复入口一起摆出来；从 `Bot Status` 里触发这类回放时，也会原地恢复状态页，而不是跳出当前流程。
   当上一轮最初记录在另一个 Provider 上时，状态页和 `Last Turn` 详情页也会明确提示“本次会在当前 Provider 上重放，必要时会先做附件能力适配”，减少跨 runtime 误解。
@@ -81,7 +85,8 @@
 - `Provider Sessions`：管理员浏览并接管 Provider 原生保存的 session。
   列表和详情都会先解释 `Run` 是把当前 bot 重新附着到 provider session、`Fork` 是基于它再开一条 live 分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
   其中 `Run+Retry` / `Fork+Retry` 也会在原列表内完成成功/失败回显，避免管理员在 provider 会话列表和结果页之间来回跳转。
-  如果当前 agent 不支持 provider-side session browsing，或当前页暂时没有任何 provider session，bot 会解释这是 provider 能力或当前状态所致，并补上 `Refresh` / `Open Bot Status` 恢复入口，而不是只留一句空文案。
+  如果当前 agent 不支持 provider-side session browsing，或当前页暂时没有任何 provider session，bot 会解释这是 provider 能力或当前状态所致，并补一行 `Recommended next step`，而不是只留一句空文案。
+  如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，这些 provider-session 空状态也会继续补上 `Recovery options`，允许管理员直接从当前 workspace 恢复工作，而不用先退回别的页面。
 - `Agent Commands` / `Model / Mode`：使用当前 live session 暴露的能力。
   `Model / Mode` 不再只是按钮列表；页面会先展示当前 setup、说明这是对当前 live session 的原地更新，再列出可选项和“先看详情还是直接切换”的路径，减少手机端误切。
   如果当前 session 只暴露 `Model` 或只暴露 `Mode`，页面会直接说明另一半当前不可用，而不是让用户误以为按钮加载失败。

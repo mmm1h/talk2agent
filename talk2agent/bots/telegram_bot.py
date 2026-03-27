@@ -1835,6 +1835,7 @@ def _workspace_recovery_actions(
     provider: str,
     workspace_id: str,
     back_target: str,
+    empty_recommendation: str | None = None,
 ) -> tuple[list[str], list[list[InlineKeyboardButton]]]:
     last_request = ui_state.get_last_request(user_id, workspace_id)
     last_turn = ui_state.get_last_turn(user_id, provider, workspace_id)
@@ -1843,11 +1844,19 @@ def _workspace_recovery_actions(
     bundle_chat_active = ui_state.context_bundle_chat_active(user_id, provider, workspace_id)
     restore_back_target = "status" if back_target == "none" else back_target
 
-    if last_request is None and last_turn is None and bundle_count <= 0:
+    has_last_request = last_request is not None
+    has_last_turn = last_turn is not None
+    recommendation = _workspace_recovery_next_step_line(
+        has_last_request=has_last_request,
+        has_last_turn=has_last_turn,
+        bundle_count=bundle_count,
+        bundle_chat_active=bundle_chat_active,
+        empty_recommendation=empty_recommendation,
+    )
+
+    if not has_last_request and not has_last_turn and bundle_count <= 0:
         return (
-            [
-                "Recommended next step: send text or an attachment from chat to start a live session, or use the buttons below to go back."
-            ],
+            [recommendation],
             [],
         )
 
@@ -1860,6 +1869,7 @@ def _workspace_recovery_actions(
     )
     if reuse_summary is not None:
         lines.append(reuse_summary)
+    lines.append(recommendation)
     lines.append("Recovery options:")
 
     buttons: list[list[InlineKeyboardButton]] = []
@@ -1959,6 +1969,65 @@ def _workspace_recovery_actions(
                 ]
             )
     return lines, buttons
+
+
+def _workspace_recovery_next_step_line(
+    *,
+    has_last_request: bool,
+    has_last_turn: bool,
+    bundle_count: int,
+    bundle_chat_active: bool,
+    empty_recommendation: str | None = None,
+) -> str:
+    if bundle_chat_active and bundle_count > 0:
+        if has_last_request:
+            return (
+                "Recommended next step: send plain text to continue with the current bundle, or "
+                "use Bundle + Last Request if you want to replay the saved request with it."
+            )
+        return (
+            "Recommended next step: send plain text to continue with the current bundle, or Ask "
+            "Agent With Context if you want to keep reusing it deliberately."
+        )
+    if has_last_request and bundle_count > 0:
+        if has_last_turn:
+            return (
+                "Recommended next step: use Bundle + Last Request to reuse the saved request with "
+                "the current bundle, or Retry / Fork Last Turn if you need the saved payload back."
+            )
+        return (
+            "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
+            "current bundle, or Ask Agent With Context if you want to send new text with it."
+        )
+    if has_last_turn and bundle_count > 0:
+        return (
+            "Recommended next step: Retry / Fork Last Turn if you need the saved payload back, or "
+            "Ask Agent With Context to keep working with the current bundle."
+        )
+    if has_last_request and has_last_turn:
+        return (
+            "Recommended next step: Run Last Request if the saved text is enough, or Retry / Fork "
+            "Last Turn if you need the full saved payload."
+        )
+    if has_last_turn:
+        return (
+            "Recommended next step: Retry / Fork Last Turn to reuse the saved payload, or send a "
+            "fresh request if you want a clean turn."
+        )
+    if has_last_request:
+        return (
+            "Recommended next step: Run Last Request to reuse the saved text, or send a fresh "
+            "request if you want to branch."
+        )
+    if bundle_count > 0:
+        return (
+            "Recommended next step: Ask Agent With Context to keep working with the current "
+            "bundle, or open Context Bundle to review it first."
+        )
+    return empty_recommendation or (
+        "Recommended next step: send text or an attachment from chat to start a live session, or "
+        "use the buttons below to go back."
+    )
 
 
 def _session_ready_extra_lines(
@@ -3357,6 +3426,7 @@ async def _show_last_request_from_callback(
         last_turn_available=ui_state.get_last_turn(user_id, state.provider, state.workspace_id)
         is not None,
         current_provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
         ui_state=ui_state,
@@ -3442,6 +3512,7 @@ async def _show_last_turn_from_callback(
     text, markup = _build_last_turn_view(
         replay_turn=replay_turn,
         current_provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
         page=page,
@@ -3511,6 +3582,7 @@ async def _show_plan_from_callback(
     text, markup = _build_plan_view(
         entries=_plan_items(session),
         provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
         page=page,
@@ -3582,6 +3654,7 @@ async def _show_tool_activity_from_callback(
     text, markup = _build_tool_activity_view(
         activities=_tool_activity_items(session),
         provider=state.provider,
+        workspace_id=state.workspace_id,
         workspace_label=_workspace_label(services, state.workspace_id),
         user_id=user_id,
         page=page,
@@ -9218,11 +9291,11 @@ def _build_switch_agent_view(
     lines.append(f"Available agents: {len(provider_profiles)}")
     if replay_turn is not None:
         lines.append(
-            "Choose a provider below. Retry on ... replays the last turn in this workspace; "
-            "Fork on ... starts a new session there first."
+            "Open a provider below to review the switch. The next screen lets you switch now, "
+            "retry the last turn there, or fork it on the new agent."
         )
     else:
-        lines.append("Choose a provider below to switch the shared runtime now.")
+        lines.append("Open a provider below to review the switch impact before you confirm it.")
     lines.append("Provider capabilities:")
     buttons = []
     for profile in provider_profiles:
@@ -9247,36 +9320,15 @@ def _build_switch_agent_view(
             )
             continue
         buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    profile.display_name,
-                    "switch_provider",
-                    provider=profile.provider,
-                    back_target=back_target,
-                )
-            ]
-        )
-        if replay_turn is not None:
-            buttons.append(
                 [
                     _callback_button(
                         ui_state,
                         user_id,
-                        f"Retry on {profile.display_name}",
-                        "switch_provider_retry_last_turn",
+                        profile.display_name,
+                        "switch_provider_review",
                         provider=profile.provider,
                         back_target=back_target,
-                    ),
-                    _callback_button(
-                        ui_state,
-                        user_id,
-                        f"Fork on {profile.display_name}",
-                        "switch_provider_fork_last_turn",
-                        provider=profile.provider,
-                        back_target=back_target,
-                    ),
+                    )
                 ]
             )
     _append_back_to_status_button(
@@ -9377,7 +9429,7 @@ def _build_switch_workspace_view(
     )
     workspaces = tuple(services.config.agent.workspaces)
     lines.append(f"Configured workspaces: {len(workspaces)}")
-    lines.append("Choose a workspace below to switch the shared runtime there.")
+    lines.append("Open a workspace below to review what stays behind before you confirm the switch.")
     buttons = []
     for workspace in workspaces:
         if workspace.id == state.workspace_id:
@@ -9394,17 +9446,17 @@ def _build_switch_workspace_view(
             )
             continue
         buttons.append(
-            [
-                _callback_button(
-                    ui_state,
-                    user_id,
-                    workspace.label,
-                    "switch_workspace",
-                    workspace_id=workspace.id,
-                    back_target=back_target,
-                )
-            ]
-        )
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        workspace.label,
+                        "switch_workspace_review",
+                        workspace_id=workspace.id,
+                        back_target=back_target,
+                    )
+                ]
+            )
     _append_back_to_status_button(
         buttons,
         ui_state=ui_state,
@@ -9458,6 +9510,201 @@ def _switch_workspace_success_detail_text() -> str:
     )
 
 
+def _build_switch_provider_review_view(
+    *,
+    state,
+    services,
+    capability_summaries,
+    provider: str,
+    user_id: int,
+    ui_state: TelegramUiState,
+    replay_turn,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    profile = resolve_provider_profile(provider)
+    summary = capability_summaries.get(provider)
+    is_current = provider == state.provider
+    is_available = summary is not None and getattr(summary, "available", False)
+
+    lines = []
+    if notice:
+        lines.append(notice)
+    lines.append(f"Switch agent review: {profile.display_name}")
+    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
+    lines.append(f"Workspace: {_workspace_label(services, state.workspace_id)}")
+    lines.append("Admin action: confirming here changes the shared agent runtime for every Telegram user.")
+    lines.append("Target capability summary:")
+    lines.append(_format_provider_capability_summary(profile, summary, is_current=is_current))
+    lines.extend(
+        _switch_agent_impact_lines(
+            state=state,
+            user_id=user_id,
+            ui_state=ui_state,
+            replay_turn=replay_turn,
+        )
+    )
+
+    buttons = []
+    if is_current:
+        lines.append("This agent is already active. Go back if you want to review another target.")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Current: {profile.display_name}",
+                    "noop",
+                    notice=f"Already using {profile.display_name}.",
+                )
+            ]
+        )
+    elif not is_available:
+        lines.append(
+            "Recommended next step: choose another agent, or fix this provider and reopen Switch Agent."
+        )
+    else:
+        if replay_turn is not None:
+            lines.append(
+                "Recommended next step: switch now if you want everyone on this agent, or use "
+                "Retry / Fork to move the shared runtime and immediately replay the last turn."
+            )
+        else:
+            lines.append(
+                "Recommended next step: switch now if you want everyone to move to this agent."
+            )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Switch to {profile.display_name}",
+                    "switch_provider",
+                    provider=provider,
+                    back_target=back_target,
+                )
+            ]
+        )
+        if replay_turn is not None:
+            buttons.append(
+                [
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"Retry on {profile.display_name}",
+                        "switch_provider_retry_last_turn",
+                        provider=provider,
+                        back_target=back_target,
+                    ),
+                    _callback_button(
+                        ui_state,
+                        user_id,
+                        f"Fork on {profile.display_name}",
+                        "switch_provider_fork_last_turn",
+                        provider=provider,
+                        back_target=back_target,
+                    ),
+                ]
+            )
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Switch Agent",
+                "switch_agent_page",
+                back_target=back_target,
+            )
+        ]
+    )
+    if back_target == "status":
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+def _build_switch_workspace_review_view(
+    *,
+    state,
+    services,
+    workspace,
+    user_id: int,
+    ui_state: TelegramUiState,
+    back_target: str = "none",
+    notice: str | None = None,
+):
+    is_current = workspace.id == state.workspace_id
+    lines = []
+    if notice:
+        lines.append(notice)
+    lines.append(f"Switch workspace review: {workspace.label}")
+    lines.append(f"Current provider: {resolve_provider_profile(state.provider).display_name}")
+    lines.append(f"Current workspace: {_workspace_label(services, state.workspace_id)}")
+    lines.append("Admin action: confirming here changes the shared workspace for every Telegram user.")
+    lines.append(f"Target workspace ID: {workspace.id}")
+    lines.extend(
+        _switch_workspace_impact_lines(
+            state=state,
+            user_id=user_id,
+            ui_state=ui_state,
+        )
+    )
+
+    buttons = []
+    if is_current:
+        lines.append("This workspace is already active. Go back if you want to review another target.")
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Current: {workspace.label}",
+                    "noop",
+                    notice=f"Already in {workspace.label}.",
+                )
+            ]
+        )
+    else:
+        lines.append(
+            "Recommended next step: switch now if you want everyone to land in this workspace."
+        )
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    f"Switch to {workspace.label}",
+                    "switch_workspace",
+                    workspace_id=workspace.id,
+                    back_target=back_target,
+                )
+            ]
+        )
+    buttons.append(
+        [
+            _callback_button(
+                ui_state,
+                user_id,
+                "Back to Switch Workspace",
+                "switch_workspace_page",
+                back_target=back_target,
+            )
+        ]
+    )
+    if back_target == "status":
+        _append_back_to_status_button(
+            buttons,
+            ui_state=ui_state,
+            user_id=user_id,
+            back_target=back_target,
+        )
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
 async def _show_switch_workspace_menu_from_callback(
     query,
     services,
@@ -9477,6 +9724,130 @@ async def _show_switch_workspace_menu_from_callback(
         notice=notice,
     )
     await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_switch_provider_review_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    provider: str,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    capability_summaries = await _discover_provider_capabilities_for_switch_menu(
+        services,
+        workspace_id=state.workspace_id,
+    )
+    replay_turn = ui_state.get_last_turn(
+        user_id,
+        state.provider,
+        state.workspace_id,
+    )
+    text, markup = _build_switch_provider_review_view(
+        state=state,
+        services=services,
+        capability_summaries=capability_summaries,
+        provider=provider,
+        user_id=user_id,
+        ui_state=ui_state,
+        replay_turn=replay_turn,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_switch_workspace_review_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    workspace_id: str,
+    back_target: str = "none",
+    notice: str | None = None,
+) -> None:
+    state = await services.snapshot_runtime_state()
+    workspace = services.config.agent.resolve_workspace(workspace_id)
+    text, markup = _build_switch_workspace_review_view(
+        state=state,
+        services=services,
+        workspace=workspace,
+        user_id=user_id,
+        ui_state=ui_state,
+        back_target=back_target,
+        notice=notice,
+    )
+    await _edit_query_message(query, text, reply_markup=markup)
+
+
+async def _show_switch_provider_result_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    provider: str,
+    back_target: str,
+    notice: str,
+) -> None:
+    if back_target == "status":
+        await _show_runtime_status_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            notice=notice,
+        )
+        return
+    try:
+        await _show_switch_provider_review_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            provider=provider,
+            back_target=back_target,
+            notice=notice,
+        )
+    except Exception:
+        await _edit_query_message(query, notice)
+
+
+async def _show_switch_workspace_result_from_callback(
+    query,
+    services,
+    ui_state: TelegramUiState,
+    *,
+    user_id: int,
+    workspace_id: str,
+    back_target: str,
+    notice: str,
+) -> None:
+    if back_target == "status":
+        await _show_runtime_status_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            notice=notice,
+        )
+        return
+    try:
+        await _show_switch_workspace_review_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            back_target=back_target,
+            notice=notice,
+        )
+    except Exception:
+        await _edit_query_message(query, notice)
 
 
 async def _show_model_mode_menu(update: Update, services, ui_state: TelegramUiState, *, application) -> None:
@@ -9988,28 +10359,19 @@ async def _switch_provider_from_callback(
             CALLBACK_OPERATION_TIMEOUT_SECONDS,
         )
     except Exception:
-        try:
-            await _show_switch_agent_menu_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=query.from_user.id,
-                back_target=back_target,
-                notice=_prefixed_notice_text(
-                    pending_upload_notice,
-                    _switch_agent_failed_text(),
-                ),
-            )
-            return
-        except Exception:
-            await _edit_query_message(
-                query,
-                _prefixed_notice_text(
-                    pending_upload_notice,
-                    _switch_agent_failed_text(),
-                ),
-            )
-            return
+        await _show_switch_provider_result_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=query.from_user.id,
+            provider=provider,
+            back_target=back_target,
+            notice=_prefixed_notice_text(
+                pending_upload_notice,
+                _switch_agent_failed_text(),
+            ),
+        )
+        return
 
     ui_state.invalidate_runtime_bound_interactions()
     state = await services.snapshot_runtime_state()
@@ -10031,104 +10393,48 @@ async def _switch_provider_from_callback(
             return
 
         async def _after_retry_success(state, session) -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\nRetried last turn on the new agent.",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\nRetried last turn on the new agent.",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\nRetried last turn on the new agent.",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\nRetried last turn on the new agent.",
+            )
 
         async def _on_retry_missing_replay_turn() -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\n{_no_previous_turn_text()}",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\n{_no_previous_turn_text()}",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\n{_no_previous_turn_text()}",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\n{_no_previous_turn_text()}",
+            )
 
         async def _on_retry_prepare_failure() -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\n{_request_failed_text()}",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\n{_request_failed_text()}",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\n{_request_failed_text()}",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\n{_request_failed_text()}",
+            )
 
         async def _on_retry_turn_failure() -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\n{_request_failed_text()}",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\n{_request_failed_text()}",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\n{_request_failed_text()}",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\n{_request_failed_text()}",
+            )
 
         await _retry_last_turn(
             _message_update_from_callback(query),
@@ -10150,104 +10456,48 @@ async def _switch_provider_from_callback(
             return
 
         async def _after_fork_success(state, session) -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\nForked last turn on the new agent.",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\nForked last turn on the new agent.",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\nForked last turn on the new agent.",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\nForked last turn on the new agent.",
+            )
 
         async def _on_fork_missing_replay_turn() -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\n{_no_previous_turn_text()}",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\n{_no_previous_turn_text()}",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\n{_no_previous_turn_text()}",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\n{_no_previous_turn_text()}",
+            )
 
         async def _on_fork_session_creation_failed() -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\n{_session_creation_failed_text()}",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\n{_session_creation_failed_text()}",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\n{_session_creation_failed_text()}",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\n{_session_creation_failed_text()}",
+            )
 
         async def _on_fork_turn_failure() -> None:
-            if back_target == "status":
-                await _show_runtime_status_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    notice=f"{success_text}\n{_request_failed_text()}",
-                )
-                return
-            try:
-                await _show_switch_agent_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=query.from_user.id,
-                    back_target=back_target,
-                    notice=f"{success_text}\n{_request_failed_text()}",
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    f"{success_text}\n{_request_failed_text()}",
-                )
+            await _show_switch_provider_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=query.from_user.id,
+                provider=provider,
+                back_target=back_target,
+                notice=f"{success_text}\n{_request_failed_text()}",
+            )
 
         await _fork_last_turn(
             _message_update_from_callback(query),
@@ -10261,26 +10511,15 @@ async def _switch_provider_from_callback(
         )
         return
 
-    if back_target == "status":
-        await _show_runtime_status_from_callback(
-            query,
-            services,
-            ui_state,
-            user_id=query.from_user.id,
-            notice=success_text,
-        )
-        return
-    try:
-        await _show_switch_agent_menu_from_callback(
-            query,
-            services,
-            ui_state,
-            user_id=query.from_user.id,
-            back_target=back_target,
-            notice=success_text,
-        )
-    except Exception:
-        await _edit_query_message(query, success_text)
+    await _show_switch_provider_result_from_callback(
+        query,
+        services,
+        ui_state,
+        user_id=query.from_user.id,
+        provider=provider,
+        back_target=back_target,
+        notice=success_text,
+    )
 
 
 async def _switch_history_session_from_callback(
@@ -11807,6 +12046,52 @@ async def _dispatch_callback_action(
         )
         return
 
+    if action == "switch_agent_page":
+        await query.answer()
+        await _show_switch_agent_menu_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            back_target=str(payload.get("back_target", "none")),
+        )
+        return
+
+    if action == "switch_workspace_page":
+        await query.answer()
+        await _show_switch_workspace_menu_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            back_target=str(payload.get("back_target", "none")),
+        )
+        return
+
+    if action == "switch_provider_review":
+        await query.answer()
+        await _show_switch_provider_review_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            provider=str(payload["provider"]),
+            back_target=str(payload.get("back_target", "none")),
+        )
+        return
+
+    if action == "switch_workspace_review":
+        await query.answer()
+        await _show_switch_workspace_review_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            workspace_id=str(payload["workspace_id"]),
+            back_target=str(payload.get("back_target", "none")),
+        )
+        return
+
     if action == "recover_workspace_search":
         await query.answer()
         await _show_workspace_search_prompt_from_callback(
@@ -13029,6 +13314,7 @@ async def _dispatch_callback_action(
             await query.answer(_unauthorized_text(), show_alert=True)
             return
         workspace = services.config.agent.resolve_workspace(payload["workspace_id"])
+        back_target = str(payload.get("back_target", "none"))
         pending_upload_notice = _discard_pending_uploads_for_transition(ui_state, user_id)
         await query.answer()
         await _edit_query_message(query, f"Switching workspace to {workspace.label}...")
@@ -13038,26 +13324,18 @@ async def _dispatch_callback_action(
                 CALLBACK_OPERATION_TIMEOUT_SECONDS,
             )
         except Exception:
-            try:
-                await _show_switch_workspace_menu_from_callback(
-                    query,
-                    services,
-                    ui_state,
-                    user_id=user_id,
-                    back_target=str(payload.get("back_target", "none")),
-                    notice=_prefixed_notice_text(
-                        pending_upload_notice,
-                        _switch_workspace_failed_text(),
-                    ),
-                )
-            except Exception:
-                await _edit_query_message(
-                    query,
-                    _prefixed_notice_text(
-                        pending_upload_notice,
-                        _switch_workspace_failed_text(),
-                    ),
-                )
+            await _show_switch_workspace_result_from_callback(
+                query,
+                services,
+                ui_state,
+                user_id=user_id,
+                workspace_id=workspace.id,
+                back_target=back_target,
+                notice=_prefixed_notice_text(
+                    pending_upload_notice,
+                    _switch_workspace_failed_text(),
+                ),
+            )
             return
         ui_state.invalidate_runtime_bound_interactions()
         state = await services.snapshot_runtime_state()
@@ -13070,26 +13348,15 @@ async def _dispatch_callback_action(
                 f"{_switch_workspace_success_detail_text()}"
             ),
         )
-        if str(payload.get("back_target", "none")) == "status":
-            await _show_runtime_status_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                notice=success_text,
-            )
-            return
-        try:
-            await _show_switch_workspace_menu_from_callback(
-                query,
-                services,
-                ui_state,
-                user_id=user_id,
-                back_target=str(payload.get("back_target", "none")),
-                notice=success_text,
-            )
-        except Exception:
-            await _edit_query_message(query, success_text)
+        await _show_switch_workspace_result_from_callback(
+            query,
+            services,
+            ui_state,
+            user_id=user_id,
+            workspace_id=workspace.id,
+            back_target=back_target,
+            notice=success_text,
+        )
         return
 
     if action == "history_page":
@@ -15862,6 +16129,14 @@ def _build_history_view(
             "Start a new session to create reusable checkpoints, or open Bot Status to keep "
             "working from the current runtime."
         )
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+        )
+        lines.extend(recovery_lines)
         buttons.append(
             [
                 _callback_button(
@@ -15873,6 +16148,7 @@ def _build_history_view(
                 )
             ]
         )
+        buttons.extend(recovery_buttons)
         if show_provider_sessions:
             buttons.append(
                 [
@@ -16228,6 +16504,15 @@ def _build_provider_sessions_view(
     if not supported:
         lines.append("Provider session browsing is not available for this agent.")
         lines.append("Use Session History for bot-local checkpoints, or keep working from Bot Status.")
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+        )
+        lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
         if back_target != "status":
             buttons.append(
                 [
@@ -16244,6 +16529,14 @@ def _build_provider_sessions_view(
         lines.append(
             "Start or reuse a live session, then refresh here if the provider persists reusable sessions."
         )
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+        )
+        lines.extend(recovery_lines)
         buttons.append(
             [
                 _callback_button(
@@ -16256,9 +16549,10 @@ def _build_provider_sessions_view(
                     history_page=history_page,
                     back_target=back_target,
                     history_back_target=history_back_target,
-                )
-            ]
-        )
+                    )
+                ]
+            )
+        buttons.extend(recovery_buttons)
         if back_target != "status":
             buttons.append(
                 [
@@ -16700,6 +16994,7 @@ def _build_last_request_view(
     last_request: _LastRequestText | None,
     last_turn_available: bool,
     current_provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     ui_state: TelegramUiState,
@@ -16717,6 +17012,19 @@ def _build_last_request_view(
     buttons: list[list[InlineKeyboardButton]] = []
     if last_request is None:
         lines.append("No request text is cached for this workspace.")
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=current_provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+            empty_recommendation=(
+                "Recommended next step: send a fresh request from chat, or use the buttons below "
+                "to go back."
+            ),
+        )
+        lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
         _append_back_to_status_button(
             buttons,
             ui_state=ui_state,
@@ -16943,6 +17251,7 @@ def _build_last_turn_view(
     *,
     replay_turn: _ReplayTurn | None,
     current_provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     page: int,
@@ -16961,6 +17270,19 @@ def _build_last_turn_view(
     buttons: list[list[InlineKeyboardButton]] = []
     if replay_turn is None:
         lines.append("No replayable turn is cached.")
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=current_provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+            empty_recommendation=(
+                "Recommended next step: send a request that finishes a turn, or use the buttons "
+                "below to go back."
+            ),
+        )
+        lines.extend(recovery_lines)
+        buttons.extend(recovery_buttons)
         _append_back_to_status_button(
             buttons,
             ui_state=ui_state,
@@ -17215,6 +17537,7 @@ def _build_plan_view(
     *,
     entries,
     provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     page: int,
@@ -17235,6 +17558,32 @@ def _build_plan_view(
     buttons = []
     if not entries:
         lines.append("No cached agent plan.")
+        lines.append("Plans appear here after the agent publishes structured plan updates for this session.")
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+            empty_recommendation=(
+                "Recommended next step: send a request that needs planning, refresh this page "
+                "later, or use the buttons below to go back."
+            ),
+        )
+        lines.extend(recovery_lines)
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Refresh",
+                    "plan_page",
+                    page=0,
+                    back_target=back_target,
+                )
+            ]
+        )
+        buttons.extend(recovery_buttons)
         _append_back_to_status_button(
             buttons,
             ui_state=ui_state,
@@ -17379,6 +17728,7 @@ def _build_tool_activity_view(
     *,
     activities,
     provider: str,
+    workspace_id: str,
     workspace_label: str,
     user_id: int,
     page: int,
@@ -17399,6 +17749,35 @@ def _build_tool_activity_view(
     buttons = []
     if not activities:
         lines.append("No recent tool activity.")
+        lines.append(
+            "Tool activity appears here after the agent uses terminal, files, or other tools in "
+            "this session."
+        )
+        recovery_lines, recovery_buttons = _workspace_recovery_actions(
+            ui_state=ui_state,
+            user_id=user_id,
+            provider=provider,
+            workspace_id=workspace_id,
+            back_target=back_target,
+            empty_recommendation=(
+                "Recommended next step: send a request that needs tool use, refresh this page "
+                "later, or use the buttons below to go back."
+            ),
+        )
+        lines.extend(recovery_lines)
+        buttons.append(
+            [
+                _callback_button(
+                    ui_state,
+                    user_id,
+                    "Refresh",
+                    "tool_activity_page",
+                    page=0,
+                    back_target=back_target,
+                )
+            ]
+        )
+        buttons.extend(recovery_buttons)
         _append_back_to_status_button(
             buttons,
             ui_state=ui_state,

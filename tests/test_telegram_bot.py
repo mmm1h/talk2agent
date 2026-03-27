@@ -4280,6 +4280,67 @@ def test_bot_status_can_open_last_request_and_back_to_status():
     assert find_inline_button(restored_markup, "Last Request")
 
 
+def test_last_request_empty_state_surfaces_workspace_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        _build_last_request_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the rollout summary"),),
+            title_hint="Review the rollout summary",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+
+    text, markup = _build_last_request_view(
+        last_request=None,
+        last_turn_available=True,
+        current_provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        ui_state=ui_state,
+        back_target="status",
+    )
+
+    assert text.startswith("Last request for Codex in Default Workspace")
+    assert "No request text is cached for this workspace." in text
+    assert "Reusable in this workspace: Last Turn and Context Bundle." in text
+    assert (
+        "Recommended next step: Retry / Fork Last Turn if you need the saved payload back, or "
+        "Ask Agent With Context to keep working with the current bundle."
+        in text
+    )
+    assert "Recovery options:" in text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message and uses that bundle."
+        in text
+    )
+    assert find_inline_button(markup, "Retry Last Turn")
+    assert find_inline_button(markup, "Fork Last Turn")
+    assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Open Context Bundle")
+    assert find_inline_button(markup, "Back to Bot Status")
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "Run Last Request" not in labels
+
+
 def test_bot_status_last_request_view_can_run_last_request_and_return_to_status():
     from talk2agent.bots.telegram_bot import (
         BUTTON_BOT_STATUS,
@@ -4551,6 +4612,58 @@ def test_bot_status_can_open_last_turn_and_back_to_status():
     restored_text, restored_markup = callback_message.edit_calls[-1]
     assert restored_text.startswith("Bot status for Codex in Default Workspace")
     assert find_inline_button(restored_markup, "Last Turn")
+
+
+def test_last_turn_empty_state_surfaces_workspace_recovery_actions():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _build_last_turn_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the rollout summary")
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+
+    text, markup = _build_last_turn_view(
+        replay_turn=None,
+        current_provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        back_target="status",
+    )
+
+    assert text.startswith("Last turn for Codex in Default Workspace")
+    assert "No replayable turn is cached." in text
+    assert "Reusable in this workspace: Last Request and Context Bundle." in text
+    assert (
+        "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
+        "current bundle, or Ask Agent With Context if you want to send new text with it."
+        in text
+    )
+    assert "Recovery options:" in text
+    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in text
+    )
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Bundle + Last Request")
+    assert find_inline_button(markup, "Open Context Bundle")
+    assert find_inline_button(markup, "Back to Bot Status")
+    labels = [button.text for row in markup.inline_keyboard for button in row]
+    assert "Retry Last Turn" not in labels
+    assert "Fork Last Turn" not in labels
 
 
 def test_last_turn_item_detail_can_open_and_back():
@@ -5166,6 +5279,53 @@ def test_bot_status_can_open_agent_plan_and_back_to_status():
     assert find_inline_button(restored_markup, "Agent Plan")
 
 
+def test_agent_plan_empty_state_offers_refresh_and_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import TelegramUiState, _ReplayTurn, _build_plan_view
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the rollout summary")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="codex",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the rollout summary"),),
+            title_hint="Review the rollout summary",
+        ),
+    )
+
+    text, markup = _build_plan_view(
+        entries=(),
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        session_id="session-live",
+        back_target="status",
+    )
+
+    assert text.startswith("Agent plan for Codex in Default Workspace")
+    assert "Session: session-live" in text
+    assert "No cached agent plan." in text
+    assert "Plans appear here after the agent publishes structured plan updates for this session." in text
+    assert (
+        "Recommended next step: Run Last Request if the saved text is enough, or Retry / Fork "
+        "Last Turn if you need the full saved payload."
+        in text
+    )
+    assert "Recovery options:" in text
+    assert "Run Last Request can start a live session again from the saved text." in text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
+    assert find_inline_button(markup, "Refresh")
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Retry Last Turn")
+    assert find_inline_button(markup, "Fork Last Turn")
+    assert find_inline_button(markup, "Back to Bot Status")
+
+
 def test_agent_plan_detail_can_open_and_back():
     from talk2agent.bots.telegram_bot import (
         BUTTON_BOT_STATUS,
@@ -5343,6 +5503,62 @@ def test_bot_status_can_open_tool_activity_and_back_to_status():
     restored_text, restored_markup = callback_message.edit_calls[-1]
     assert restored_text.startswith("Bot status for Codex in Default Workspace")
     assert find_inline_button(restored_markup, "Tool Activity")
+
+
+def test_tool_activity_empty_state_offers_refresh_and_recovery_actions():
+    from talk2agent.bots.telegram_bot import (
+        TelegramUiState,
+        _ContextBundleItem,
+        _build_tool_activity_view,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the rollout summary")
+    ui_state.add_context_item(
+        123,
+        "codex",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+
+    text, markup = _build_tool_activity_view(
+        activities=(),
+        provider="codex",
+        workspace_id="default",
+        workspace_label="Default Workspace",
+        user_id=123,
+        page=0,
+        ui_state=ui_state,
+        session_id="session-live",
+        back_target="status",
+    )
+
+    assert text.startswith("Tool activity for Codex in Default Workspace")
+    assert "Session: session-live" in text
+    assert "No recent tool activity." in text
+    assert (
+        "Tool activity appears here after the agent uses terminal, files, or other tools in this "
+        "session."
+        in text
+    )
+    assert (
+        "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
+        "current bundle, or Ask Agent With Context if you want to send new text with it."
+        in text
+    )
+    assert "Recovery options:" in text
+    assert "Run Last Request can start a live session again from the saved text." in text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in text
+    )
+    assert find_inline_button(markup, "Refresh")
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Bundle + Last Request")
+    assert find_inline_button(markup, "Open Context Bundle")
+    assert find_inline_button(markup, "Back to Bot Status")
 
 
 def test_tool_activity_view_shows_visible_range_when_paginated():
@@ -8239,6 +8455,10 @@ def test_bot_status_switch_agent_retry_returns_to_status():
     switch_update = FakeCallbackUpdate(123, switch_button.callback_data, message=callback_message)
     run(handle_callback_query(switch_update, None, services, ui_state))
 
+    review_button = find_inline_button(callback_message.edit_calls[-1][1], "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=callback_message)
+    run(handle_callback_query(review_update, None, services, ui_state))
+
     retry_button = find_inline_button(callback_message.edit_calls[-1][1], "Retry on Gemini CLI")
     retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
     run(handle_callback_query(retry_update, make_context(application=FakeApplication()), services, ui_state))
@@ -8283,6 +8503,10 @@ def test_bot_status_switch_agent_fork_returns_to_status():
     switch_button = find_inline_button(update.message.reply_markups[0], "Switch Agent")
     switch_update = FakeCallbackUpdate(123, switch_button.callback_data, message=callback_message)
     run(handle_callback_query(switch_update, None, services, ui_state))
+
+    review_button = find_inline_button(callback_message.edit_calls[-1][1], "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=callback_message)
+    run(handle_callback_query(review_update, None, services, ui_state))
 
     fork_button = find_inline_button(callback_message.edit_calls[-1][1], "Fork on Gemini CLI")
     fork_update = FakeCallbackUpdate(123, fork_button.callback_data, message=callback_message)
@@ -8334,6 +8558,10 @@ def test_bot_status_switch_agent_retry_failure_restores_status():
     switch_update = FakeCallbackUpdate(123, switch_button.callback_data, message=callback_message)
     run(handle_callback_query(switch_update, None, services, ui_state))
 
+    review_button = find_inline_button(callback_message.edit_calls[-1][1], "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=callback_message)
+    run(handle_callback_query(review_update, None, services, ui_state))
+
     retry_button = find_inline_button(callback_message.edit_calls[-1][1], "Retry on Gemini CLI")
     retry_update = FakeCallbackUpdate(123, retry_button.callback_data, message=callback_message)
     run(handle_callback_query(retry_update, None, services, ui_state))
@@ -8381,6 +8609,10 @@ def test_bot_status_switch_agent_fork_creation_failure_restores_status():
     switch_button = find_inline_button(update.message.reply_markups[0], "Switch Agent")
     switch_update = FakeCallbackUpdate(123, switch_button.callback_data, message=callback_message)
     run(handle_callback_query(switch_update, None, services, ui_state))
+
+    review_button = find_inline_button(callback_message.edit_calls[-1][1], "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=callback_message)
+    run(handle_callback_query(review_update, None, services, ui_state))
 
     fork_button = find_inline_button(callback_message.edit_calls[-1][1], "Fork on Gemini CLI")
     fork_update = FakeCallbackUpdate(123, fork_button.callback_data, message=callback_message)
@@ -9697,7 +9929,7 @@ def test_bot_status_switch_agent_can_open_and_back_to_status():
     )
     assert "- Context bundle does not follow an agent switch." in switch_text
     assert "Available agents: 3" in switch_text
-    assert "Choose a provider below to switch the shared runtime now." in switch_text
+    assert "Open a provider below to review the switch impact before you confirm it." in switch_text
     assert "Provider capabilities:" in switch_text
     assert find_inline_button(switch_markup, "Back to Bot Status")
 
@@ -9735,6 +9967,18 @@ def test_bot_status_switch_agent_success_returns_to_status():
     provider_button = find_inline_button(callback_message.edit_calls[-1][1], "Gemini CLI")
     provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=callback_message)
     run(handle_callback_query(provider_update, None, services, ui_state))
+
+    review_text, review_markup = callback_message.edit_calls[-1]
+    assert review_text.startswith(
+        "Switch agent review: Gemini CLI\n"
+        "Current provider: Codex\n"
+        "Workspace: Default Workspace\n"
+        "Admin action: confirming here changes the shared agent runtime for every Telegram user.\n"
+        "Target capability summary:"
+    )
+    switch_now_button = find_inline_button(review_markup, "Switch to Gemini CLI")
+    confirm_update = FakeCallbackUpdate(123, switch_now_button.callback_data, message=callback_message)
+    run(handle_callback_query(confirm_update, None, services, ui_state))
 
     final_text, final_markup = callback_message.edit_calls[-1]
     assert_switch_agent_success_notice(final_text, provider="Gemini CLI")
@@ -9774,7 +10018,7 @@ def test_bot_status_switch_workspace_can_open_and_back_to_status():
         in switch_text
     )
     assert "Configured workspaces: 2" in switch_text
-    assert "Choose a workspace below to switch the shared runtime there." in switch_text
+    assert "Open a workspace below to review what stays behind before you confirm the switch." in switch_text
     assert find_inline_button(switch_markup, "Back to Bot Status")
 
     back_update = FakeCallbackUpdate(
@@ -9812,6 +10056,19 @@ def test_bot_status_switch_workspace_success_returns_to_status():
     workspace_update = FakeCallbackUpdate(123, workspace_button.callback_data, message=callback_message)
     run(handle_callback_query(workspace_update, None, services, ui_state))
 
+    review_text, review_markup = callback_message.edit_calls[-1]
+    assert review_text.startswith(
+        "Switch workspace review: Alt Workspace\n"
+        "Current provider: Codex\n"
+        "Current workspace: Default Workspace\n"
+        "Admin action: confirming here changes the shared workspace for every Telegram user.\n"
+        "Target workspace ID: alt\n"
+        "Switch impact:"
+    )
+    switch_now_button = find_inline_button(review_markup, "Switch to Alt Workspace")
+    confirm_update = FakeCallbackUpdate(123, switch_now_button.callback_data, message=callback_message)
+    run(handle_callback_query(confirm_update, None, services, ui_state))
+
     final_text, final_markup = callback_message.edit_calls[-1]
     assert_switch_workspace_success_notice(final_text, workspace="Alt Workspace", provider="Codex")
     assert "Bot status for Codex in Alt Workspace" in final_text
@@ -9821,10 +10078,11 @@ def test_bot_status_switch_workspace_success_returns_to_status():
 def test_switch_agent_button_shows_provider_choices():
     from talk2agent.bots.telegram_bot import BUTTON_SWITCH_AGENT, TelegramUiState, handle_text
 
+    ui_state = TelegramUiState()
     update = FakeUpdate(user_id=123, text=BUTTON_SWITCH_AGENT)
     services, _ = make_services(provider="codex", admin_user_id=123)
 
-    run(handle_text(update, None, services, TelegramUiState()))
+    run(handle_text(update, None, services, ui_state))
 
     switch_text = update.message.reply_calls[0]
     assert switch_text.startswith(
@@ -9836,7 +10094,7 @@ def test_switch_agent_button_shows_provider_choices():
         "- Context bundle does not follow an agent switch.\n"
         "- After switching, send a fresh request or open Bot Status to keep going.\n"
         "Available agents: 3\n"
-        "Choose a provider below to switch the shared runtime now.\n"
+        "Open a provider below to review the switch impact before you confirm it.\n"
         "Provider capabilities:"
     )
     assert "- Claude Code: img=yes audio=no docs=yes sessions=list/resume/fork" in switch_text
@@ -9852,13 +10110,14 @@ def test_switch_agent_button_shows_provider_choices():
     assert labels == ["Claude Code", "Current: Codex", "Gemini CLI"]
 
 
-def test_switch_agent_button_shows_replay_shortcuts_when_last_turn_exists():
+def test_switch_agent_button_moves_replay_shortcuts_to_review_screen_when_last_turn_exists():
     from talk2agent.acp.agent_session import PromptText
     from talk2agent.bots.telegram_bot import (
         BUTTON_SWITCH_AGENT,
         TelegramUiState,
         _ContextBundleItem,
         _ReplayTurn,
+        handle_callback_query,
         handle_text,
     )
 
@@ -9889,21 +10148,25 @@ def test_switch_agent_button_shows_replay_shortcuts_when_last_turn_exists():
     assert "- Last Turn stays available in this workspace: hello" in switch_text
     assert "Available agents: 3" in switch_text
     assert (
-        "Choose a provider below. Retry on ... replays the last turn in this workspace; Fork "
-        "on ... starts a new session there first."
+        "Open a provider below to review the switch. The next screen lets you switch now, retry "
+        "the last turn there, or fork it on the new agent."
         in switch_text
     )
     markup = update.message.reply_markups[0]
     labels = [button.text for row in markup.inline_keyboard for button in row]
-    assert labels == [
-        "Claude Code",
-        "Retry on Claude Code",
-        "Fork on Claude Code",
-        "Current: Codex",
-        "Gemini CLI",
-        "Retry on Gemini CLI",
-        "Fork on Gemini CLI",
-    ]
+    assert labels == ["Claude Code", "Current: Codex", "Gemini CLI"]
+
+    review_button = find_inline_button(markup, "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=FakeIncomingMessage("switch"))
+    run(handle_callback_query(review_update, None, services, ui_state))
+
+    review_text, review_markup = review_update.callback_query.message.edit_calls[-1]
+    assert review_text.startswith("Switch agent review: Gemini CLI")
+    assert "Retry / Fork to move the shared runtime and immediately replay the last turn." in review_text
+    assert find_inline_button(review_markup, "Switch to Gemini CLI")
+    assert find_inline_button(review_markup, "Retry on Gemini CLI")
+    assert find_inline_button(review_markup, "Fork on Gemini CLI")
+    assert find_inline_button(review_markup, "Back to Switch Agent")
 
 
 def test_switch_agent_button_hides_replay_shortcuts_when_last_turn_workspace_differs():
@@ -9931,8 +10194,14 @@ def test_switch_agent_button_hides_replay_shortcuts_when_last_turn_workspace_dif
 
 
 def test_switch_agent_button_shows_unavailable_provider_capability_summary():
-    from talk2agent.bots.telegram_bot import BUTTON_SWITCH_AGENT, TelegramUiState, handle_text
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SWITCH_AGENT,
+        TelegramUiState,
+        handle_callback_query,
+        handle_text,
+    )
 
+    ui_state = TelegramUiState()
     update = FakeUpdate(user_id=123, text=BUTTON_SWITCH_AGENT)
     services, _ = make_services(
         provider="codex",
@@ -9962,7 +10231,7 @@ def test_switch_agent_button_shows_unavailable_provider_capability_summary():
         },
     )
 
-    run(handle_text(update, None, services, TelegramUiState()))
+    run(handle_text(update, None, services, ui_state))
 
     switch_text = update.message.reply_calls[0]
     assert switch_text.startswith(
@@ -9974,12 +10243,27 @@ def test_switch_agent_button_shows_unavailable_provider_capability_summary():
         "- Context bundle does not follow an agent switch.\n"
         "- After switching, send a fresh request or open Bot Status to keep going.\n"
         "Available agents: 3\n"
-        "Choose a provider below to switch the shared runtime now.\n"
+        "Open a provider below to review the switch impact before you confirm it.\n"
         "Provider capabilities:"
     )
     assert "- Claude Code: unavailable (command missing)" in switch_text
     assert "* Codex [current]: img=yes audio=yes docs=yes sessions=list/resume/fork" in switch_text
     assert "- Gemini CLI: unavailable (session creation failed)" in switch_text
+
+    review_button = find_inline_button(update.message.reply_markups[0], "Claude Code")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=FakeIncomingMessage("switch"))
+    run(handle_callback_query(review_update, None, services, ui_state))
+
+    review_text, review_markup = review_update.callback_query.message.edit_calls[-1]
+    assert review_text.startswith("Switch agent review: Claude Code")
+    assert "- Claude Code: unavailable (command missing)" in review_text
+    assert (
+        "Recommended next step: choose another agent, or fix this provider and reopen Switch Agent."
+        in review_text
+    )
+    labels = [button.text for row in review_markup.inline_keyboard for button in row]
+    assert "Switch to Claude Code" not in labels
+    assert find_inline_button(review_markup, "Back to Switch Agent")
 
 
 def test_callback_switch_provider_current_provider_is_noop():
@@ -10002,7 +10286,7 @@ def test_callback_switch_provider_current_provider_is_noop():
     assert callback_update.callback_query.message.edit_calls == []
 
 
-def test_callback_switch_provider_failure_restores_switch_menu():
+def test_callback_switch_provider_failure_restores_switch_review():
     from talk2agent.bots.telegram_bot import CALLBACK_PREFIX, TelegramUiState, handle_callback_query
 
     ui_state = TelegramUiState()
@@ -10018,9 +10302,11 @@ def test_callback_switch_provider_failure_restores_switch_menu():
     final_text, final_markup = message.edit_calls[-1]
     assert final_text.startswith(
         "Couldn't switch agent. Try again or choose another agent.\n"
+        "Switch agent review: Gemini CLI\n"
         "Current provider: Claude Code"
     )
-    assert find_inline_button(final_markup, "Gemini CLI")
+    assert find_inline_button(final_markup, "Switch to Gemini CLI")
+    assert find_inline_button(final_markup, "Back to Switch Agent")
 
 
 def test_switch_workspace_button_shows_choices_and_switches():
@@ -10066,12 +10352,23 @@ def test_switch_workspace_button_shows_choices_and_switches():
     )
     assert "Current workspace state that will stay behind: Context Bundle (1 item), Last Request, Last Turn." in switch_text
     assert "Configured workspaces: 2" in switch_text
-    assert "Choose a workspace below to switch the shared runtime there." in switch_text
+    assert "Open a workspace below to review what stays behind before you confirm the switch." in switch_text
     markup = update.message.reply_markups[0]
     alt_button = markup.inline_keyboard[1][0]
     callback_update = FakeCallbackUpdate(123, alt_button.callback_data, message=FakeIncomingMessage("workspace"))
 
     run(handle_callback_query(callback_update, None, services, ui_state))
+
+    review_text, review_markup = callback_update.callback_query.message.edit_calls[-1]
+    assert review_text.startswith("Switch workspace review: Alt Workspace")
+    assert "Target workspace ID: alt" in review_text
+    confirm_button = find_inline_button(review_markup, "Switch to Alt Workspace")
+    confirm_update = FakeCallbackUpdate(
+        123,
+        confirm_button.callback_data,
+        message=callback_update.callback_query.message,
+    )
+    run(handle_callback_query(confirm_update, None, services, ui_state))
 
     assert services.switch_workspace_calls == ["alt"]
     final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
@@ -10095,14 +10392,25 @@ def test_switch_workspace_failure_shows_actionable_recovery_copy():
 
     run(handle_callback_query(callback_update, None, services, ui_state))
 
+    review_markup = callback_update.callback_query.message.edit_calls[-1][1]
+    confirm_button = find_inline_button(review_markup, "Switch to Alt Workspace")
+    confirm_update = FakeCallbackUpdate(
+        123,
+        confirm_button.callback_data,
+        message=callback_update.callback_query.message,
+    )
+    run(handle_callback_query(confirm_update, None, services, ui_state))
+
     assert services.switch_workspace_calls == ["alt"]
     final_text, final_markup = callback_update.callback_query.message.edit_calls[-1]
     assert final_text.startswith(
         "Couldn't switch workspace. Try again or choose another workspace.\n"
+        "Switch workspace review: Alt Workspace\n"
         "Current provider: Claude Code\n"
         "Current workspace: Default Workspace"
     )
-    assert find_inline_button(final_markup, "Alt Workspace")
+    assert find_inline_button(final_markup, "Switch to Alt Workspace")
+    assert find_inline_button(final_markup, "Back to Switch Workspace")
 
 
 def test_switch_workspace_failure_discards_pending_media_group_before_attempting_switch():
@@ -10136,10 +10444,12 @@ def test_switch_workspace_failure_discards_pending_media_group_before_attempting
     assert final_text.startswith(
         "Discarded pending attachment group (1 item). Nothing was sent to the agent.\n"
         "Couldn't switch workspace. Try again or choose another workspace.\n"
+        "Switch workspace review: Alt Workspace\n"
         "Current provider: Claude Code\n"
         "Current workspace: Default Workspace"
     )
-    assert find_inline_button(final_markup, "Alt Workspace")
+    assert find_inline_button(final_markup, "Switch to Alt Workspace")
+    assert find_inline_button(final_markup, "Back to Switch Workspace")
     assert ui_state.pending_media_group_stats(123) is None
     assert services.final_session.prompt_items == []
 
@@ -10197,7 +10507,11 @@ def test_callback_switch_provider_fork_last_turn_switches_then_replays_in_new_se
 
     run(handle_text(menu_update, None, services, ui_state))
 
-    fork_button = find_inline_button(menu_update.message.reply_markups[0], "Fork on Gemini CLI")
+    review_button = find_inline_button(menu_update.message.reply_markups[0], "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=message)
+    run(handle_callback_query(review_update, None, services, ui_state))
+
+    fork_button = find_inline_button(message.edit_calls[-1][1], "Fork on Gemini CLI")
 
     async def switched_snapshot_runtime_state():
         return SimpleNamespace(
@@ -10214,9 +10528,11 @@ def test_callback_switch_provider_fork_last_turn_switches_then_replays_in_new_se
 
     assert services.switch_provider_calls == ["gemini"]
     assert store.reset_calls == [123]
-    assert message.edit_calls[0][0] == "Switching to Gemini CLI..."
-    assert_switch_agent_success_notice(message.edit_calls[1][0], provider="Gemini CLI")
-    assert message.edit_calls[1][0].endswith("Forking last turn on the new agent...")
+    edited_texts = [text for text, _ in message.edit_calls]
+    assert edited_texts[0].startswith("Switch agent review: Gemini CLI")
+    assert edited_texts[1] == "Switching to Gemini CLI..."
+    assert_switch_agent_success_notice(edited_texts[2], provider="Gemini CLI")
+    assert edited_texts[2].endswith("Forking last turn on the new agent...")
     assert len(services.final_session.prompt_items) == 1
     assert services.final_session.prompt_items[0] == (PromptText("hello"),)
     assert message.reply_calls == ["hello world"]
@@ -10258,9 +10574,13 @@ def test_callback_switch_provider_retry_last_turn_without_previous_turn_restores
     services, _ = make_services(provider="codex", admin_user_id=123)
 
     run(handle_text(menu_update, None, services, ui_state))
-    ui_state._last_turns.pop(123, None)
 
-    retry_button = find_inline_button(menu_update.message.reply_markups[0], "Retry on Gemini CLI")
+    review_button = find_inline_button(menu_update.message.reply_markups[0], "Gemini CLI")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=message)
+    run(handle_callback_query(review_update, None, services, ui_state))
+
+    retry_button = find_inline_button(message.edit_calls[-1][1], "Retry on Gemini CLI")
+    ui_state._last_turns.pop(123, None)
     callback_update = FakeCallbackUpdate(123, retry_button.callback_data, message=message)
     run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
 
@@ -11080,11 +11400,74 @@ def test_session_history_empty_state_offers_new_session_and_status_recovery():
         "Session history for Claude Code in Default Workspace\n"
         "No local session history yet.\n"
         "Start a new session to create reusable checkpoints, or open Bot Status to keep "
-        "working from the current runtime."
+        "working from the current runtime.\n"
+        "Recommended next step: send text or an attachment from chat to start a live session, "
+        "or use the buttons below to go back."
     )
     markup = update.message.reply_markups[0]
     assert find_inline_button(markup, "New Session")
     assert find_inline_button(markup, "Provider Sessions")
+    assert find_inline_button(markup, "Open Bot Status")
+
+
+def test_session_history_empty_state_surfaces_workspace_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "claude",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(history_entries=[], peek_session=None)
+
+    run(handle_text(update, None, services, ui_state))
+
+    text = update.message.reply_calls[0]
+    assert text.startswith("Session history for Claude Code in Default Workspace")
+    assert "No local session history yet." in text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in text
+    assert (
+        "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
+        "current bundle, or Retry / Fork Last Turn if you need the saved payload back."
+        in text
+    )
+    assert "Recovery options:" in text
+    assert "Run Last Request can start a live session again from the saved text." in text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in text
+    )
+    markup = update.message.reply_markups[0]
+    assert find_inline_button(markup, "New Session")
+    assert find_inline_button(markup, "Provider Sessions")
+    assert find_inline_button(markup, "Run Last Request")
+    assert find_inline_button(markup, "Retry Last Turn")
+    assert find_inline_button(markup, "Fork Last Turn")
+    assert find_inline_button(markup, "Ask Agent With Context")
+    assert find_inline_button(markup, "Bundle + Last Request")
+    assert find_inline_button(markup, "Open Context Bundle")
     assert find_inline_button(markup, "Open Bot Status")
 
 
@@ -11723,7 +12106,9 @@ def test_provider_sessions_show_unsupported_message():
         "Provider sessions for Claude Code in Default Workspace\n"
         "Only sessions inside the current workspace are shown. This list comes from the provider, not the bot's local history.\n"
         "Provider session browsing is not available for this agent.\n"
-        "Use Session History for bot-local checkpoints, or keep working from Bot Status."
+        "Use Session History for bot-local checkpoints, or keep working from Bot Status.\n"
+        "Recommended next step: send text or an attachment from chat to start a live session, "
+        "or use the buttons below to go back."
     )
     assert find_inline_button(provider_markup, "Open Bot Status")
     assert find_inline_button(provider_markup, "Back to History")
@@ -11752,9 +12137,150 @@ def test_provider_sessions_empty_state_offers_refresh_and_status_recovery():
         "Provider sessions for Claude Code in Default Workspace\n"
         "Only sessions inside the current workspace are shown. This list comes from the provider, not the bot's local history.\n"
         "No provider sessions found.\n"
-        "Start or reuse a live session, then refresh here if the provider persists reusable sessions."
+        "Start or reuse a live session, then refresh here if the provider persists reusable sessions.\n"
+        "Recommended next step: send text or an attachment from chat to start a live session, "
+        "or use the buttons below to go back."
     )
     assert find_inline_button(provider_markup, "Refresh")
+    assert find_inline_button(provider_markup, "Open Bot Status")
+    assert find_inline_button(provider_markup, "Back to History")
+
+
+def test_provider_sessions_unsupported_state_surfaces_workspace_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "claude",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={
+            None: SimpleNamespace(entries=tuple(), next_cursor=None, supported=False),
+        },
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
+    run(handle_callback_query(provider_update, None, services, ui_state))
+
+    provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
+    assert provider_text.startswith("Provider sessions for Claude Code in Default Workspace")
+    assert "Provider session browsing is not available for this agent." in provider_text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in provider_text
+    assert (
+        "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
+        "current bundle, or Retry / Fork Last Turn if you need the saved payload back."
+        in provider_text
+    )
+    assert "Recovery options:" in provider_text
+    assert "Run Last Request can start a live session again from the saved text." in provider_text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in provider_text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in provider_text
+    )
+    assert find_inline_button(provider_markup, "Run Last Request")
+    assert find_inline_button(provider_markup, "Retry Last Turn")
+    assert find_inline_button(provider_markup, "Fork Last Turn")
+    assert find_inline_button(provider_markup, "Ask Agent With Context")
+    assert find_inline_button(provider_markup, "Bundle + Last Request")
+    assert find_inline_button(provider_markup, "Open Context Bundle")
+    assert find_inline_button(provider_markup, "Open Bot Status")
+    assert find_inline_button(provider_markup, "Back to History")
+
+
+def test_provider_sessions_empty_state_surfaces_workspace_recovery_actions():
+    from talk2agent.acp.agent_session import PromptText
+    from talk2agent.bots.telegram_bot import (
+        BUTTON_SESSION_HISTORY,
+        TelegramUiState,
+        _ContextBundleItem,
+        _ReplayTurn,
+        handle_callback_query,
+        handle_text,
+    )
+
+    ui_state = TelegramUiState()
+    ui_state.set_last_request_text(123, "default", "Review the cached request")
+    ui_state.set_last_turn(
+        123,
+        _ReplayTurn(
+            provider="claude",
+            workspace_id="default",
+            prompt_items=(PromptText("Review the cached request"),),
+            title_hint="Review the cached request",
+        ),
+    )
+    ui_state.add_context_item(
+        123,
+        "claude",
+        "default",
+        _ContextBundleItem(kind="file", relative_path="notes.txt"),
+    )
+    update = FakeUpdate(user_id=123, text=BUTTON_SESSION_HISTORY)
+    services, _ = make_services(
+        history_entries=[build_history_entry("session-1", "First")],
+        provider_session_pages={
+            None: SimpleNamespace(entries=tuple(), next_cursor=None, supported=True),
+        },
+    )
+
+    run(handle_text(update, None, services, ui_state))
+
+    provider_button = find_inline_button(update.message.reply_markups[0], "Provider Sessions")
+    provider_update = FakeCallbackUpdate(123, provider_button.callback_data, message=FakeIncomingMessage("history"))
+    run(handle_callback_query(provider_update, None, services, ui_state))
+
+    provider_text, provider_markup = provider_update.callback_query.message.edit_calls[-1]
+    assert provider_text.startswith("Provider sessions for Claude Code in Default Workspace")
+    assert "No provider sessions found." in provider_text
+    assert "Reusable in this workspace: Last Request, Last Turn, and Context Bundle." in provider_text
+    assert (
+        "Recommended next step: use Bundle + Last Request to reuse the saved request with the "
+        "current bundle, or Retry / Fork Last Turn if you need the saved payload back."
+        in provider_text
+    )
+    assert "Recovery options:" in provider_text
+    assert "Run Last Request can start a live session again from the saved text." in provider_text
+    assert "Retry / Fork Last Turn can rebuild the saved payload in this workspace." in provider_text
+    assert (
+        "Context bundle ready: 1 item. Ask Agent With Context waits for your next plain-text "
+        "message, and Bundle + Last Request reuses the saved text with that bundle."
+        in provider_text
+    )
+    assert find_inline_button(provider_markup, "Refresh")
+    assert find_inline_button(provider_markup, "Run Last Request")
+    assert find_inline_button(provider_markup, "Retry Last Turn")
+    assert find_inline_button(provider_markup, "Fork Last Turn")
+    assert find_inline_button(provider_markup, "Ask Agent With Context")
+    assert find_inline_button(provider_markup, "Bundle + Last Request")
+    assert find_inline_button(provider_markup, "Open Context Bundle")
     assert find_inline_button(provider_markup, "Open Bot Status")
     assert find_inline_button(provider_markup, "Back to History")
 
@@ -15720,7 +16246,11 @@ def test_callback_switch_provider_retry_last_turn_recoerces_attachment_for_new_p
 
     run(handle_text(menu_update, None, services, ui_state))
 
-    retry_button = find_inline_button(menu_update.message.reply_markups[0], "Retry on Claude Code")
+    review_button = find_inline_button(menu_update.message.reply_markups[0], "Claude Code")
+    review_update = FakeCallbackUpdate(123, review_button.callback_data, message=switch_message)
+    run(handle_callback_query(review_update, None, services, ui_state))
+
+    retry_button = find_inline_button(switch_message.edit_calls[-1][1], "Retry on Claude Code")
 
     async def switched_snapshot_runtime_state():
         return SimpleNamespace(
@@ -15736,9 +16266,11 @@ def test_callback_switch_provider_retry_last_turn_recoerces_attachment_for_new_p
     run(handle_callback_query(callback_update, make_context(application=FakeApplication()), services, ui_state))
 
     assert services.switch_provider_calls == ["claude"]
-    assert switch_message.edit_calls[0][0] == "Switching to Claude Code..."
-    assert_switch_agent_success_notice(switch_message.edit_calls[1][0], provider="Claude Code")
-    assert switch_message.edit_calls[1][0].endswith("Retrying last turn on the new agent...")
+    edited_texts = [text for text, _ in switch_message.edit_calls]
+    assert edited_texts[0].startswith("Switch agent review: Claude Code")
+    assert edited_texts[1] == "Switching to Claude Code..."
+    assert_switch_agent_success_notice(edited_texts[2], provider="Claude Code")
+    assert edited_texts[2].endswith("Retrying last turn on the new agent...")
     assert len(session.prompt_items) == 2
     first_prompt_items = session.prompt_items[0]
     second_prompt_items = session.prompt_items[1]

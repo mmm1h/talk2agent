@@ -31,11 +31,13 @@
    如果该 `Last Request` 或 `Last Turn` 最初记录在另一个 Provider 上，再确认状态页会明确提示这次重放将落到当前 Provider，而不是让用户自己猜。
 10. 执行 `Switch Agent`，确认切换前有预检，切换菜单会明确提示旧按钮 / 待输入会被清理、`Context Bundle` 不会跟随切换，而同 workspace 下的 `Last Turn` / `Last Request` 仍可继续复用；切换后旧 UI 动作立即失效。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
-   再确认菜单会显示 `Available agents`，并在存在可复用 `Last Turn` 时直接解释 `Retry on ...` / `Fork on ...` 的差别，而不是只把按钮堆出来让管理员自己猜。
+   再确认菜单会显示 `Available agents`，但第一层只负责列出目标；点进单个 provider 后，详情页才会集中展示能力摘要、`Switch to ...`、`Retry on ...`、`Fork on ...`，避免管理员在列表页误触就立刻切换。
+   从主键盘直接进入这条流时，再确认切换成功或失败后仍会停留在当前目标详情页，并保留 `Switch to ...` 或 `Back to Switch Agent` 这类下一步按钮；如果入口来自 `Bot Status`，则应回到状态页并保留同样的 notice。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 agent。
 11. 执行 `Switch Workspace`，确认只显示白名单 workspace，并且切换跨重启持久化；切换菜单和成功回显都要明确提示 workspace 作用域内的 `Context Bundle`、`Last Request`、`Last Turn` 不会跟到新 workspace。
    同时确认菜单顶部会明确写出这是影响所有 Telegram 用户的全局切换，而不是当前聊天私有动作。
-   再确认菜单会显示 `Configured workspaces`，避免管理员在多 workspace 环境下只看到按钮列表却不知道还有多少目标可切。
+   再确认菜单会显示 `Configured workspaces`，并且点进单个 workspace 后要先看到目标详情与影响说明，再通过 `Switch to ...` 真正确认切换，避免管理员在多 workspace 环境下误切。
+   从主键盘直接进入这条流时，再确认切换成功或失败后仍会停留在当前目标详情页，并保留 `Switch to ...` 或 `Back to Switch Workspace` 这类下一步按钮；如果入口来自 `Bot Status`，则应回到状态页并保留同样的 notice。
    额外在 `media_group` 仍处于收集窗口内时执行一次，确认 bot 会先明确提示已丢弃待发送上传，且这些旧附件不会在几百毫秒后误发到新 workspace。
 12. 使用一个未授权 Telegram 账号访问 bot，确认提示会明确说明需要联系操作者开通访问。
 
@@ -46,11 +48,13 @@
    额外在 `media_group` 仍处于收集窗口内时分别执行一次，确认 bot 会先提示已丢弃待发送上传，而不是让旧附件继续流入新 session。
    如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认成功回显会明确说明哪些内容仍可复用；若 `Bundle Chat` 仍开启，也要明确提醒下一条纯文本仍会自动带上当前 bundle，避免把“新 session”误解成“所有上下文已清空”。
 3. 打开 `Session History`，确认可以浏览、切换、分叉、重命名和删除本地历史会话。
-   额外在本地历史为空时打开一次，确认空状态会直接给出 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，而不是只显示一句“没有历史”。
+   额外在本地历史为空时打开一次，确认空状态会直接给出 `New Session`、`Provider Sessions`（管理员）和 `Open Bot Status`，并补一行 `Recommended next step`，而不是只显示一句“没有历史”。
+   如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认这个空状态会继续先补一行更贴近当前可复用内容的 `Recommended next step`，再补上 `Recovery options`，并直接给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 或 `Open Context Bundle`。
    再确认列表和详情都会明确解释 `Run`、`Fork`、`Run+Retry`、`Fork+Retry` 的差别，而不是只堆按钮缩写。
    如果历史记录超过一页，再确认页首会显示 `Local sessions`、`Showing` 和 `Page`，让用户知道总共有多少条、当前页覆盖哪一段，而不是只剩 `Prev` / `Next`。
 4. 如果 Provider 支持原生 session 浏览，打开 `Provider Sessions`，确认可以接管或分叉 provider 侧 session。
-   再分别制造“当前 agent 不支持 provider session browsing”和“当前页暂时没有任何 provider session”两种空状态，确认视图会解释原因，并保留 `Refresh` 或 `Open Bot Status` 恢复入口，而不是只留一句空文案。
+   再分别制造“当前 agent 不支持 provider session browsing”和“当前页暂时没有任何 provider session”两种空状态，确认视图会解释原因，并保留 `Refresh` 或 `Open Bot Status` 恢复入口，同时补一行 `Recommended next step`，而不是只留一句空文案。
+   如果当前 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`，再确认这些 provider-session 空状态也会继续先补一行更贴近当前可复用内容的 `Recommended next step`，再补上 `Recovery options`，让管理员能直接继续工作，而不用先退回 `Bot Status`。
    同时确认列表和详情都会明确解释 `Run` 是接管 provider session、`Fork` 是基于它开新分支，`Run+Retry` / `Fork+Retry` 会在切换后立刻重放上一轮。
    如果 provider session 列表存在多页，再确认页首会显示当前页加载数量和 `Cursor page`，避免管理员翻页后失去方向感。
 5. 验证 `Retry Last Turn` 和 `Fork Last Turn` 会复用上一轮保存的 replay payload。
@@ -100,6 +104,7 @@
    同时确认 `Last Turn` 详情会额外解释 `Retry Last Turn` 是在当前 live session 里重放整轮 payload，而 `Fork Last Turn` 会先开新 session 再重放。
    如果 `Last Turn`、`Agent Plan` 或 `Tool Activity` 超过一页，再确认页首会显示总数、`Showing` 和 `Page`，避免只读排查长列表时失去位置感。
    额外在“当前没有 live session，但 workspace 还留有 `Last Request`、`Last Turn` 或 `Context Bundle`”的场景下，再打开 `Session Info`、`Usage` 或无命令的 `Agent Commands`，确认页面会补上 `Recovery options`，并直接给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context` 或 `Bundle + Last Request`，而不是只剩返回按钮。
+   再额外制造一次“刚刚还能点开 `Last Request` / `Last Turn` / `Agent Plan` / `Tool Activity`，但实际打开时数据已经失效或暂时为空”的场景，确认页面不会只剩一句 `No ...`；它仍会给出 `Run Last Request`、`Retry / Fork Last Turn`、`Ask Agent With Context`、`Bundle + Last Request` 或 `Refresh` 这类下一步动作，而不是把用户困在空页里。
 
 ## 附件与长回合
 
